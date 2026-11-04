@@ -1,7 +1,7 @@
 //! The original SurrealDB getting-started examples.
 //!
 //! Run with `cargo run --example getting_started`.
-//! Uses the same `./data` database as the graph server, so stop the server first:
+//! Uses the same `./data` database as the graph app, so close the app first:
 //! only one program can have the database open at a time.
 
 use surrealdb::types::{RecordId, SurrealValue};

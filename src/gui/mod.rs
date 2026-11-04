@@ -1,8 +1,4 @@
-//! Native desktop viewer for the SurrealDB graph, built with iced.
-//!
-//! Run with `cargo run --features gui --bin graph-gui`.
-//! Like the web server, it keeps the `./data` database open while running,
-//! so only one of them can run at a time.
+//! The iced desktop app: window, sidebar, graph canvas and layout.
 
 mod app;
 mod canvas;
@@ -11,7 +7,8 @@ mod model;
 
 use app::App;
 
-fn main() -> iced::Result {
+/// Opens the window and runs until it is closed.
+pub fn run() -> iced::Result {
     iced::application(App::boot, App::update, App::view)
         .title("SurrealDB graph")
         .subscription(App::subscription)

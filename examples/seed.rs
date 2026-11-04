@@ -1,7 +1,7 @@
 //! Fills the database with sample data for the graph: a few people with
 //! `knows` relations between them, and a company two of them link to.
 //!
-//! Run with `cargo run --example seed`. Stop the graph server first: only one
+//! Run with `cargo run --example seed`. Close the graph app first: only one
 //! program can have the database open at a time.
 //!
 //! Safe to run repeatedly: records are upserted and relations are recreated.

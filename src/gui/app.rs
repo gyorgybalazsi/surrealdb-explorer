@@ -7,9 +7,9 @@ use iced::{Color, Element, Fill, Font, Point, Subscription, Task, Theme, Vector,
 use surrealdb_explore::db::{self, Database};
 use surrealdb_explore::graph::{self, GraphData, MAX_PER_TABLE};
 
-use crate::canvas::{Camera, GraphView};
-use crate::layout::Layout;
-use crate::model::Graph;
+use crate::gui::canvas::{Camera, GraphView};
+use crate::gui::layout::Layout;
+use crate::gui::model::Graph;
 
 const SIDEBAR_WIDTH: f32 = 320.0;
 const MUTED: Color = Color::from_rgb(0.47, 0.47, 0.47);
@@ -45,8 +45,10 @@ pub enum Message {
 }
 
 pub struct App {
-    /// Runs the database queries. Its threads get the bigger stack that
-    /// embedded SurrealDB needs (see src/main.rs).
+    /// Runs the database queries. Embedded SurrealDB needs a bigger stack than
+    /// tokio worker threads get by default (2 MB); SurrealDB's docs recommend
+    /// 10 MB. With the default, queries run on worker threads spun forever at
+    /// 100% CPU here. See https://docs.rs/surrealdb/latest/surrealdb/engine/local/index.html
     runtime: tokio::runtime::Runtime,
     db: Option<Database>,
     graph: Graph,

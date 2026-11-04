@@ -13,7 +13,7 @@ use surrealdb::types::Value;
 
 use crate::db::Database;
 
-/// Most records loaded per table, so a big table can't freeze the browser.
+/// Most records loaded per table, so a big table can't freeze the app.
 pub const MAX_PER_TABLE: usize = 1000;
 
 /// Loads every table in the database as graph data.

@@ -7,7 +7,7 @@
 
 use iced::Vector;
 
-use crate::model::Graph;
+use crate::gui::model::Graph;
 
 const REPULSION: f32 = 6000.0;
 const SPRING: f32 = 0.04;

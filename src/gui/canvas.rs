@@ -8,8 +8,8 @@ use iced::widget::canvas::{self, Action, Event, Frame, Geometry, Path, Stroke, T
 use iced::widget::text::Alignment;
 use iced::{Color, Point, Rectangle, Renderer, Theme, Vector};
 
-use crate::app::{Message, Selection};
-use crate::model::Graph;
+use crate::gui::app::{Message, Selection};
+use crate::gui::model::Graph;
 
 const NODE_RADIUS: f32 = 9.0;
 const ARROW_LENGTH: f32 = 9.0;
