@@ -1,0 +1,23 @@
+body { margin: 0; font-family: -apple-system, system-ui, sans-serif; display: flex; height: 100vh; color: #222; }
+#graph { flex: 1; background: #fafafa; }
+aside { width: 300px; padding: 16px; border-left: 1px solid #ddd; overflow-y: auto; font-size: 14px; }
+h1 { font-size: 16px; margin: 0 0 4px; }
+h2 { font-size: 13px; margin: 16px 0 6px; color: #555; text-transform: uppercase; letter-spacing: .04em; }
+.legend div { margin: 2px 0; }
+.swatch { display: inline-block; width: 12px; height: 12px; border-radius: 50%; vertical-align: middle; margin-right: 6px; }
+.line { display: inline-block; width: 22px; vertical-align: middle; margin-right: 6px; border-top: 2px solid #999; }
+.hint { color: #777; font-size: 12px; }
+.hint.indent { margin: 0 0 6px 28px; }
+.warn { color: #a60; font-size: 12px; }
+pre { background: #f3f3f3; padding: 8px; border-radius: 4px; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+ul { margin: 0; padding-left: 18px; }
+#error { color: #b00; }
+button.link { background: none; border: none; padding: 0; color: #4a90d9; cursor: pointer; font: inherit; }
+
+/* Right-click menu */
+.menu { position: fixed; z-index: 10; min-width: 180px; background: #fff; border: 1px solid #ddd; border-radius: 6px;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, .12); padding: 4px 0; font-size: 14px; }
+.menu .title { padding: 6px 12px 8px; font-weight: 600; border-bottom: 1px solid #eee; margin-bottom: 4px; }
+.menu .title .swatch { margin-right: 8px; }
+.menu button { display: block; width: 100%; text-align: left; background: none; border: none; padding: 6px 12px; font: inherit; cursor: pointer; }
+.menu button:hover { background: #f0f4fa; }
