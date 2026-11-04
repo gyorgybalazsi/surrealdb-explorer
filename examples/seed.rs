@@ -10,7 +10,7 @@
 use surrealdb_explore::db;
 
 #[tokio::main]
-async fn main() -> surrealdb::Result<()> {
+async fn main() -> Result<(), surrealdb_explore::Error> {
     let db = db::connect().await?;
 
     db.query(

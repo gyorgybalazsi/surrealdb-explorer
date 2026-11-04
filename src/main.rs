@@ -3,7 +3,7 @@
 
 use surrealdb_explore::{db, graph, server};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), surrealdb_explore::Error> {
     // Embedded SurrealDB needs a bigger stack than tokio worker threads get by
     // default (2 MB); SurrealDB's docs recommend 10 MB. With the default, queries
     // run from web requests spun forever at 100% CPU here.
@@ -15,7 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .block_on(run())
 }
 
-async fn run() -> Result<(), Box<dyn std::error::Error>> {
+async fn run() -> Result<(), surrealdb_explore::Error> {
     let db = db::connect().await?;
 
     let loaded = graph::load(&db).await?;

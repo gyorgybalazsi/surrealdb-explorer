@@ -46,7 +46,7 @@ struct MarketingGroup {
 }
 
 #[tokio::main]
-async fn main() -> surrealdb::Result<()> {
+async fn main() -> Result<(), surrealdb_explore::Error> {
     // Open the project's database (SurrealKV in ./data, namespace and database "main")
     let db = db::connect().await?;
 

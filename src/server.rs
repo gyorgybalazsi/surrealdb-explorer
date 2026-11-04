@@ -14,7 +14,7 @@ use crate::graph;
 const ADDRESS: &str = "127.0.0.1:3000";
 
 /// Serves the graph page until the program is stopped, and opens it in the browser.
-pub async fn serve(db: Database) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn serve(db: Database) -> Result<(), crate::Error> {
     let app = Router::new()
         .route("/", get(index))
         .route("/style.css", get(style))
