@@ -7,7 +7,7 @@ mod model;
 mod records;
 mod tables;
 
-pub use model::GraphData;
+pub use model::{GraphData, GraphEdge, GraphNode};
 
 use surrealdb::types::Value;
 
