@@ -1,10 +1,9 @@
-//! Explores a SurrealDB database as a graph: opening the (encrypted) database
+//! Explores a SurrealDB database as a graph: opening the database
 //! and turning its records into nodes and edges. The desktop app is in `src/main.rs`.
 
 pub mod config;
 pub mod db;
 pub mod graph;
-pub mod key;
 pub mod logging;
 pub mod query;
 

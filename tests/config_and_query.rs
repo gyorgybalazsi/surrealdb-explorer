@@ -1,6 +1,5 @@
 //! Tests for the configuration file and for running queries.
-//! They use a temporary, unencrypted database, so they never touch `./data`
-//! or the Keychain.
+//! They use a temporary database, so they never touch `./data`.
 
 use std::path::PathBuf;
 
@@ -59,7 +58,6 @@ fn queries_report_each_statement_and_the_graph_sees_the_changes() {
     runtime.block_on(async {
         let config = DatabaseConfig {
             path: dir.join("data").to_string_lossy().into_owned(),
-            encryption: false,
             ..DatabaseConfig::default()
         };
         let db = db::connect(&config).await.unwrap();

@@ -47,7 +47,6 @@ pub enum Message {
     OpenSettings,
     CloseSettings,
     SettingChanged(SettingsField, String),
-    EncryptionToggled(bool),
     SaveSettings,
 
     // Query panel
@@ -207,11 +206,6 @@ impl App {
             Message::SettingChanged(field, value) => {
                 if let Some(form) = &mut self.settings {
                     form.set(field, value);
-                }
-            }
-            Message::EncryptionToggled(on) => {
-                if let Some(form) = &mut self.settings {
-                    form.encryption = on;
                 }
             }
             Message::SaveSettings => self.save_settings(),

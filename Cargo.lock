@@ -6499,8 +6499,6 @@ dependencies = [
  "serde",
  "serde_json",
  "surrealdb",
- "surrealdb-kvs-surrealkv",
- "surrealkv",
  "tokio",
  "toml",
  "tracing",
@@ -6676,6 +6674,8 @@ dependencies = [
 [[package]]
 name = "surrealdb-kvs-surrealkv"
 version = "4.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7a80df7ecea58cf6f3b83436f2c206ee17872f0f9c7f6eaeb8aff34bf81c3c4"
 dependencies = [
  "affinitypool",
  "chrono",

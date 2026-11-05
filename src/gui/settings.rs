@@ -1,6 +1,6 @@
 //! The settings view: edits `config.toml`.
 
-use iced::widget::{Column, button, checkbox, column, pick_list, row, scrollable, text, text_input};
+use iced::widget::{Column, button, column, pick_list, row, scrollable, text, text_input};
 use iced::{Element, Fill};
 use surrealdb_explore::config::{
     CONFIG_FILE, Config, DatabaseConfig, GraphConfig, LOG_LEVELS, LoggingConfig,
@@ -15,7 +15,6 @@ pub enum SettingsField {
     DatabasePath,
     Namespace,
     Database,
-    KeychainService,
     MaxRecords,
     LogLevel,
     LogDirectory,
@@ -26,8 +25,6 @@ pub struct SettingsForm {
     pub database_path: String,
     pub namespace: String,
     pub database: String,
-    pub encryption: bool,
-    pub keychain_service: String,
     pub max_records: String,
     pub log_level: String,
     pub log_directory: String,
@@ -41,8 +38,6 @@ impl SettingsForm {
             database_path: c.database.path.clone(),
             namespace: c.database.namespace.clone(),
             database: c.database.database.clone(),
-            encryption: c.database.encryption,
-            keychain_service: c.database.keychain_service.clone(),
             max_records: c.graph.max_records_per_table.to_string(),
             log_level: c.logging.level.clone(),
             log_directory: c.logging.directory.clone(),
@@ -55,7 +50,6 @@ impl SettingsForm {
             SettingsField::DatabasePath => &mut self.database_path,
             SettingsField::Namespace => &mut self.namespace,
             SettingsField::Database => &mut self.database,
-            SettingsField::KeychainService => &mut self.keychain_service,
             SettingsField::MaxRecords => &mut self.max_records,
             SettingsField::LogLevel => &mut self.log_level,
             SettingsField::LogDirectory => &mut self.log_directory,
@@ -76,8 +70,6 @@ impl SettingsForm {
                 path: self.database_path.trim().into(),
                 namespace: self.namespace.trim().into(),
                 database: self.database.trim().into(),
-                encryption: self.encryption,
-                keychain_service: self.keychain_service.trim().into(),
             },
             graph: GraphConfig { max_records_per_table },
             logging: LoggingConfig {
@@ -115,27 +107,6 @@ impl SettingsForm {
         col = col.push(field("Folder", "Relative to the folder the app runs from.", &self.database_path, SettingsField::DatabasePath));
         col = col.push(field("Namespace", "", &self.namespace, SettingsField::Namespace));
         col = col.push(field("Database", "", &self.database, SettingsField::Database));
-        col = col.push(
-            checkbox(self.encryption)
-                .label("Encrypted at rest")
-                .on_toggle(Message::EncryptionToggled)
-                .size(16)
-                .text_size(13),
-        );
-        col = col.push(
-            text("Must match how the folder was created: an encrypted folder needs the key, an unencrypted one can't be opened with it.")
-                .size(11)
-                .color(MUTED),
-        );
-        if self.encryption {
-            col = col.push(field(
-                "Keychain service",
-                "Keychain item holding the key. A new name creates a new key.",
-                &self.keychain_service,
-                SettingsField::KeychainService,
-            ));
-        }
-
         col = col.push(heading("Graph"));
         col = col.push(field(
             "Max records per table",

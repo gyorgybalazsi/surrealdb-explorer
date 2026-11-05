@@ -30,11 +30,6 @@ pub struct DatabaseConfig {
     pub path: String,
     pub namespace: String,
     pub database: String,
-    /// Encrypt the database at rest with a key from the macOS Keychain.
-    /// Must match how the database folder was created.
-    pub encryption: bool,
-    /// Keychain item (service name) holding the encryption key.
-    pub keychain_service: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -69,8 +64,6 @@ impl Default for DatabaseConfig {
             path: "data".into(),
             namespace: "main".into(),
             database: "main".into(),
-            encryption: true,
-            keychain_service: "surrealdb-explore".into(),
         }
     }
 }
@@ -131,9 +124,6 @@ impl Config {
         let d = &self.database;
         if d.path.trim().is_empty() || d.namespace.trim().is_empty() || d.database.trim().is_empty() {
             return Err("database path, namespace and database must not be empty".into());
-        }
-        if d.encryption && d.keychain_service.trim().is_empty() {
-            return Err("the Keychain service name must not be empty when encryption is on".into());
         }
         if self.graph.max_records_per_table == 0 {
             return Err("max records per table must be at least 1".into());
