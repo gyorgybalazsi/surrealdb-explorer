@@ -177,7 +177,7 @@ fn data_section(pending: Option<DataAction>, busy: bool, connected: bool) -> Ele
             let (question, confirm, style): (&str, &str, fn(&iced::Theme, button::Status) -> button::Style) =
                 match action {
                     DataAction::LoadSampleData => (
-                        "Add the sample people, company and relations? This deletes all existing `knows` relations; other data is kept.",
+                        "Add the sample people and their relations? This deletes all existing `knows` relations; other data is kept.",
                         "Load sample data",
                         button::primary,
                     ),

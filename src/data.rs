@@ -7,7 +7,7 @@ use crate::db::Database;
 /// The sample data, from `src/seed.surql`.
 pub const SAMPLE_DATA: &str = include_str!("seed.surql");
 
-/// Adds the sample people, company and `knows` relations. Deletes all
+/// Adds the sample people and their `knows` relations. Deletes all
 /// existing `knows` relations first; other data is kept.
 pub async fn load_sample_data(db: &Database) -> Result<(), Error> {
     db.query(SAMPLE_DATA).await?.check()?;

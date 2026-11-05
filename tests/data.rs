@@ -12,12 +12,12 @@ fn sample_data_loads_repeatably_and_erase_empties_the_database() {
 
         data::load_sample_data(&db).await.unwrap();
         let g = graph::load(&db, 1000).await.unwrap();
-        assert_eq!((g.nodes.len(), g.edges.len()), (7, 7));
+        assert_eq!((g.nodes.len(), g.edges.len()), (6, 7));
 
         // Loading again doesn't duplicate anything.
         data::load_sample_data(&db).await.unwrap();
         let g = graph::load(&db, 1000).await.unwrap();
-        assert_eq!((g.nodes.len(), g.edges.len()), (7, 7));
+        assert_eq!((g.nodes.len(), g.edges.len()), (6, 7));
 
         data::erase(&db, &config).await.unwrap();
         let g = graph::load(&db, 1000).await.unwrap();
@@ -26,7 +26,7 @@ fn sample_data_loads_repeatably_and_erase_empties_the_database() {
         // The erased database is usable straight away.
         data::load_sample_data(&db).await.unwrap();
         let g = graph::load(&db, 1000).await.unwrap();
-        assert_eq!((g.nodes.len(), g.edges.len()), (7, 7));
+        assert_eq!((g.nodes.len(), g.edges.len()), (6, 7));
     });
 }
 
@@ -47,6 +47,6 @@ fn a_closed_database_folder_can_be_reopened_in_the_same_process() {
 
         let again = db::connect(&first).await.expect("the first folder opens again");
         let g = graph::load(&again, 1000).await.unwrap();
-        assert_eq!(g.nodes.len(), 7);
+        assert_eq!(g.nodes.len(), 6);
     });
 }
