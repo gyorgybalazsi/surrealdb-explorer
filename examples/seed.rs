@@ -7,11 +7,14 @@
 //! Safe to run repeatedly: records are upserted and relations are recreated.
 //! Note that it deletes all existing `knows` relations before adding the sample ones.
 
+use surrealdb_explore::config::Config;
 use surrealdb_explore::db;
 
 #[tokio::main]
 async fn main() -> Result<(), surrealdb_explore::Error> {
-    let db = db::connect().await?;
+    // Same database as the app, from config.toml
+    let (config, _) = Config::load_or_create()?;
+    let db = db::connect(&config.database).await?;
 
     db.query(
         "

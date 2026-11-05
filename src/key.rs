@@ -1,7 +1,8 @@
 //! The database encryption key, kept in the macOS Keychain.
 //!
 //! On first use a random 256-bit key is created and stored as a generic
-//! password (service `surrealdb-explore`, account `data-encryption-key`).
+//! password (service from the config, by default `surrealdb-explore`;
+//! account `data-encryption-key`).
 //! Afterwards it is read from there. Keychain Access shows the item, and
 //! deleting it makes the encrypted database unreadable for good.
 
@@ -13,25 +14,26 @@ use surrealkv::SoftwareKeyManager;
 
 use crate::Error;
 
-const SERVICE: &str = "surrealdb-explore";
 const ACCOUNT: &str = "data-encryption-key";
 /// Exit code of `security find-generic-password` when there is no such item.
 const NOT_FOUND: i32 = 44;
 
 /// Installs the encryption key for every database this process opens.
 /// Call before opening the database; later calls do nothing.
-pub fn install() -> Result<(), Error> {
-    let hex = load_or_create()?;
+pub fn install(service: &str) -> Result<(), Error> {
+    let hex = load_or_create(service)?;
     let manager = SoftwareKeyManager::from_hex(&hex)
         .map_err(|e| format!("the key in the Keychain is not a valid encryption key: {e}"))?;
-    surrealdb_kvs_surrealkv::set_key_manager(Arc::new(manager));
+    if surrealdb_kvs_surrealkv::set_key_manager(Arc::new(manager)) {
+        tracing::info!(service, "encryption key installed");
+    }
     Ok(())
 }
 
 /// The key as 64 hex digits, from the Keychain, or a new one stored there.
-fn load_or_create() -> Result<String, Error> {
+fn load_or_create(service: &str) -> Result<String, Error> {
     let found = Command::new("security")
-        .args(["find-generic-password", "-s", SERVICE, "-a", ACCOUNT, "-w"])
+        .args(["find-generic-password", "-s", service, "-a", ACCOUNT, "-w"])
         .output()?;
     if found.status.success() {
         return Ok(String::from_utf8(found.stdout)?.trim().to_string());
@@ -48,7 +50,7 @@ fn load_or_create() -> Result<String, Error> {
     // `security` takes the secret as an argument; it is visible to other
     // processes of this user only for the moment the command runs, once.
     let stored = Command::new("security")
-        .args(["add-generic-password", "-s", SERVICE, "-a", ACCOUNT, "-w", &hex])
+        .args(["add-generic-password", "-s", service, "-a", ACCOUNT, "-w", &hex])
         .args(["-D", "database encryption key", "-j", "Encrypts the surrealdb-explore database at rest"])
         .output()?;
     if !stored.status.success() {
@@ -58,7 +60,11 @@ fn load_or_create() -> Result<String, Error> {
         )
         .into());
     }
-    eprintln!("Created a new database encryption key in the Keychain ({SERVICE} / {ACCOUNT}).");
+    tracing::warn!(
+        service,
+        account = ACCOUNT,
+        "created a new database encryption key in the Keychain; back it up, the data can't be read without it"
+    );
     Ok(hex)
 }
 

@@ -1,20 +1,20 @@
-//! Window state, the sidebar and the record menu.
+//! Window state and message handling. The views are in `sidebar.rs`,
+//! `settings.rs` and `query_panel.rs`.
 
-use iced::widget::{
-    Column, button, canvas, column, container, pin, row, rule, scrollable, stack, text,
-};
+use std::collections::HashSet;
+
+use iced::widget::{button, canvas, column, container, pin, row, rule, stack, text, text_editor};
 use iced::{Color, Element, Fill, Font, Point, Subscription, Task, Theme, Vector, window};
+use surrealdb_explore::config::Config;
 use surrealdb_explore::db::{self, Database};
-use surrealdb_explore::graph::{self, GraphData, MAX_PER_TABLE};
+use surrealdb_explore::graph::{self, GraphData};
+use surrealdb_explore::query::{self, QueryOutcome};
+use tracing::{debug, error, info, warn};
 
 use crate::gui::canvas::{Camera, GraphView};
 use crate::gui::layout::Layout;
 use crate::gui::model::Graph;
-
-const SIDEBAR_WIDTH: f32 = 320.0;
-const MUTED: Color = Color::from_rgb(0.47, 0.47, 0.47);
-const WARNING: Color = Color::from_rgb(0.67, 0.4, 0.0);
-const ERROR: Color = Color::from_rgb(0.7, 0.0, 0.0);
+use crate::gui::settings::{SettingsField, SettingsForm};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Selection {
@@ -42,6 +42,20 @@ pub enum Message {
     MenuCopy,
     ShowAll,
     Reload,
+
+    // Settings
+    OpenSettings,
+    CloseSettings,
+    SettingChanged(SettingsField, String),
+    EncryptionToggled(bool),
+    SaveSettings,
+
+    // Query panel
+    ToggleQuery,
+    QueryEdited(text_editor::Action),
+    RunQuery,
+    QueryDone(QueryOutcome),
+    ShowQueryInGraph,
 }
 
 pub struct App {
@@ -49,32 +63,49 @@ pub struct App {
     /// tokio worker threads get by default (2 MB); SurrealDB's docs recommend
     /// 10 MB. With the default, queries run on worker threads spun forever at
     /// 100% CPU here. See https://docs.rs/surrealdb/latest/surrealdb/engine/local/index.html
-    runtime: tokio::runtime::Runtime,
-    db: Option<Database>,
-    graph: Graph,
-    layout: Layout,
-    camera: Camera,
-    hover: Option<usize>,
-    selection: Option<Selection>,
+    pub(super) runtime: tokio::runtime::Runtime,
+    pub(super) db: Option<Database>,
+    /// The configuration the app is running with.
+    pub(super) config: Config,
+
+    pub(super) graph: Graph,
+    pub(super) layout: Layout,
+    pub(super) camera: Camera,
+    pub(super) hover: Option<usize>,
+    pub(super) selection: Option<Selection>,
     /// Open record menu: the record and where it was right-clicked.
-    menu: Option<(usize, Point)>,
-    dragging: Option<usize>,
-    error: Option<String>,
-    notice: Option<String>,
+    pub(super) menu: Option<(usize, Point)>,
+    pub(super) dragging: Option<usize>,
+    pub(super) error: Option<String>,
+    pub(super) notice: Option<String>,
+
+    /// The settings being edited, while the settings view is open.
+    pub(super) settings: Option<SettingsForm>,
+
+    pub(super) query_open: bool,
+    pub(super) query_text: text_editor::Content,
+    pub(super) query_running: bool,
+    pub(super) query_outcome: Option<QueryOutcome>,
 }
 
 impl App {
-    pub fn boot() -> App {
+    /// `startup_error` is a problem found before the window opened (such as
+    /// an invalid config file), shown in the sidebar.
+    pub fn boot(config: Config, startup_error: Option<String>) -> App {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .thread_stack_size(10 * 1024 * 1024)
             .build()
             .expect("failed to start the async runtime");
 
-        let (db, data, error) = match runtime.block_on(db::connect()) {
-            Ok(db) => match runtime.block_on(graph::load(&db)) {
+        let limit = config.graph.max_records_per_table;
+        let (db, data, error) = match runtime.block_on(db::connect(&config.database)) {
+            Ok(db) => match runtime.block_on(graph::load(&db, limit)) {
                 Ok(data) => (Some(db), data, None),
-                Err(e) => (Some(db), GraphData::default(), Some(e.to_string())),
+                Err(e) => {
+                    error!(error = %e, "could not load the graph");
+                    (Some(db), GraphData::default(), Some(e.to_string()))
+                }
             },
             Err(e) => (None, GraphData::default(), Some(format!("Could not open the database: {e}"))),
         };
@@ -82,6 +113,7 @@ impl App {
         App {
             runtime,
             db,
+            config,
             graph: Graph::new(data, None),
             layout: Layout::new(),
             camera: Camera::default(),
@@ -89,8 +121,13 @@ impl App {
             selection: None,
             menu: None,
             dragging: None,
-            error,
+            error: startup_error.or(error),
             notice: None,
+            settings: None,
+            query_open: false,
+            query_text: text_editor::Content::with_text("SELECT * FROM person;"),
+            query_running: false,
+            query_outcome: None,
         }
     }
 
@@ -135,6 +172,7 @@ impl App {
             }
             Message::MenuHide => {
                 if let Some((node, _)) = self.menu.take() {
+                    debug!(record = %self.graph.nodes[node].id, "hide record");
                     self.hide(node);
                 }
             }
@@ -156,9 +194,44 @@ impl App {
                 for n in &mut self.graph.nodes {
                     n.hidden = false;
                 }
+                self.notice = None;
                 self.layout.reheat(0.3);
             }
             Message::Reload => self.reload(),
+
+            Message::OpenSettings => {
+                self.settings = Some(SettingsForm::from_config(&self.config));
+                self.menu = None;
+            }
+            Message::CloseSettings => self.settings = None,
+            Message::SettingChanged(field, value) => {
+                if let Some(form) = &mut self.settings {
+                    form.set(field, value);
+                }
+            }
+            Message::EncryptionToggled(on) => {
+                if let Some(form) = &mut self.settings {
+                    form.encryption = on;
+                }
+            }
+            Message::SaveSettings => self.save_settings(),
+
+            Message::ToggleQuery => self.query_open = !self.query_open,
+            Message::QueryEdited(action) => self.query_text.perform(action),
+            Message::RunQuery => return self.run_query(),
+            Message::QueryDone(outcome) => {
+                self.query_running = false;
+                let changed_anything = outcome
+                    .statements
+                    .as_ref()
+                    .is_ok_and(|s| s.iter().any(|r| r.result.is_ok()));
+                self.query_outcome = Some(outcome);
+                // The query may have changed data; show the current state.
+                if changed_anything {
+                    self.reload();
+                }
+            }
+            Message::ShowQueryInGraph => self.show_query_in_graph(),
         }
         Task::none()
     }
@@ -182,19 +255,106 @@ impl App {
     /// Reads the database again; records already on screen keep their place.
     fn reload(&mut self) {
         let Some(db) = &self.db else { return };
-        match self.runtime.block_on(graph::load(db)) {
+        let limit = self.config.graph.max_records_per_table;
+        match self.runtime.block_on(graph::load(db, limit)) {
             Ok(data) => {
                 self.graph = Graph::new(data, Some(&self.graph));
                 self.error = None;
                 self.notice = Some("Reloaded".into());
             }
-            Err(e) => self.error = Some(e.to_string()),
+            Err(e) => {
+                error!(error = %e, "could not reload the graph");
+                self.error = Some(e.to_string());
+            }
         }
         self.hover = None;
         self.selection = None;
         self.menu = None;
         self.dragging = None;
         self.layout.reheat(0.5);
+    }
+
+    fn save_settings(&mut self) {
+        let Some(form) = &mut self.settings else { return };
+        let new = match form.to_config() {
+            Ok(config) => config,
+            Err(e) => {
+                form.message = Some(Err(e));
+                return;
+            }
+        };
+        if let Err(e) = new.save() {
+            warn!(error = %e, "could not save settings");
+            form.message = Some(Err(e.to_string()));
+            return;
+        }
+        info!(?new, "settings saved");
+
+        let needs_restart =
+            new.database != self.config.database || new.logging != self.config.logging;
+        let limit_changed = new.graph != self.config.graph;
+        // Only the record limit can change while running; the rest applies on restart.
+        self.config.graph = new.graph.clone();
+        form.message = Some(Ok(if needs_restart {
+            "Saved. Restart the app for database and logging changes to take effect.".into()
+        } else {
+            "Saved.".into()
+        }));
+        if limit_changed {
+            self.reload();
+        }
+    }
+
+    fn run_query(&mut self) -> Task<Message> {
+        let sql = self.query_text.text();
+        let Some(db) = self.db.clone() else { return Task::none() };
+        if sql.trim().is_empty() || self.query_running {
+            return Task::none();
+        }
+        self.query_running = true;
+        // Run on our runtime (big thread stacks, see `runtime`), and only
+        // wait for the result on iced's side, so the window stays responsive.
+        let handle = self.runtime.spawn(async move { query::run(&db, sql).await });
+        Task::perform(
+            async move {
+                handle.await.unwrap_or_else(|e| QueryOutcome {
+                    statements: Err(format!("the query task failed: {e}")),
+                    elapsed: Default::default(),
+                })
+            },
+            Message::QueryDone,
+        )
+    }
+
+    /// Hides every record the last query didn't return. Relations it
+    /// returned bring both of their records along.
+    fn show_query_in_graph(&mut self) {
+        let Some(outcome) = &self.query_outcome else { return };
+        let ids: HashSet<String> = query::record_ids(outcome).into_iter().collect();
+        let mut keep: HashSet<usize> = self
+            .graph
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| ids.contains(&n.id))
+            .map(|(i, _)| i)
+            .collect();
+        for e in self.graph.edges.iter().filter(|e| ids.contains(&e.id)) {
+            keep.insert(e.from);
+            keep.insert(e.to);
+        }
+        if keep.is_empty() {
+            self.notice = Some("None of the query's records are in the graph.".into());
+            return;
+        }
+        for (i, n) in self.graph.nodes.iter_mut().enumerate() {
+            n.hidden = !keep.contains(&i);
+        }
+        info!(records = keep.len(), "showing query results in the graph");
+        self.notice = Some(format!("Showing {} from the query.", plural(keep.len(), "record")));
+        self.selection = None;
+        self.hover = None;
+        self.layout.reheat(0.3);
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -212,7 +372,17 @@ impl App {
             layers = layers.push(pin(self.record_menu(node)).x(at.x).y(at.y));
         }
 
-        row![layers, rule::vertical(1), self.sidebar()].into()
+        let side = match &self.settings {
+            Some(form) => form.view(),
+            None => self.sidebar(),
+        };
+
+        row![
+            column![layers, rule::horizontal(1), self.query_panel()].width(Fill),
+            rule::vertical(1),
+            side
+        ]
+        .into()
     }
 
     fn record_menu(&self, node: usize) -> Element<'_, Message> {
@@ -237,159 +407,8 @@ impl App {
         .style(|theme| container::bordered_box(theme).background(Color::WHITE))
         .into()
     }
-
-    fn sidebar(&self) -> Element<'_, Message> {
-        let g = &self.graph;
-        let mut col = Column::new().spacing(6).padding(16).width(SIDEBAR_WIDTH);
-
-        col = col.push(text("SurrealDB graph").size(18));
-        col = col.push(
-            text(format!(
-                "{} in {}, {}",
-                plural(g.nodes.len(), "record"),
-                plural(g.tables.len(), "table"),
-                plural(g.edges.len(), "relation")
-            ))
-            .size(12)
-            .color(MUTED),
-        );
-        if let Some(error) = &self.error {
-            col = col.push(text(error).size(12).color(ERROR));
-        }
-        if !g.truncated.is_empty() {
-            col = col.push(
-                text(format!("Only the first {MAX_PER_TABLE} records shown for: {}", g.truncated.join(", ")))
-                    .size(12)
-                    .color(WARNING),
-            );
-        }
-        if g.dangling_edges > 0 {
-            col = col.push(
-                text(format!("{} point at records that aren't shown", plural(g.dangling_edges, "relation")))
-                    .size(12)
-                    .color(WARNING),
-            );
-        }
-
-        col = col.push(heading("Tables"));
-        if g.tables.is_empty() {
-            col = col.push(text("No tables with records.").size(12).color(MUTED));
-        }
-        for t in &g.tables {
-            col = col.push(
-                row![
-                    text("●").color(t.color),
-                    text(&t.name).size(14),
-                    text(format!("({})", t.count)).size(12).color(MUTED)
-                ]
-                .spacing(6),
-            );
-        }
-        col = col.push(text("→  relation (RELATE)").size(14));
-        col = col.push(
-            text("A record in a relation table, linking in → out. Labelled with the table name; can have fields of its own.")
-                .size(12)
-                .color(MUTED),
-        );
-
-        let hidden = g.hidden_count();
-        if hidden > 0 {
-            col = col.push(
-                row![
-                    text(format!("{} hidden", plural(hidden, "record"))).size(12).color(MUTED),
-                    button(text("Show all").size(12)).style(button::text).padding(0).on_press(Message::ShowAll),
-                ]
-                .spacing(8),
-            );
-        }
-        col = col.push(button(text("Reload").size(13)).on_press(Message::Reload));
-        if let Some(notice) = &self.notice {
-            col = col.push(text(notice).size(12).color(MUTED));
-        }
-        col = col.push(
-            text("Hover a record to highlight its neighbours. Click for details; right-click for more actions. Drag to move, scroll to zoom, drag the background to pan.")
-                .size(12)
-                .color(MUTED),
-        );
-
-        col = col.push(heading("Selected"));
-        col = col.push(self.details());
-
-        scrollable(col).height(Fill).into()
-    }
-
-    fn details(&self) -> Element<'_, Message> {
-        let g = &self.graph;
-        match self.selection {
-            None => text("Nothing selected.").size(12).color(MUTED).into(),
-            Some(Selection::Node(i)) => {
-                let n = &g.nodes[i];
-                let outgoing: Vec<String> = g
-                    .edges
-                    .iter()
-                    .filter(|e| e.from == i)
-                    .map(|e| format!("{} → {}", e.label, g.nodes[e.to].label))
-                    .collect();
-                let incoming: Vec<String> = g
-                    .edges
-                    .iter()
-                    .filter(|e| e.to == i)
-                    .map(|e| format!("{} → {}", g.nodes[e.from].label, e.label))
-                    .collect();
-                column![
-                    text(&n.label).size(15).font(Font { weight: iced::font::Weight::Bold, ..Font::default() }),
-                    text(&n.id).size(12).font(Font::MONOSPACE),
-                    heading("Outgoing"),
-                    list(outgoing),
-                    heading("Incoming"),
-                    list(incoming),
-                    heading("Fields"),
-                    fields(&n.data),
-                ]
-                .spacing(6)
-                .into()
-            }
-            Some(Selection::Edge(i)) => {
-                let e = &g.edges[i];
-                column![
-                    text(format!("{} → {} → {}", g.nodes[e.from].label, e.label, g.nodes[e.to].label))
-                        .size(15)
-                        .font(Font { weight: iced::font::Weight::Bold, ..Font::default() }),
-                    text(format!("Relation record {}", e.id)).size(12).color(MUTED),
-                    heading("Fields"),
-                    fields(&e.data),
-                ]
-                .spacing(6)
-                .into()
-            }
-        }
-    }
 }
 
-fn heading(label: &str) -> Element<'_, Message> {
-    container(text(label.to_uppercase()).size(12).color(Color::from_rgb(0.33, 0.33, 0.33)))
-        .padding(iced::Padding { top: 10.0, ..iced::Padding::ZERO })
-        .into()
-}
-
-fn list(items: Vec<String>) -> Element<'static, Message> {
-    if items.is_empty() {
-        return text("none").size(12).color(MUTED).into();
-    }
-    Column::with_children(items.into_iter().map(|i| text(format!("• {i}")).size(13).into()))
-        .spacing(2)
-        .into()
-}
-
-fn fields(data: &serde_json::Value) -> Element<'static, Message> {
-    let json = serde_json::to_string_pretty(data).unwrap_or_default();
-    container(text(json).size(12).font(Font::MONOSPACE))
-        .padding(8)
-        .width(Fill)
-        .style(|_| container::background(Color::from_rgb(0.95, 0.95, 0.95)))
-        .into()
-}
-
-fn plural(n: usize, word: &str) -> String {
+pub(super) fn plural(n: usize, word: &str) -> String {
     format!("{n} {word}{}", if n == 1 { "" } else { "s" })
 }

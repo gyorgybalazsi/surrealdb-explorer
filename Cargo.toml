@@ -5,11 +5,16 @@ edition = "2024"
 
 [dependencies]
 iced = { version = "0.14", features = ["canvas"] }
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 surrealdb = { version = "4.0.0", features = ["kv-surrealkv"] }
 surrealdb-kvs-surrealkv = "4.0.0"
 surrealkv = "1.2"
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
+toml = "1.2.0"
+tracing = "0.1.44"
+tracing-appender = "0.2.5"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 # SurrealDB's SurrealKV adapter, patched to support encryption at rest.
 # See vendor/surrealdb-kvs-surrealkv/PATCHED.md.

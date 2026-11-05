@@ -5,6 +5,7 @@
 //! only one program can have the database open at a time.
 
 use surrealdb::types::{RecordId, SurrealValue};
+use surrealdb_explore::config::Config;
 use surrealdb_explore::db;
 
 #[derive(Debug, SurrealValue)]
@@ -47,8 +48,9 @@ struct MarketingGroup {
 
 #[tokio::main]
 async fn main() -> Result<(), surrealdb_explore::Error> {
-    // Open the project's database (SurrealKV in ./data, namespace and database "main")
-    let db = db::connect().await?;
+    // Open the project's database, as configured in config.toml
+    let (config, _) = Config::load_or_create()?;
+    let db = db::connect(&config.database).await?;
 
     // Create or update a person with a fixed id
     let created: Option<PersonRecord> = db
