@@ -1,17 +1,11 @@
 //! Tests for the configuration file and for running queries.
 //! They use a temporary database, so they never touch `./data`.
 
-use std::path::PathBuf;
+mod common;
 
+use common::temp_dir;
 use surrealdb_explore::config::{Config, DatabaseConfig};
 use surrealdb_explore::{db, graph, query};
-
-fn temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("surrealdb-explore-test-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 #[test]
 fn config_is_created_with_defaults_and_round_trips() {
@@ -48,18 +42,8 @@ fn missing_fields_take_defaults_and_bad_values_are_refused() {
 
 #[test]
 fn queries_report_each_statement_and_the_graph_sees_the_changes() {
-    let dir = temp_dir("query");
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_stack_size(10 * 1024 * 1024)
-        .build()
-        .unwrap();
-
-    runtime.block_on(async {
-        let config = DatabaseConfig {
-            path: dir.join("data").to_string_lossy().into_owned(),
-            ..DatabaseConfig::default()
-        };
+    let config = common::temp_database("query");
+    common::run(async move {
         let db = db::connect(&config).await.unwrap();
 
         let outcome = query::run(

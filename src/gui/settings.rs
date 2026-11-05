@@ -6,7 +6,7 @@ use surrealdb_explore::config::{
     CONFIG_FILE, Config, DatabaseConfig, GraphConfig, LOG_LEVELS, LoggingConfig,
 };
 
-use crate::gui::app::Message;
+use crate::gui::app::{DataAction, Message};
 use crate::gui::sidebar::{ERROR, MUTED, SIDEBAR_WIDTH, SUCCESS, heading};
 
 /// A text field of the settings form.
@@ -81,7 +81,9 @@ impl SettingsForm {
         Ok(config)
     }
 
-    pub fn view(&self) -> Element<'_, Message> {
+    /// `pending` is a data action waiting for confirmation, `busy` that one is
+    /// running, `connected` that the database is open.
+    pub fn view(&self, pending: Option<DataAction>, busy: bool, connected: bool) -> Element<'_, Message> {
         let field = |label: &'static str, hint: &'static str, value: &str, which: SettingsField| {
             column![
                 text(label).size(13),
@@ -137,6 +139,60 @@ impl SettingsForm {
             None => {}
         }
 
+        col = col.push(heading("Data"));
+        col = col.push(data_section(pending, busy, connected));
+
         scrollable(col).height(Fill).into()
+    }
+}
+
+/// Load sample data / erase database, each with a confirmation step.
+fn data_section(pending: Option<DataAction>, busy: bool, connected: bool) -> Element<'static, Message> {
+    if !connected {
+        return text("The database isn't open.").size(12).color(MUTED).into();
+    }
+    if busy {
+        return text("Working…").size(12).color(MUTED).into();
+    }
+    match pending {
+        None => column![
+            row![
+                button(text("Load sample data").size(13))
+                    .style(button::secondary)
+                    .on_press(Message::AskDataAction(DataAction::LoadSampleData)),
+                button(text("Erase database").size(13))
+                    .style(button::danger)
+                    .on_press(Message::AskDataAction(DataAction::EraseDatabase)),
+            ]
+            .spacing(8),
+            text("Both ask for confirmation first.").size(11).color(MUTED),
+        ]
+        .spacing(4)
+        .into(),
+        Some(action) => {
+            let (question, confirm, style): (&str, &str, fn(&iced::Theme, button::Status) -> button::Style) =
+                match action {
+                    DataAction::LoadSampleData => (
+                        "Add the sample people, company and relations? This deletes all existing `knows` relations; other data is kept.",
+                        "Load sample data",
+                        button::primary,
+                    ),
+                    DataAction::EraseDatabase => (
+                        "Erase everything in this database: all tables, records and definitions? This can't be undone.",
+                        "Erase database",
+                        button::danger,
+                    ),
+                };
+            column![
+                text(question).size(12).color(if action == DataAction::EraseDatabase { ERROR } else { MUTED }),
+                row![
+                    button(text(confirm).size(13)).style(style).on_press(Message::ConfirmDataAction),
+                    button(text("Cancel").size(13)).style(button::secondary).on_press(Message::CancelDataAction),
+                ]
+                .spacing(8),
+            ]
+            .spacing(6)
+            .into()
+        }
     }
 }

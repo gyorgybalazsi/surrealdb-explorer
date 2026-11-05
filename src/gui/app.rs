@@ -8,6 +8,7 @@ use iced::{Color, Element, Fill, Font, Point, Subscription, Task, Theme, Vector,
 use surrealdb_explore::config::Config;
 use surrealdb_explore::db::{self, Database};
 use surrealdb_explore::graph::{self, GraphData};
+use surrealdb_explore::data;
 use surrealdb_explore::query::{self, QueryOutcome};
 use tracing::{debug, error, info, warn};
 
@@ -20,6 +21,14 @@ use crate::gui::settings::{SettingsField, SettingsForm};
 pub enum Selection {
     Node(usize),
     Edge(usize),
+}
+
+/// Actions that change the whole database. Both ask for confirmation first
+/// (except loading sample data into an empty database).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DataAction {
+    LoadSampleData,
+    EraseDatabase,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +64,16 @@ pub enum Message {
     RunQuery,
     QueryDone(QueryOutcome),
     ShowQueryInGraph,
+
+    // Data actions
+    /// Shows the confirmation for an action.
+    AskDataAction(DataAction),
+    CancelDataAction,
+    /// Runs the action waiting for confirmation.
+    ConfirmDataAction,
+    /// Runs an action without asking (safe cases only).
+    RunDataAction(DataAction),
+    DataActionDone(DataAction, Result<(), String>),
 }
 
 pub struct App {
@@ -85,6 +104,11 @@ pub struct App {
     pub(super) query_text: text_editor::Content,
     pub(super) query_running: bool,
     pub(super) query_outcome: Option<QueryOutcome>,
+
+    /// A data action waiting for confirmation.
+    pub(super) pending_data_action: Option<DataAction>,
+    /// A data action is running.
+    pub(super) data_busy: bool,
 }
 
 impl App {
@@ -127,6 +151,8 @@ impl App {
             query_text: text_editor::Content::with_text("SELECT * FROM person;"),
             query_running: false,
             query_outcome: None,
+            pending_data_action: None,
+            data_busy: false,
         }
     }
 
@@ -226,6 +252,31 @@ impl App {
                 }
             }
             Message::ShowQueryInGraph => self.show_query_in_graph(),
+
+            Message::AskDataAction(action) => self.pending_data_action = Some(action),
+            Message::CancelDataAction => self.pending_data_action = None,
+            Message::ConfirmDataAction => {
+                if let Some(action) = self.pending_data_action.take() {
+                    return self.run_data_action(action);
+                }
+            }
+            Message::RunDataAction(action) => return self.run_data_action(action),
+            Message::DataActionDone(action, result) => {
+                self.data_busy = false;
+                match result {
+                    Ok(()) => {
+                        self.reload();
+                        self.notice = Some(match action {
+                            DataAction::LoadSampleData => "Sample data loaded.".into(),
+                            DataAction::EraseDatabase => "Database erased.".into(),
+                        });
+                    }
+                    Err(e) => {
+                        error!(?action, error = %e, "data action failed");
+                        self.error = Some(e);
+                    }
+                }
+            }
         }
         Task::none()
     }
@@ -266,6 +317,28 @@ impl App {
         self.menu = None;
         self.dragging = None;
         self.layout.reheat(0.5);
+    }
+
+    /// Runs a data action in the background, on our runtime (see `runtime`).
+    fn run_data_action(&mut self, action: DataAction) -> Task<Message> {
+        let Some(db) = self.db.clone() else { return Task::none() };
+        if self.data_busy {
+            return Task::none();
+        }
+        self.data_busy = true;
+        self.pending_data_action = None;
+        let config = self.config.database.clone();
+        let handle = self.runtime.spawn(async move {
+            match action {
+                DataAction::LoadSampleData => data::load_sample_data(&db).await,
+                DataAction::EraseDatabase => data::erase(&db, &config).await,
+            }
+            .map_err(|e| e.to_string())
+        });
+        Task::perform(
+            async move { handle.await.unwrap_or_else(|e| Err(format!("the task failed: {e}"))) },
+            move |result| Message::DataActionDone(action, result),
+        )
     }
 
     fn save_settings(&mut self) {
@@ -367,7 +440,7 @@ impl App {
         }
 
         let side = match &self.settings {
-            Some(form) => form.view(),
+            Some(form) => form.view(self.pending_data_action, self.data_busy, self.db.is_some()),
             None => self.sidebar(),
         };
 

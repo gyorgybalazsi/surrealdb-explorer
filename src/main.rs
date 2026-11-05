@@ -2,8 +2,8 @@
 //!
 //! Run with `cargo run`. Settings are in `config.toml` (created on first run,
 //! also editable in the app), logs go to the terminal and to `logs/`.
-//! The app keeps the database open while running, so the examples can't run
-//! at the same time.
+//! The app keeps the database open while running, so only one copy can run
+//! at a time. Sample data can be loaded from the app (Settings → Data).
 
 mod gui;
 

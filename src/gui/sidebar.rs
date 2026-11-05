@@ -3,7 +3,7 @@
 use iced::widget::{Column, button, column, container, row, scrollable, text};
 use iced::{Color, Element, Fill, Font};
 
-use crate::gui::app::{App, Message, Selection, plural};
+use crate::gui::app::{App, DataAction, Message, Selection, plural};
 
 pub(super) const SIDEBAR_WIDTH: f32 = 320.0;
 pub(super) const MUTED: Color = Color::from_rgb(0.47, 0.47, 0.47);
@@ -52,6 +52,15 @@ impl App {
                 text(format!("{} point at records that aren't shown", plural(g.dangling_edges, "relation")))
                     .size(12)
                     .color(WARNING),
+            );
+        }
+
+        if g.nodes.is_empty() && self.db.is_some() && self.error.is_none() {
+            col = col.push(text("The database is empty.").size(13));
+            col = col.push(
+                button(text(if self.data_busy { "Loading…" } else { "Load sample data" }).size(13))
+                    .style(button::primary)
+                    .on_press_maybe((!self.data_busy).then_some(Message::RunDataAction(DataAction::LoadSampleData))),
             );
         }
 
