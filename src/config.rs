@@ -112,7 +112,7 @@ impl Config {
         self.validate()?;
         let text = format!(
             "# surrealdb-explore configuration. Edit here or in the app's Settings.\n\
-             # Database and logging changes take effect after a restart.\n\n{}",
+             # Saving in the app applies changes at once; edits here apply at the next start.\n\n{}",
             toml::to_string_pretty(self)?
         );
         std::fs::write(path, text)?;

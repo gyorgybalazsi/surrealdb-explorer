@@ -131,8 +131,12 @@ impl SettingsForm {
         );
         col = col.push(field("Folder", "Daily log files are written here.", &self.log_directory, SettingsField::LogDirectory));
 
-        col = col.push(text("Database and logging changes take effect after a restart.").size(11).color(MUTED));
-        col = col.push(button(text("Save").size(13)).style(button::primary).on_press(Message::SaveSettings));
+        col = col.push(
+            text("Saving applies the changes straight away; only a new log folder waits for a restart.")
+                .size(11)
+                .color(MUTED),
+        );
+        col = col.push(button(text("Save & apply").size(13)).style(button::primary).on_press(Message::SaveSettings));
         match &self.message {
             Some(Ok(m)) => col = col.push(text(m).size(12).color(SUCCESS)),
             Some(Err(e)) => col = col.push(text(e).size(12).color(ERROR)),

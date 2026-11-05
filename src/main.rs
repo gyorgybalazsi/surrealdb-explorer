@@ -20,11 +20,11 @@ fn main() -> iced::Result {
     };
 
     // Keep the guard until the app exits, so the log file is flushed.
-    let _log_guard = match logging::init(&config.logging) {
-        Ok(guard) => Some(guard),
+    let (_log_guard, log_control) = match logging::init(&config.logging) {
+        Ok((guard, control)) => (Some(guard), Some(control)),
         Err(e) => {
             eprintln!("Logging is off: {e}");
-            None
+            (None, None)
         }
     };
 
@@ -36,7 +36,7 @@ fn main() -> iced::Result {
         tracing::error!("{e}");
     }
 
-    let result = gui::run(config, startup_error);
+    let result = gui::run(config, startup_error, log_control);
     tracing::info!("surrealdb-explore exiting");
     result
 }

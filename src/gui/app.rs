@@ -8,7 +8,9 @@ use iced::{Color, Element, Fill, Font, Point, Subscription, Task, Theme, Vector,
 use surrealdb_explore::config::Config;
 use surrealdb_explore::db::{self, Database};
 use surrealdb_explore::graph::{self, GraphData};
+use surrealdb_explore::config::DatabaseConfig;
 use surrealdb_explore::data;
+use surrealdb_explore::logging::LogControl;
 use surrealdb_explore::query::{self, QueryOutcome};
 use tracing::{debug, error, info, warn};
 
@@ -85,6 +87,8 @@ pub struct App {
     pub(super) db: Option<Database>,
     /// The configuration the app is running with.
     pub(super) config: Config,
+    /// Changes the log level when settings are saved.
+    pub(super) log: Option<LogControl>,
 
     pub(super) graph: Graph,
     pub(super) layout: Layout,
@@ -114,7 +118,7 @@ pub struct App {
 impl App {
     /// `startup_error` is a problem found before the window opened (such as
     /// an invalid config file), shown in the sidebar.
-    pub fn boot(config: Config, startup_error: Option<String>) -> App {
+    pub fn boot(config: Config, startup_error: Option<String>, log: Option<LogControl>) -> App {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .thread_stack_size(10 * 1024 * 1024)
@@ -137,6 +141,7 @@ impl App {
             runtime,
             db,
             config,
+            log,
             graph: Graph::new(data, None),
             layout: Layout::new(),
             camera: Camera::default(),
@@ -341,6 +346,9 @@ impl App {
         )
     }
 
+    /// Saves the settings and applies them straight away: switches the
+    /// database, changes the log level and reloads the graph. Only a new log
+    /// folder waits for a restart.
     fn save_settings(&mut self) {
         let Some(form) = &mut self.settings else { return };
         let new = match form.to_config() {
@@ -357,19 +365,78 @@ impl App {
         }
         info!(?new, "settings saved");
 
-        let needs_restart =
-            new.database != self.config.database || new.logging != self.config.logging;
-        let limit_changed = new.graph != self.config.graph;
-        // Only the record limit can change while running; the rest applies on restart.
+        let old = self.config.clone();
+        let mut problems: Vec<String> = Vec::new();
+        let mut notes: Vec<&str> = Vec::new();
+
+        let database_changed = new.database != old.database || self.db.is_none();
+        if database_changed {
+            match self.switch_database(&new.database) {
+                Ok(()) => self.config.database = new.database.clone(),
+                Err(e) => problems.push(format!("Could not open the new database, still using the previous one: {e}")),
+            }
+        }
+
+        if new.logging.level != old.logging.level {
+            match self.log.as_ref().map(|log| log.set_level(&new.logging.level)) {
+                Some(Ok(true)) | None => {}
+                Some(Ok(false)) => notes.push("RUST_LOG is set, so it still decides the log level."),
+                Some(Err(e)) => problems.push(e.to_string()),
+            }
+            self.config.logging.level = new.logging.level.clone();
+        }
+        if new.logging.directory != old.logging.directory {
+            notes.push("The new log folder is used after a restart.");
+        }
+
+        let graph_changed = new.graph != old.graph;
         self.config.graph = new.graph.clone();
-        form.message = Some(Ok(if needs_restart {
-            "Saved. Restart the app for database and logging changes to take effect.".into()
-        } else {
-            "Saved.".into()
-        }));
-        if limit_changed {
+        if database_changed || graph_changed {
             self.reload();
         }
+
+        let message = if problems.is_empty() {
+            let mut m = String::from("Saved and applied.");
+            for n in notes {
+                m.push(' ');
+                m.push_str(n);
+            }
+            Ok(m)
+        } else {
+            Err(format!("Saved, but: {}", problems.join(" ")))
+        };
+        if let Some(form) = &mut self.settings {
+            form.message = Some(message);
+        }
+    }
+
+    /// Opens the database `config` describes in place of the current one.
+    /// The same folder keeps its connection and only switches namespace and
+    /// database. A different folder is opened first, and the old one is
+    /// closed only if that succeeds, which releases its lock so it can be
+    /// opened again later.
+    fn switch_database(&mut self, config: &DatabaseConfig) -> Result<(), String> {
+        let same_folder = config.path == self.config.database.path;
+        match &self.db {
+            Some(db) if same_folder => {
+                self.runtime
+                    .block_on(async { db.use_ns(&config.namespace).use_db(&config.database).await })
+                    .map_err(|e| e.to_string())?;
+                info!(namespace = %config.namespace, database = %config.database, "switched namespace/database");
+            }
+            _ => {
+                let new = self.runtime.block_on(db::connect(config)).map_err(|e| e.to_string())?;
+                if let Some(old) = self.db.replace(new)
+                    && let Err(e) = self.runtime.block_on(db::close(old))
+                {
+                    warn!(error = %e, "could not close the previous database");
+                }
+            }
+        }
+        // The query results and pending actions belong to the previous database.
+        self.query_outcome = None;
+        self.pending_data_action = None;
+        Ok(())
     }
 
     fn run_query(&mut self) -> Task<Message> {

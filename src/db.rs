@@ -28,3 +28,13 @@ pub async fn connect(config: &DatabaseConfig) -> Result<Database, Error> {
     );
     Ok(db)
 }
+
+/// Shuts the database down and releases its folder, so it can be opened
+/// again in this process. Just dropping the handle keeps the folder locked.
+/// Other copies of the handle stop working.
+pub async fn close(db: Database) -> Result<(), Error> {
+    db.shutdown().await?;
+    drop(db);
+    tracing::info!("database closed");
+    Ok(())
+}

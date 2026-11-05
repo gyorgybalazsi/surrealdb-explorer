@@ -10,12 +10,14 @@ mod sidebar;
 
 use app::App;
 use surrealdb_explore::config::Config;
+use surrealdb_explore::logging::LogControl;
 
 /// Opens the window and runs until it is closed. `startup_error` is shown in
 /// the sidebar, e.g. when the config file was invalid and defaults are used.
-pub fn run(config: Config, startup_error: Option<String>) -> iced::Result {
+/// `log` lets saved settings change the log level (`None` if logging is off).
+pub fn run(config: Config, startup_error: Option<String>, log: Option<LogControl>) -> iced::Result {
     iced::application(
-        move || App::boot(config.clone(), startup_error.clone()),
+        move || App::boot(config.clone(), startup_error.clone(), log.clone()),
         App::update,
         App::view,
     )
