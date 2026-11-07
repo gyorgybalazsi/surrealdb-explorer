@@ -5,7 +5,7 @@
 
 mod model;
 mod records;
-mod tables;
+pub(crate) mod tables;
 
 pub use model::{GraphData, GraphEdge, GraphNode};
 

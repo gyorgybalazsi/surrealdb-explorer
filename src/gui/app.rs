@@ -5,7 +5,8 @@ use std::collections::HashSet;
 
 use iced::widget::{button, canvas, column, container, pin, row, rule, stack, text, text_editor};
 use iced::{Color, Element, Fill, Font, Point, Subscription, Task, Theme, Vector, window};
-use surrealdb_explore::config::Config;
+use surrealdb_explore::assistant::{self, Assistant, Suggestion};
+use surrealdb_explore::config::{AssistantMode, Config};
 use surrealdb_explore::db::{self, Database};
 use surrealdb_explore::graph::{self, GraphData};
 use surrealdb_explore::config::DatabaseConfig;
@@ -58,6 +59,7 @@ pub enum Message {
     OpenSettings,
     CloseSettings,
     SettingChanged(SettingsField, String),
+    AssistantModeChanged(AssistantMode),
     SaveSettings,
 
     // Query panel
@@ -66,6 +68,13 @@ pub enum Message {
     RunQuery,
     QueryDone(QueryOutcome),
     ShowQueryInGraph,
+
+    // Plain-English questions
+    QuestionEdited(String),
+    Ask,
+    RetryWithOpus,
+    /// The assistant to keep (it holds the API key) and the answer.
+    AskDone(Option<Assistant>, Result<Suggestion, String>),
 
     // Data actions
     /// Shows the confirmation for an action.
@@ -108,6 +117,14 @@ pub struct App {
     pub(super) query_text: text_editor::Content,
     pub(super) query_running: bool,
     pub(super) query_outcome: Option<QueryOutcome>,
+
+    pub(super) question: String,
+    pub(super) asking: bool,
+    /// The last query Claude suggested.
+    pub(super) suggestion: Option<Suggestion>,
+    pub(super) ask_error: Option<String>,
+    /// Kept after the first question, so the API key is read only once.
+    pub(super) assistant: Option<Assistant>,
 
     /// A data action waiting for confirmation.
     pub(super) pending_data_action: Option<DataAction>,
@@ -156,6 +173,11 @@ impl App {
             query_text: text_editor::Content::with_text("SELECT * FROM person;"),
             query_running: false,
             query_outcome: None,
+            question: String::new(),
+            asking: false,
+            suggestion: None,
+            ask_error: None,
+            assistant: None,
             pending_data_action: None,
             data_busy: false,
         }
@@ -239,6 +261,12 @@ impl App {
                     form.set(field, value);
                 }
             }
+            Message::AssistantModeChanged(mode) => {
+                if let Some(form) = &mut self.settings {
+                    form.assistant_mode = mode;
+                    form.message = None;
+                }
+            }
             Message::SaveSettings => self.save_settings(),
 
             Message::ToggleQuery => self.query_open = !self.query_open,
@@ -257,6 +285,31 @@ impl App {
                 }
             }
             Message::ShowQueryInGraph => self.show_query_in_graph(),
+
+            Message::QuestionEdited(question) => self.question = question,
+            Message::Ask => return self.ask(false),
+            Message::RetryWithOpus => return self.ask(true),
+            Message::AskDone(assistant, result) => {
+                self.asking = false;
+                if assistant.is_some() {
+                    self.assistant = assistant;
+                }
+                match result {
+                    Ok(suggestion) => {
+                        self.query_text = text_editor::Content::with_text(&suggestion.query);
+                        self.query_outcome = None;
+                        self.suggestion = Some(suggestion);
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "question failed");
+                        // A rejected key is read again next time.
+                        if e.contains("rejected the API key") {
+                            self.assistant = None;
+                        }
+                        self.ask_error = Some(e);
+                    }
+                }
+            }
 
             Message::AskDataAction(action) => self.pending_data_action = Some(action),
             Message::CancelDataAction => self.pending_data_action = None,
@@ -389,6 +442,12 @@ impl App {
             notes.push("The new log folder is used after a restart.");
         }
 
+        if new.assistant.api_key != old.assistant.api_key {
+            // Read the key again from the new place on the next question.
+            self.assistant = None;
+        }
+        self.config.assistant = new.assistant.clone();
+
         let graph_changed = new.graph != old.graph;
         self.config.graph = new.graph.clone();
         if database_changed || graph_changed {
@@ -457,6 +516,43 @@ impl App {
                 })
             },
             Message::QueryDone,
+        )
+    }
+
+    /// Asks Claude for a query, in the background on our runtime. The first
+    /// time, the API key is read from 1Password, which may ask for approval.
+    /// `retry_with_opus` redoes the last answer with Opus.
+    fn ask(&mut self, retry_with_opus: bool) -> Task<Message> {
+        let Some(db) = self.db.clone() else { return Task::none() };
+        let previous = self.suggestion.clone();
+        let question = self.question.trim().to_string();
+        if self.asking || (retry_with_opus && previous.is_none()) || (!retry_with_opus && question.is_empty()) {
+            return Task::none();
+        }
+        self.asking = true;
+        self.ask_error = None;
+        let mode = self.config.assistant.mode;
+        let reference = self.config.assistant.api_key.clone();
+        let cached = self.assistant.clone();
+
+        let handle = self.runtime.spawn(async move {
+            let assistant = match cached {
+                Some(assistant) => assistant,
+                None => match tokio::task::spawn_blocking(move || assistant::key::fetch(&reference)).await {
+                    Ok(Ok(key)) => Assistant::new(key),
+                    Ok(Err(e)) => return (None, Err(e.to_string())),
+                    Err(e) => return (None, Err(format!("reading the API key failed: {e}"))),
+                },
+            };
+            let result = match (retry_with_opus, previous) {
+                (true, Some(previous)) => assistant.retry_with_opus(&db, &previous).await,
+                _ => assistant.ask(&db, &question, mode).await,
+            };
+            (Some(assistant), result.map_err(|e| e.to_string()))
+        });
+        Task::perform(
+            async move { handle.await.unwrap_or_else(|e| (None, Err(format!("the task failed: {e}")))) },
+            |(assistant, result)| Message::AskDone(assistant, result),
         )
     }
 

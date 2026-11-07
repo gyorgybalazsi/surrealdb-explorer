@@ -21,6 +21,7 @@ pub struct Config {
     pub database: DatabaseConfig,
     pub graph: GraphConfig,
     pub logging: LoggingConfig,
+    pub assistant: AssistantConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -48,13 +49,55 @@ pub struct LoggingConfig {
     pub directory: String,
 }
 
+/// Asking questions in plain English, answered by Claude with SurrealQL.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AssistantConfig {
+    /// Which Claude model writes the queries.
+    pub mode: AssistantMode,
+    /// 1Password reference to the Claude API key, read with the `op` tool,
+    /// e.g. `op://Personal/my-key/credential`. The `ANTHROPIC_API_KEY`
+    /// environment variable, if set, is used instead.
+    pub api_key: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AssistantMode {
+    /// Haiku first; Opus when Haiku is unsure or its query fails.
+    Auto,
+    Haiku,
+    Opus,
+}
+
+impl AssistantMode {
+    pub const ALL: [AssistantMode; 3] = [AssistantMode::Auto, AssistantMode::Haiku, AssistantMode::Opus];
+}
+
+impl std::fmt::Display for AssistantMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            AssistantMode::Auto => "Auto (Haiku, Opus when needed)",
+            AssistantMode::Haiku => "Always Haiku",
+            AssistantMode::Opus => "Always Opus",
+        })
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
             database: DatabaseConfig::default(),
             graph: GraphConfig::default(),
             logging: LoggingConfig::default(),
+            assistant: AssistantConfig::default(),
         }
+    }
+}
+
+impl Default for AssistantConfig {
+    fn default() -> Self {
+        AssistantConfig { mode: AssistantMode::Auto, api_key: String::new() }
     }
 }
 
@@ -130,6 +173,12 @@ impl Config {
         }
         if !LOG_LEVELS.contains(&self.logging.level.as_str()) {
             return Err(format!("log level must be one of: {}", LOG_LEVELS.join(", ")).into());
+        }
+        let key = self.assistant.api_key.trim();
+        if !key.is_empty() && !key.starts_with("op://") {
+            return Err("the API key setting must be a 1Password reference starting with op:// \
+                        (never the key itself)"
+                .into());
         }
         Ok(())
     }

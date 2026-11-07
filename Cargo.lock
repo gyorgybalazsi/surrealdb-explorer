@@ -6496,6 +6496,7 @@ name = "surrealdb-explore"
 version = "0.1.0"
 dependencies = [
  "iced",
+ "reqwest",
  "serde",
  "serde_json",
  "surrealdb",

@@ -8,6 +8,8 @@ pub struct Table {
     pub name: String,
     /// Defined with `TYPE RELATION`, so its records are edges.
     pub is_relation: bool,
+    /// The `DEFINE TABLE …` statement, as SurrealDB reports it.
+    pub definition: String,
 }
 
 /// Lists all tables in the current database, sorted by name.
@@ -22,9 +24,12 @@ pub async fn list(db: &Database) -> surrealdb::Result<Vec<Table>> {
 
     let mut tables: Vec<Table> = definitions
         .iter()
-        .map(|(name, definition)| Table {
-            name: name.clone(),
-            is_relation: matches!(definition, Value::String(d) if d.contains("TYPE RELATION")),
+        .map(|(name, definition)| {
+            let definition = match definition {
+                Value::String(d) => d.clone(),
+                _ => String::new(),
+            };
+            Table { name: name.clone(), is_relation: definition.contains("TYPE RELATION"), definition }
         })
         .collect();
     tables.sort_by(|a, b| a.name.cmp(&b.name));

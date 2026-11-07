@@ -2,12 +2,14 @@
 
 use iced::keyboard::{Key, key::Named};
 use iced::widget::text_editor::{Binding, KeyPress};
-use iced::widget::{Column, button, column, container, row, scrollable, text, text_editor};
+use iced::widget::{Column, button, column, container, row, scrollable, text, text_editor, text_input};
 use iced::{Alignment, Color, Element, Fill, Font, Length};
+use surrealdb_explore::assistant::Model;
+use surrealdb_explore::config::AssistantMode;
 use surrealdb_explore::query::QueryOutcome;
 
 use crate::gui::app::{App, Message};
-use crate::gui::sidebar::{ERROR, MUTED, SUCCESS, bold};
+use crate::gui::sidebar::{ERROR, MUTED, SUCCESS, WARNING, bold};
 
 /// Results longer than this many lines per statement are cut, so a huge
 /// result can't make the window sluggish.
@@ -50,11 +52,59 @@ impl App {
             Some(outcome) => scrollable(results_view(outcome)).height(Fill).into(),
         };
 
-        column![toggle, editor, status, results]
+        column![toggle, self.question_box(), editor, status, results]
             .spacing(6)
             .padding([4, 8])
-            .height(Length::Fixed(400.0))
+            .height(Length::Fixed(460.0))
             .into()
+    }
+
+    /// Asking in plain English, and what came back.
+    fn question_box(&self) -> Element<'_, Message> {
+        let can_ask = !self.asking && self.db.is_some();
+        let input = text_input("Ask in plain English, e.g. who does alice know?", &self.question)
+            .on_input(Message::QuestionEdited)
+            .on_submit_maybe(can_ask.then_some(Message::Ask))
+            .size(13);
+        let ask = button(text(if self.asking { "Asking…" } else { "Ask Claude" }).size(13))
+            .style(button::primary)
+            .on_press_maybe((can_ask && !self.question.trim().is_empty()).then_some(Message::Ask));
+        let mut col = column![row![input, ask].spacing(8).align_y(Alignment::Center)].spacing(3);
+
+        if self.asking {
+            let who = match self.config.assistant.mode {
+                AssistantMode::Auto => "Haiku (Opus if needed)",
+                AssistantMode::Haiku => "Haiku",
+                AssistantMode::Opus => "Opus",
+            };
+            let key_note = if self.assistant.is_none() { " 1Password may ask you to approve reading the API key." } else { "" };
+            col = col.push(text(format!("Asking {who}…{key_note}")).size(12).color(MUTED));
+        } else if let Some(e) = &self.ask_error {
+            col = col.push(text(e).size(12).color(ERROR));
+        } else if let Some(s) = &self.suggestion {
+            let mut by = s.model.name().to_string();
+            if !s.notes.is_empty() {
+                by = format!("{by} ({})", s.notes.join("; "));
+            }
+            let mut line = row![text(format!("{by}: {}", s.explanation)).size(12).color(MUTED).width(Fill)]
+                .spacing(8)
+                .align_y(Alignment::Center);
+            if s.model == Model::Haiku || s.problem.is_some() {
+                line = line.push(
+                    button(text("Try with Opus").size(12))
+                        .style(button::secondary)
+                        .on_press_maybe(can_ask.then_some(Message::RetryWithOpus)),
+                );
+            }
+            col = col.push(line);
+            if let Some(problem) = &s.problem {
+                col = col.push(text(format!("The check found a problem: {problem}")).size(12).color(ERROR));
+            } else if !s.confident {
+                col = col.push(text("Claude wasn't sure about this one; check the result.").size(12).color(WARNING));
+            }
+            col = col.push(text("The query is in the editor; review it, then Run.").size(11).color(MUTED));
+        }
+        col.into()
     }
 }
 

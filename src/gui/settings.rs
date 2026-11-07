@@ -3,7 +3,8 @@
 use iced::widget::{Column, button, column, pick_list, row, scrollable, text, text_input};
 use iced::{Element, Fill};
 use surrealdb_explore::config::{
-    CONFIG_FILE, Config, DatabaseConfig, GraphConfig, LOG_LEVELS, LoggingConfig,
+    AssistantConfig, AssistantMode, CONFIG_FILE, Config, DatabaseConfig, GraphConfig, LOG_LEVELS,
+    LoggingConfig,
 };
 
 use crate::gui::app::{DataAction, Message};
@@ -18,6 +19,7 @@ pub enum SettingsField {
     MaxRecords,
     LogLevel,
     LogDirectory,
+    ApiKey,
 }
 
 /// The settings as edited, kept as text until saved.
@@ -28,6 +30,9 @@ pub struct SettingsForm {
     pub max_records: String,
     pub log_level: String,
     pub log_directory: String,
+    pub assistant_mode: AssistantMode,
+    /// 1Password reference, not the key itself.
+    pub api_key: String,
     /// Result of the last save: a confirmation or an error.
     pub message: Option<Result<String, String>>,
 }
@@ -41,6 +46,8 @@ impl SettingsForm {
             max_records: c.graph.max_records_per_table.to_string(),
             log_level: c.logging.level.clone(),
             log_directory: c.logging.directory.clone(),
+            assistant_mode: c.assistant.mode,
+            api_key: c.assistant.api_key.clone(),
             message: None,
         }
     }
@@ -53,6 +60,7 @@ impl SettingsForm {
             SettingsField::MaxRecords => &mut self.max_records,
             SettingsField::LogLevel => &mut self.log_level,
             SettingsField::LogDirectory => &mut self.log_directory,
+            SettingsField::ApiKey => &mut self.api_key,
         };
         *target = value;
         self.message = None;
@@ -75,6 +83,10 @@ impl SettingsForm {
             logging: LoggingConfig {
                 level: self.log_level.clone(),
                 directory: self.log_directory.trim().into(),
+            },
+            assistant: AssistantConfig {
+                mode: self.assistant_mode,
+                api_key: self.api_key.trim().into(),
             },
         };
         config.validate().map_err(|e| e.to_string())?;
@@ -130,6 +142,24 @@ impl SettingsForm {
             .spacing(3),
         );
         col = col.push(field("Folder", "Daily log files are written here.", &self.log_directory, SettingsField::LogDirectory));
+
+        col = col.push(heading("Assistant"));
+        col = col.push(
+            column![
+                text("Model").size(13),
+                pick_list(AssistantMode::ALL, Some(self.assistant_mode), Message::AssistantModeChanged).text_size(13),
+                text("Auto asks Haiku first, and Opus when Haiku isn't sure or its query fails the check.")
+                    .size(11)
+                    .color(MUTED),
+            ]
+            .spacing(3),
+        );
+        col = col.push(field(
+            "API key in 1Password",
+            "A reference like op://Personal/item/credential, read with the op tool. Never the key itself.",
+            &self.api_key,
+            SettingsField::ApiKey,
+        ));
 
         col = col.push(
             text("Saving applies the changes straight away; only a new log folder waits for a restart.")
