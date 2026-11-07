@@ -194,7 +194,8 @@ the answer records to the records the question is about, so the app can show how
 they're connected. Example: for \"who knows someone who knows bob?\" it could be \
 `SELECT * FROM knows WHERE out = person:bob OR out IN (SELECT VALUE in FROM knows \
 WHERE out = person:bob);`. Use an empty string if the answer doesn't involve relations.
-- explanation: one or two short sentences in plain language.
+- explanation: one or two short sentences in plain language about what the query \
+finds. Don't mention context_query; the user doesn't see it.
 - confident: false if the question is ambiguous, needs data the schema doesn't show, \
 or you aren't sure the syntax is right.";
 
