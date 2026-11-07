@@ -8,7 +8,8 @@ use surrealdb_explore::assistant::Model;
 use surrealdb_explore::config::AssistantMode;
 use surrealdb_explore::query::QueryOutcome;
 
-use crate::gui::app::{App, Message};
+use crate::gui::app::{App, Message, plural};
+use crate::gui::canvas::ANSWER_RING as ANSWER;
 use crate::gui::sidebar::{ERROR, MUTED, SUCCESS, WARNING, bold};
 
 /// Results longer than this many lines per statement are cut, so a huge
@@ -49,7 +50,13 @@ impl App {
                 .size(12)
                 .color(MUTED)
                 .into(),
-            Some(outcome) => scrollable(results_view(outcome)).height(Fill).into(),
+            Some(outcome) => {
+                let mut col = Column::new().spacing(8);
+                if let Some(answer) = self.answer_view() {
+                    col = col.push(answer);
+                }
+                scrollable(col.push(results_view(outcome))).height(Fill).into()
+            }
         };
 
         column![toggle, self.question_box(), editor, status, results]
@@ -57,6 +64,55 @@ impl App {
             .padding([4, 8])
             .height(Length::Fixed(460.0))
             .into()
+    }
+
+    /// The answer to the last query, as shown in the graph: the records that
+    /// answer it and how they connect.
+    fn answer_view(&self) -> Option<Element<'_, Message>> {
+        const MAX_LISTED: usize = 30;
+        let (answer, edges) = self.result_indices()?;
+        let g = &self.graph;
+
+        let mut names: Vec<String> = answer.iter().map(|&i| g.nodes[i].label.clone()).collect();
+        names.sort();
+        let mut connections: Vec<String> = edges
+            .iter()
+            .map(|&i| {
+                let e = &g.edges[i];
+                format!("{} → {} → {}", g.nodes[e.from].label, e.label, g.nodes[e.to].label)
+            })
+            .collect();
+        connections.sort();
+
+        let mut answer_col = column![
+            row![
+                text("◯").color(ANSWER),
+                text(format!("Answer: {}", plural(names.len(), "record"))).size(13).font(bold()),
+            ]
+            .spacing(6),
+            listed(names, MAX_LISTED),
+        ]
+        .spacing(4)
+        .width(Length::FillPortion(1));
+        answer_col = answer_col.push(
+            button(text("Show the whole graph").size(12)).style(button::text).padding(0).on_press(Message::ShowAll),
+        );
+
+        let mut body = row![answer_col].spacing(24);
+        if !connections.is_empty() {
+            body = body.push(
+                column![text("How they connect").size(13).font(bold()), listed(connections, MAX_LISTED)]
+                    .spacing(4)
+                    .width(Length::FillPortion(2)),
+            );
+        }
+        Some(
+            container(body)
+                .padding(8)
+                .width(Fill)
+                .style(|_| container::background(Color::from_rgb(1.0, 0.97, 0.92)))
+                .into(),
+        )
     }
 
     /// Asking in plain English, and what came back.
@@ -181,3 +237,15 @@ fn cut(text: String) -> String {
     let kept: Vec<&str> = text.lines().take(MAX_RESULT_LINES).collect();
     format!("{}\n… {} more lines not shown", kept.join("\n"), lines - MAX_RESULT_LINES)
 }
+
+/// A bullet list of at most `max` items, with a note about the rest.
+fn listed(items: Vec<String>, max: usize) -> Element<'static, Message> {
+    let more = items.len().saturating_sub(max);
+    let mut col = Column::with_children(items.into_iter().take(max).map(|i| text(format!("• {i}")).size(13).into()))
+        .spacing(2);
+    if more > 0 {
+        col = col.push(text(format!("… and {more} more")).size(12).color(MUTED));
+    }
+    col.into()
+}
+

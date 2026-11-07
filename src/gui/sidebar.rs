@@ -64,10 +64,6 @@ impl App {
             );
         }
 
-        if let Some(result) = self.result_section() {
-            col = col.push(result);
-        }
-
         col = col.push(heading("Tables"));
         if g.tables.is_empty() {
             col = col.push(text("No tables with records.").size(12).color(MUTED));
@@ -113,45 +109,6 @@ impl App {
         col = col.push(self.details());
 
         scrollable(col).height(Fill).into()
-    }
-
-    /// The query result shown in the graph: the answer, and how it connects.
-    fn result_section(&self) -> Option<Element<'_, Message>> {
-        const MAX_LISTED: usize = 30;
-        let (answer, edges) = self.result_indices()?;
-        let g = &self.graph;
-
-        let mut names: Vec<&str> = answer.iter().map(|&i| g.nodes[i].label.as_str()).collect();
-        names.sort();
-        let mut connections: Vec<String> = edges
-            .iter()
-            .map(|&i| {
-                let e = &g.edges[i];
-                format!("{} → {} → {}", g.nodes[e.from].label, e.label, g.nodes[e.to].label)
-            })
-            .collect();
-        connections.sort();
-
-        let mut col = column![
-            row![
-                container(text("QUERY RESULT").size(12).color(Color::from_rgb(0.33, 0.33, 0.33))).width(Fill),
-                button(text("Show all").size(12)).style(button::text).padding(0).on_press(Message::ShowAll),
-            ]
-            .align_y(iced::Alignment::Center),
-            row![
-                text("◯").color(Color::from_rgb(0.95, 0.55, 0.05)),
-                text(format!("Answer: {}", plural(names.len(), "record"))).size(13).font(bold()),
-            ]
-            .spacing(6),
-        ]
-        .spacing(4)
-        .padding(iced::Padding { top: 10.0, ..iced::Padding::ZERO });
-        col = col.push(listed(names.iter().map(|n| n.to_string()).collect(), MAX_LISTED));
-        if !connections.is_empty() {
-            col = col.push(text("How they connect").size(13).font(bold()));
-            col = col.push(listed(connections, MAX_LISTED));
-        }
-        Some(col.into())
     }
 
     fn details(&self) -> Element<'_, Message> {
@@ -210,17 +167,6 @@ pub(super) fn heading(label: &str) -> Element<'_, Message> {
     container(text(label.to_uppercase()).size(12).color(Color::from_rgb(0.33, 0.33, 0.33)))
         .padding(iced::Padding { top: 10.0, ..iced::Padding::ZERO })
         .into()
-}
-
-/// A bullet list of at most `max` items, with a note about the rest.
-fn listed(items: Vec<String>, max: usize) -> Element<'static, Message> {
-    let more = items.len().saturating_sub(max);
-    let mut col = Column::with_children(items.into_iter().take(max).map(|i| text(format!("• {i}")).size(13).into()))
-        .spacing(2);
-    if more > 0 {
-        col = col.push(text(format!("… and {more} more")).size(12).color(MUTED));
-    }
-    col.into()
 }
 
 fn list(items: Vec<String>) -> Element<'static, Message> {

@@ -24,7 +24,7 @@ const NODE_LABEL: Color = Color::from_rgb(0.13, 0.13, 0.13);
 const FADED: Color = Color::from_rgb(0.89, 0.89, 0.89);
 const SELECTED_RING: Color = Color::from_rgb(0.13, 0.13, 0.13);
 /// Ring around records that answer a query.
-const ANSWER_RING: Color = Color::from_rgb(0.95, 0.55, 0.05);
+pub(super) const ANSWER_RING: Color = Color::from_rgb(0.95, 0.55, 0.05);
 /// Relations that show how a query's answer connects.
 const CONTEXT_EDGE: Color = Color::from_rgb(0.3, 0.3, 0.3);
 
