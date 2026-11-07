@@ -21,7 +21,7 @@ pub fn run(config: Config, startup_error: Option<String>, log: Option<LogControl
         App::update,
         App::view,
     )
-    .title("SurrealDB explorer")
+    .title("SurrealDB Explorer")
     .subscription(App::subscription)
     .theme(App::theme)
     .window_size((1200.0, 800.0))

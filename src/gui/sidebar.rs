@@ -18,7 +18,7 @@ impl App {
 
         col = col.push(
             row![
-                text("SurrealDB explorer").size(18).width(Fill),
+                text("SurrealDB Explorer").size(18).width(Fill),
                 button(text("Settings").size(12)).style(button::secondary).on_press(Message::OpenSettings),
             ]
             .align_y(iced::Alignment::Center),
