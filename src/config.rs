@@ -154,7 +154,7 @@ impl Config {
     pub fn save_to(&self, path: &Path) -> Result<(), Error> {
         self.validate()?;
         let text = format!(
-            "# surrealdb-explore configuration. Edit here or in the app's Settings.\n\
+            "# surrealdb-explorer configuration. Edit here or in the app's Settings.\n\
              # Saving in the app applies changes at once; edits here apply at the next start.\n\n{}",
             toml::to_string_pretty(self)?
         );

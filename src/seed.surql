@@ -1,4 +1,4 @@
--- Sample data for surrealdb-explore: a few people with `knows` relations.
+-- Sample data for surrealdb-explorer: a few people with `knows` relations.
 -- Loaded by "Load sample data" in the app.
 -- Safe to run repeatedly: records are upserted and relations are recreated.
 -- It deletes all existing `knows` relations before adding these.

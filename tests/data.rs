@@ -2,7 +2,7 @@
 
 mod common;
 
-use surrealdb_explore::{data, db, graph};
+use surrealdb_explorer::{data, db, graph};
 
 #[test]
 fn sample_data_loads_repeatably_and_erase_empties_the_database() {

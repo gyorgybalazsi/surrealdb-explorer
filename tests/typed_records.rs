@@ -4,7 +4,7 @@
 mod common;
 
 use surrealdb::types::{RecordId, SurrealValue};
-use surrealdb_explore::db;
+use surrealdb_explorer::db;
 
 #[derive(Debug, SurrealValue)]
 struct Name {

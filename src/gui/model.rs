@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use iced::{Color, Vector};
-use surrealdb_explore::graph::GraphData;
+use surrealdb_explorer::graph::GraphData;
 
 const PALETTE: [Color; 10] = [
     rgb(0x4a, 0x90, 0xd9),

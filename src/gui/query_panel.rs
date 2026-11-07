@@ -4,9 +4,9 @@ use iced::keyboard::{Key, key::Named};
 use iced::widget::text_editor::{Binding, KeyPress};
 use iced::widget::{Column, button, column, container, row, scrollable, text, text_editor, text_input};
 use iced::{Alignment, Color, Element, Fill, Font, Length};
-use surrealdb_explore::assistant::Model;
-use surrealdb_explore::config::AssistantMode;
-use surrealdb_explore::query::QueryOutcome;
+use surrealdb_explorer::assistant::Model;
+use surrealdb_explorer::config::AssistantMode;
+use surrealdb_explorer::query::QueryOutcome;
 
 use crate::gui::app::{App, Message, plural};
 use crate::gui::canvas::ANSWER_RING as ANSWER;

@@ -5,14 +5,14 @@ use std::collections::{HashMap, HashSet};
 
 use iced::widget::{button, canvas, column, container, pin, row, rule, stack, text, text_editor};
 use iced::{Color, Element, Fill, Font, Point, Subscription, Task, Theme, Vector, window};
-use surrealdb_explore::assistant::{self, Assistant, Suggestion};
-use surrealdb_explore::config::{AssistantMode, Config};
-use surrealdb_explore::db::{self, Database};
-use surrealdb_explore::graph::{self, GraphData};
-use surrealdb_explore::config::DatabaseConfig;
-use surrealdb_explore::data;
-use surrealdb_explore::logging::LogControl;
-use surrealdb_explore::query::{self, QueryOutcome};
+use surrealdb_explorer::assistant::{self, Assistant, Suggestion};
+use surrealdb_explorer::config::{AssistantMode, Config};
+use surrealdb_explorer::db::{self, Database};
+use surrealdb_explorer::graph::{self, GraphData};
+use surrealdb_explorer::config::DatabaseConfig;
+use surrealdb_explorer::data;
+use surrealdb_explorer::logging::LogControl;
+use surrealdb_explorer::query::{self, QueryOutcome};
 use tracing::{debug, error, info, warn};
 
 use crate::gui::canvas::{Camera, GraphView};

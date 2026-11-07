@@ -4,8 +4,8 @@
 mod common;
 
 use common::temp_dir;
-use surrealdb_explore::config::{Config, DatabaseConfig};
-use surrealdb_explore::{db, graph, query};
+use surrealdb_explorer::config::{Config, DatabaseConfig};
+use surrealdb_explorer::{db, graph, query};
 
 #[test]
 fn config_is_created_with_defaults_and_round_trips() {

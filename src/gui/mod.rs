@@ -9,8 +9,8 @@ mod settings;
 mod sidebar;
 
 use app::App;
-use surrealdb_explore::config::Config;
-use surrealdb_explore::logging::LogControl;
+use surrealdb_explorer::config::Config;
+use surrealdb_explorer::logging::LogControl;
 
 /// Opens the window and runs until it is closed. `startup_error` is shown in
 /// the sidebar, e.g. when the config file was invalid and defaults are used.
@@ -21,7 +21,7 @@ pub fn run(config: Config, startup_error: Option<String>, log: Option<LogControl
         App::update,
         App::view,
     )
-    .title("SurrealDB graph")
+    .title("SurrealDB explorer")
     .subscription(App::subscription)
     .theme(App::theme)
     .window_size((1200.0, 800.0))

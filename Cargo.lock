@@ -6492,7 +6492,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "surrealdb-explore"
+name = "surrealdb-explorer"
 version = "0.1.0"
 dependencies = [
  "iced",

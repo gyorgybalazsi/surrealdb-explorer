@@ -2,7 +2,7 @@
 
 use iced::widget::{Column, button, column, pick_list, row, scrollable, text, text_input};
 use iced::{Element, Fill};
-use surrealdb_explore::config::{
+use surrealdb_explorer::config::{
     AssistantConfig, AssistantMode, CONFIG_FILE, Config, DatabaseConfig, GraphConfig, LOG_LEVELS,
     LoggingConfig,
 };

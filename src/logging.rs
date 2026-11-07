@@ -39,7 +39,7 @@ impl LogControl {
 /// `RUST_LOG=debug cargo run`.
 pub fn init(config: &LoggingConfig) -> Result<(WorkerGuard, LogControl), Error> {
     std::fs::create_dir_all(&config.directory)?;
-    let file = tracing_appender::rolling::daily(&config.directory, "surrealdb-explore.log");
+    let file = tracing_appender::rolling::daily(&config.directory, "surrealdb-explorer.log");
     let (file_writer, guard) = tracing_appender::non_blocking(file);
 
     let env_filter = EnvFilter::try_from_default_env().ok();
@@ -57,5 +57,5 @@ pub fn init(config: &LoggingConfig) -> Result<(WorkerGuard, LogControl), Error> 
 }
 
 fn app_filter(level: &str) -> EnvFilter {
-    EnvFilter::new(format!("warn,surrealdb_explore={level}"))
+    EnvFilter::new(format!("warn,surrealdb_explorer={level}"))
 }

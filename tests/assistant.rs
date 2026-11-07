@@ -5,9 +5,9 @@
 
 mod common;
 
-use surrealdb_explore::assistant::{self, Assistant, Model};
-use surrealdb_explore::config::{AssistantMode, Config};
-use surrealdb_explore::{data, db, query};
+use surrealdb_explorer::assistant::{self, Assistant, Model};
+use surrealdb_explorer::config::{AssistantMode, Config};
+use surrealdb_explorer::{data, db, query};
 
 #[test]
 fn describes_tables_fields_and_what_relations_connect() {
@@ -60,11 +60,11 @@ fn the_api_key_setting_must_be_a_1password_reference() {
 }
 
 /// Calls the real Claude API with the key from 1Password. Costs a fraction
-/// of a cent. Set SURREALDB_EXPLORE_KEY_REF to the op:// reference.
+/// of a cent. Set SURREALDB_EXPLORER_KEY_REF to the op:// reference.
 #[test]
 #[ignore]
 fn asks_claude() {
-    let reference = std::env::var("SURREALDB_EXPLORE_KEY_REF").expect("set SURREALDB_EXPLORE_KEY_REF");
+    let reference = std::env::var("SURREALDB_EXPLORER_KEY_REF").expect("set SURREALDB_EXPLORER_KEY_REF");
     let key = assistant::key::fetch(&reference).unwrap();
     let config = common::temp_database("assistant-live");
     common::run(async move {
