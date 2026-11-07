@@ -101,3 +101,50 @@ fn asks_claude() {
         println!("Opus retry: {}\n  {}", again.query, again.explanation);
     });
 }
+
+#[test]
+fn the_chat_history_survives_a_restart() {
+    use surrealdb_explorer::assistant::Suggestion;
+    use surrealdb_explorer::assistant::history::{self, Exchange, MAX_KEPT};
+
+    let dir = common::temp_dir("chat-history");
+    let path = dir.join(history::HISTORY_FILE);
+    assert!(history::load(&path).is_empty(), "no file yet means no history");
+
+    let answered = Exchange {
+        question: "who does alice know?".into(),
+        answer: Ok(Suggestion {
+            question: "who does alice know?".into(),
+            query: "SELECT ->knows->person.* FROM person:alice;".into(),
+            context_query: Some("SELECT * FROM knows WHERE in = person:alice;".into()),
+            explanation: "People Alice knows.".into(),
+            model: Model::Haiku,
+            confident: true,
+            problem: None,
+            notes: vec![],
+        }),
+    };
+    let failed = Exchange { question: "and bob?".into(), answer: Err("no network".into()) };
+    history::save(&path, &[answered, failed]).unwrap();
+
+    let loaded = history::load(&path);
+    assert_eq!(loaded.len(), 2);
+    let first = loaded[0].answer.as_ref().unwrap();
+    assert_eq!(first.model, Model::Haiku);
+    assert_eq!(first.context_query.as_deref(), Some("SELECT * FROM knows WHERE in = person:alice;"));
+    assert_eq!(loaded[1].answer.as_ref().unwrap_err(), "no network");
+
+    // Only the newest exchanges are kept.
+    let many: Vec<Exchange> = (0..MAX_KEPT + 5)
+        .map(|i| Exchange { question: format!("q{i}"), answer: Err("x".into()) })
+        .collect();
+    history::save(&path, &many).unwrap();
+    let loaded = history::load(&path);
+    assert_eq!(loaded.len(), MAX_KEPT);
+    assert_eq!(loaded[0].question, "q5");
+
+    // A damaged file is moved aside, not lost.
+    std::fs::write(&path, "{ not json").unwrap();
+    assert!(history::load(&path).is_empty());
+    assert!(dir.join("chat-history.json.bad").exists());
+}

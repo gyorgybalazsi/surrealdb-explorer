@@ -4,3 +4,4 @@
 /logs
 /config.toml
 /data-encrypted-backup
+/chat-history.json*

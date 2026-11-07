@@ -6,6 +6,7 @@
 
 mod check;
 mod claude;
+pub mod history;
 pub mod key;
 mod schema;
 
@@ -18,7 +19,7 @@ use crate::config::AssistantMode;
 use crate::db::Database;
 
 /// A query Claude suggested, ready to put in the editor.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Suggestion {
     pub question: String,
     pub query: String,

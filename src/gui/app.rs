@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use iced::widget::{button, canvas, column, container, pin, row, rule, stack, text, text_editor};
 use iced::{Color, Element, Fill, Font, Point, Subscription, Task, Theme, Vector, window};
+use surrealdb_explorer::assistant::history::{self, Exchange};
 use surrealdb_explorer::assistant::{self, Assistant, Suggestion};
 use surrealdb_explorer::config::{AssistantMode, Config};
 use surrealdb_explorer::db::{self, Database};
@@ -83,8 +84,11 @@ pub enum Message {
     QuestionEdited(String),
     Ask,
     RetryWithOpus,
-    /// The assistant to keep (it holds the API key) and the answer.
-    AskDone(Option<Assistant>, Result<Suggestion, String>),
+    /// The assistant to keep (it holds the API key), the question and the answer.
+    AskDone(Option<Assistant>, String, Result<Suggestion, String>),
+    /// Puts the query of a chat entry back in the editor.
+    UseAnswer(usize),
+    ClearChat,
 
     // Data actions
     /// Shows the confirmation for an action.
@@ -134,9 +138,10 @@ pub struct App {
 
     pub(super) question: String,
     pub(super) asking: bool,
-    /// The last query Claude suggested.
+    /// The suggested query that is in the editor (Run uses its context query).
     pub(super) suggestion: Option<Suggestion>,
-    pub(super) ask_error: Option<String>,
+    /// Every question asked and its answer, oldest first.
+    pub(super) chat: Vec<Exchange>,
     /// Kept after the first question, so the API key is read only once.
     pub(super) assistant: Option<Assistant>,
 
@@ -192,7 +197,7 @@ impl App {
             question: String::new(),
             asking: false,
             suggestion: None,
-            ask_error: None,
+            chat: history::load(&history::path()),
             assistant: None,
             pending_data_action: None,
             data_busy: false,
@@ -312,26 +317,42 @@ impl App {
             Message::QuestionEdited(question) => self.question = question,
             Message::Ask => return self.ask(false),
             Message::RetryWithOpus => return self.ask(true),
-            Message::AskDone(assistant, result) => {
+            Message::AskDone(assistant, question, result) => {
                 self.asking = false;
                 if assistant.is_some() {
                     self.assistant = assistant;
                 }
-                match result {
+                match &result {
                     Ok(suggestion) => {
                         self.query_text = text_editor::Content::with_text(&suggestion.query);
                         self.query_outcome = None;
-                        self.suggestion = Some(suggestion);
+                        self.suggestion = Some(suggestion.clone());
+                        if self.question.trim() == question {
+                            self.question.clear();
+                        }
                     }
                     Err(e) => {
+                        // The question stays in the box, to ask again.
                         warn!(error = %e, "question failed");
                         // A rejected key is read again next time.
                         if e.contains("rejected the API key") {
                             self.assistant = None;
                         }
-                        self.ask_error = Some(e);
                     }
                 }
+                self.chat.push(Exchange { question, answer: result });
+                self.save_chat();
+            }
+            Message::UseAnswer(i) => {
+                if let Some(Exchange { answer: Ok(suggestion), .. }) = self.chat.get(i) {
+                    self.query_text = text_editor::Content::with_text(&suggestion.query);
+                    self.query_outcome = None;
+                    self.suggestion = Some(suggestion.clone());
+                }
+            }
+            Message::ClearChat => {
+                self.chat.clear();
+                self.save_chat();
             }
 
             Message::AskDataAction(action) => self.pending_data_action = Some(action),
@@ -561,6 +582,12 @@ impl App {
         )
     }
 
+    fn save_chat(&self) {
+        if let Err(e) = history::save(&history::path(), &self.chat) {
+            warn!(error = %e, "could not save the chat history");
+        }
+    }
+
     /// Asks Claude for a query, in the background on our runtime. The first
     /// time, the API key is read from 1Password, which may ask for approval.
     /// `retry_with_opus` redoes the last answer with Opus.
@@ -572,7 +599,10 @@ impl App {
             return Task::none();
         }
         self.asking = true;
-        self.ask_error = None;
+        let asked = match (&previous, retry_with_opus) {
+            (Some(previous), true) => previous.question.clone(),
+            _ => question.clone(),
+        };
         let mode = self.config.assistant.mode;
         let reference = self.config.assistant.api_key.clone();
         let cached = self.assistant.clone();
@@ -594,7 +624,7 @@ impl App {
         });
         Task::perform(
             async move { handle.await.unwrap_or_else(|e| (None, Err(format!("the task failed: {e}")))) },
-            |(assistant, result)| Message::AskDone(assistant, result),
+            move |(assistant, result)| Message::AskDone(assistant, asked.clone(), result),
         )
     }
 

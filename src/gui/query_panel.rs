@@ -2,9 +2,10 @@
 
 use iced::keyboard::{Key, key::Named};
 use iced::widget::text_editor::{Binding, KeyPress};
-use iced::widget::{Column, button, column, container, row, scrollable, text, text_editor, text_input};
+use iced::widget::{Column, button, column, container, row, rule, scrollable, text, text_editor, text_input};
 use iced::{Alignment, Color, Element, Fill, Font, Length};
 use surrealdb_explorer::assistant::Model;
+use surrealdb_explorer::assistant::history::Exchange;
 use surrealdb_explorer::config::AssistantMode;
 use surrealdb_explorer::query::QueryOutcome;
 
@@ -15,6 +16,8 @@ use crate::gui::sidebar::{ERROR, MUTED, SUCCESS, WARNING, bold};
 /// Results longer than this many lines per statement are cut, so a huge
 /// result can't make the window sluggish.
 const MAX_RESULT_LINES: usize = 400;
+/// Width of the chat with Claude, left of the editor.
+const CHAT_WIDTH: f32 = 380.0;
 
 impl App {
     pub(super) fn query_panel(&self) -> Element<'_, Message> {
@@ -24,6 +27,7 @@ impl App {
         if !self.query_open {
             return container(toggle).padding([2, 8]).width(Fill).into();
         }
+        let toggle = container(toggle).padding([2, 0]);
 
         let editor = text_editor(&self.query_text)
             .placeholder("SurrealQL, e.g. SELECT * FROM person WHERE marketing = true;")
@@ -59,11 +63,19 @@ impl App {
             }
         };
 
-        column![toggle, self.question_box(), editor, status, results]
-            .spacing(6)
-            .padding([4, 8])
-            .height(Length::Fixed(460.0))
-            .into()
+        column![
+            toggle,
+            row![
+                self.chat_panel(),
+                rule::vertical(1),
+                column![editor, status, results].spacing(6).width(Fill),
+            ]
+            .spacing(10)
+            .height(Fill),
+        ]
+        .padding([4, 8])
+        .height(Length::Fixed(460.0))
+        .into()
     }
 
     /// The answer to the last query, as shown in the graph: the records that
@@ -115,18 +127,32 @@ impl App {
         )
     }
 
-    /// Asking in plain English, and what came back.
-    fn question_box(&self) -> Element<'_, Message> {
+    /// The chat with Claude: every question and answer, newest at the
+    /// bottom, and the box to ask the next question.
+    fn chat_panel(&self) -> Element<'_, Message> {
         let can_ask = !self.asking && self.db.is_some();
-        let input = text_input("Ask in plain English, e.g. who does alice know?", &self.question)
-            .on_input(Message::QuestionEdited)
-            .on_submit_maybe(can_ask.then_some(Message::Ask))
-            .size(13);
-        let ask = button(text(if self.asking { "Asking…" } else { "Ask Claude" }).size(13))
-            .style(button::primary)
-            .on_press_maybe((can_ask && !self.question.trim().is_empty()).then_some(Message::Ask));
-        let mut col = column![row![input, ask].spacing(8).align_y(Alignment::Center)].spacing(3);
 
+        let header = row![
+            text("Ask Claude").size(13).font(bold()).width(Fill),
+            button(text("Clear history").size(11))
+                .style(button::text)
+                .padding(0)
+                .on_press_maybe((!self.chat.is_empty() && !self.asking).then_some(Message::ClearChat)),
+        ]
+        .align_y(Alignment::Center);
+
+        let mut entries = Column::new().spacing(12).padding([0, 10]);
+        if self.chat.is_empty() {
+            entries = entries.push(
+                text("Ask about the data in plain English. Claude writes the SurrealQL; it goes in the editor for you to check and run.")
+                    .size(12)
+                    .color(MUTED),
+            );
+        }
+        let last = self.chat.len().checked_sub(1);
+        for (i, exchange) in self.chat.iter().enumerate() {
+            entries = entries.push(self.chat_entry(i, exchange, Some(i) == last, can_ask));
+        }
         if self.asking {
             let who = match self.config.assistant.mode {
                 AssistantMode::Auto => "Haiku (Opus if needed)",
@@ -134,31 +160,74 @@ impl App {
                 AssistantMode::Opus => "Opus",
             };
             let key_note = if self.assistant.is_none() { " 1Password may ask you to approve reading the API key." } else { "" };
-            col = col.push(text(format!("Asking {who}…{key_note}")).size(12).color(MUTED));
-        } else if let Some(e) = &self.ask_error {
-            col = col.push(text(e).size(12).color(ERROR));
-        } else if let Some(s) = &self.suggestion {
-            let mut by = s.model.name().to_string();
-            if !s.notes.is_empty() {
-                by = format!("{by} ({})", s.notes.join("; "));
-            }
-            let mut line = row![text(format!("{by}: {}", s.explanation)).size(12).color(MUTED).width(Fill)]
-                .spacing(8)
-                .align_y(Alignment::Center);
-            if s.model == Model::Haiku || s.problem.is_some() {
-                line = line.push(
-                    button(text("Try with Opus").size(12))
-                        .style(button::secondary)
-                        .on_press_maybe(can_ask.then_some(Message::RetryWithOpus)),
+            entries = entries.push(text(format!("Asking {who}…{key_note}")).size(12).color(MUTED));
+        }
+
+        let input = text_input("Ask in plain English, e.g. who does alice know?", &self.question)
+            .on_input(Message::QuestionEdited)
+            .on_submit_maybe(can_ask.then_some(Message::Ask))
+            .size(13);
+        let ask = button(text(if self.asking { "Asking…" } else { "Ask" }).size(13))
+            .style(button::primary)
+            .on_press_maybe((can_ask && !self.question.trim().is_empty()).then_some(Message::Ask));
+
+        column![
+            header,
+            // Anchored to the bottom, like a chat: new answers stay in view.
+            scrollable(entries).anchor_bottom().height(Fill).width(Fill),
+            row![input, ask].spacing(8).align_y(Alignment::Center),
+        ]
+        .spacing(6)
+        .width(CHAT_WIDTH)
+        .into()
+    }
+
+    fn chat_entry<'a>(&self, i: usize, exchange: &'a Exchange, is_last: bool, can_ask: bool) -> Element<'a, Message> {
+        let question = container(text(&exchange.question).size(13))
+            .padding([4, 8])
+            .style(|_| container::background(Color::from_rgb(0.9, 0.94, 1.0)));
+        let mut col = column![question].spacing(4);
+
+        match &exchange.answer {
+            Err(e) => col = col.push(text(e).size(12).color(ERROR)),
+            Ok(s) => {
+                let mut by = s.model.name().to_string();
+                if !s.notes.is_empty() {
+                    by = format!("{by} ({})", s.notes.join("; "));
+                }
+                col = col.push(text(format!("{by}: {}", s.explanation)).size(12));
+                col = col.push(
+                    container(text(&s.query).size(11).font(Font::MONOSPACE))
+                        .padding(4)
+                        .width(Fill)
+                        .style(|_| container::background(Color::from_rgb(0.95, 0.95, 0.95))),
                 );
+                if let Some(problem) = &s.problem {
+                    col = col.push(text(format!("The check found a problem: {problem}")).size(12).color(ERROR));
+                } else if !s.confident {
+                    col = col.push(text("Claude wasn't sure about this one; check the result.").size(12).color(WARNING));
+                }
+
+                let in_editor = self
+                    .suggestion
+                    .as_ref()
+                    .is_some_and(|current| current.question == s.question && current.query == s.query)
+                    && self.query_text.text().trim() == s.query.trim();
+                let mut actions = row![].spacing(8).align_y(Alignment::Center);
+                actions = if in_editor {
+                    actions.push(text("In the editor").size(11).color(SUCCESS))
+                } else {
+                    actions.push(button(text("Use this query").size(11)).style(button::secondary).on_press(Message::UseAnswer(i)))
+                };
+                if is_last && in_editor && (s.model == Model::Haiku || s.problem.is_some()) {
+                    actions = actions.push(
+                        button(text("Try with Opus").size(11))
+                            .style(button::secondary)
+                            .on_press_maybe(can_ask.then_some(Message::RetryWithOpus)),
+                    );
+                }
+                col = col.push(actions);
             }
-            col = col.push(line);
-            if let Some(problem) = &s.problem {
-                col = col.push(text(format!("The check found a problem: {problem}")).size(12).color(ERROR));
-            } else if !s.confident {
-                col = col.push(text("Claude wasn't sure about this one; check the result.").size(12).color(WARNING));
-            }
-            col = col.push(text("The query is in the editor; review it, then Run.").size(11).color(MUTED));
         }
         col.into()
     }
