@@ -50,6 +50,9 @@ impl Model {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Answer {
     pub query: String,
+    /// Read-only query for the relations that connect the answer to the
+    /// records the question is about; empty if there are none.
+    pub context_query: String,
     pub explanation: String,
     pub confident: bool,
 }
@@ -116,7 +119,11 @@ fn answer_schema() -> Json {
         "properties": {
             "query": {
                 "type": "string",
-                "description": "SurrealQL that answers the question"
+                "description": "SurrealQL that returns the records answering the question"
+            },
+            "context_query": {
+                "type": "string",
+                "description": "Read-only SurrealQL returning the relation records (edges) that connect the answer records to the records the question is about, or an empty string"
             },
             "explanation": {
                 "type": "string",
@@ -127,7 +134,7 @@ fn answer_schema() -> Json {
                 "description": "false if the question is ambiguous or you are unsure the query is right"
             }
         },
-        "required": ["query", "explanation", "confident"],
+        "required": ["query", "context_query", "explanation", "confident"],
         "additionalProperties": false
     })
 }
@@ -188,7 +195,7 @@ mod tests {
             "stop_reason": "end_turn",
             "content": [
                 { "type": "thinking", "thinking": "" },
-                { "type": "text", "text": "{\"query\":\"SELECT * FROM person;\",\"explanation\":\"All people.\",\"confident\":true}" }
+                { "type": "text", "text": "{\"query\":\"SELECT * FROM person;\",\"context_query\":\"\",\"explanation\":\"All people.\",\"confident\":true}" }
             ],
             "usage": { "input_tokens": 900, "output_tokens": 40 }
         });

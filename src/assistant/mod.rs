@@ -9,7 +9,7 @@ mod claude;
 pub mod key;
 mod schema;
 
-pub use check::check;
+pub use check::{check, is_read_only};
 pub use claude::Model;
 pub use schema::describe;
 
@@ -22,6 +22,10 @@ use crate::db::Database;
 pub struct Suggestion {
     pub question: String,
     pub query: String,
+    /// Read-only query returning the relations that connect the answer to
+    /// the records the question is about. `None` if there is none, or it
+    /// failed the check.
+    pub context_query: Option<String>,
     pub explanation: String,
     /// The model that wrote this query.
     pub model: Model,
@@ -130,15 +134,31 @@ impl Assistant {
             elapsed_ms = started.elapsed().as_millis() as u64,
             "Claude answered"
         );
-        tracing::debug!(%question, query = %answer.query, ?problem, "suggested query");
+        tracing::debug!(%question, query = %answer.query, context = %answer.context_query, ?problem, "suggested query");
 
         let mut notes = Vec::new();
+        let context_query = match answer.context_query.trim() {
+            "" => None,
+            context if !is_read_only(context) => {
+                tracing::warn!(%context, "ignoring a context query that would change data");
+                None
+            }
+            context => match check(db, context).await {
+                None => Some(context.to_string()),
+                Some(problem) => {
+                    tracing::warn!(%context, %problem, "the context query failed the check");
+                    notes.push("couldn't work out how the records connect".into());
+                    None
+                }
+            },
+        };
         if !reply.served_by.is_empty() && reply.served_by != model.id() {
             notes.push(format!("answered by {} instead", reply.served_by));
         }
         Ok(Suggestion {
             question: question.to_string(),
             query: answer.query.trim().to_string(),
+            context_query,
             explanation: answer.explanation,
             model,
             confident: answer.confident,
@@ -167,6 +187,13 @@ for example `person:alice`.
 clearly asks for a change, and say so in the explanation.
 - Don't use transactions (BEGIN, COMMIT, CANCEL).
 - Several statements are fine, separated by semicolons.
+- query: return the records that answer the question (whole records, or with their \
+`id`), not just names or counts, unless the question asks for a number or a value.
+- context_query: a read-only query that returns the relation records (edges) linking \
+the answer records to the records the question is about, so the app can show how \
+they're connected. Example: for \"who knows someone who knows bob?\" it could be \
+`SELECT * FROM knows WHERE out = person:bob OR out IN (SELECT VALUE in FROM knows \
+WHERE out = person:bob);`. Use an empty string if the answer doesn't involve relations.
 - explanation: one or two short sentences in plain language.
 - confident: false if the question is ambiguous, needs data the schema doesn't show, \
 or you aren't sure the syntax is right.";

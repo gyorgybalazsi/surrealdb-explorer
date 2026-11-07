@@ -7,7 +7,7 @@ mod common;
 
 use surrealdb_explore::assistant::{self, Assistant, Model};
 use surrealdb_explore::config::{AssistantMode, Config};
-use surrealdb_explore::{data, db};
+use surrealdb_explore::{data, db, query};
 
 #[test]
 fn describes_tables_fields_and_what_relations_connect() {
@@ -75,16 +75,24 @@ fn asks_claude() {
         for question in ["who does alice know?", "how many people are there?", "who knows someone who knows bob?"] {
             let s = assistant.ask(&db, question, AssistantMode::Auto).await.unwrap();
             println!(
-                "Q: {question}\n  {} {:?} confident={} problem={:?}\n  {}\n  {}\n",
+                "Q: {question}\n  {} {:?} confident={} problem={:?}\n  query:   {}\n  context: {:?}\n  {}\n",
                 s.model.name(),
                 s.notes,
                 s.confident,
                 s.problem,
                 s.query.replace('\n', "\n  "),
+                s.context_query,
                 s.explanation
             );
             assert!(s.problem.is_none(), "{:?}", s.problem);
         }
+
+        // The answer comes with the relations that explain it.
+        let s = assistant.ask(&db, "who knows someone who knows bob?", AssistantMode::Auto).await.unwrap();
+        let context = s.context_query.expect("a context query");
+        let ids = query::record_ids(&query::run(&db, context).await);
+        println!("context ids: {ids:?}");
+        assert!(ids.iter().any(|id| id.starts_with("knows:")), "the context returns knows relations");
 
         let first = assistant.ask(&db, "who does alice know?", AssistantMode::Haiku).await.unwrap();
         assert_eq!(first.model, Model::Haiku);

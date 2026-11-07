@@ -23,6 +23,10 @@ const EDGE_LABEL: Color = Color::from_rgb(0.47, 0.47, 0.47);
 const NODE_LABEL: Color = Color::from_rgb(0.13, 0.13, 0.13);
 const FADED: Color = Color::from_rgb(0.89, 0.89, 0.89);
 const SELECTED_RING: Color = Color::from_rgb(0.13, 0.13, 0.13);
+/// Ring around records that answer a query.
+const ANSWER_RING: Color = Color::from_rgb(0.95, 0.55, 0.05);
+/// Relations that show how a query's answer connects.
+const CONTEXT_EDGE: Color = Color::from_rgb(0.3, 0.3, 0.3);
 
 /// Maps graph space to the canvas: `screen = centre + offset + pos * scale`.
 #[derive(Clone, Copy)]
@@ -53,6 +57,9 @@ pub struct GraphView<'a> {
     pub camera: Camera,
     pub hover: Option<usize>,
     pub selection: Option<Selection>,
+    /// A query result shown in the graph: the answer records and the
+    /// relations that connect them.
+    pub result: Option<(HashSet<usize>, HashSet<usize>)>,
 }
 
 /// Mouse state kept by the canvas between events.
@@ -206,17 +213,28 @@ impl canvas::Program<Message> for GraphView<'_> {
         let scale = self.camera.scale;
         let radius = NODE_RADIUS * scale.clamp(0.6, 2.0);
 
+        // With a query result shown, only the connecting relations are emphasised.
+        let context = self.result.as_ref().map(|(_, edges)| edges).filter(|edges| !edges.is_empty());
+
         // Relations first, so records are drawn on top.
         for (i, e) in self.graph.edges.iter().enumerate() {
             if !self.graph.edge_visible(e) {
                 continue;
             }
-            let lit_edge = lit.is_none() || self.hover.is_some_and(|h| e.from == h || e.to == h);
+            let in_context = context.is_some_and(|edges| edges.contains(&i));
+            let lit_edge = (lit.is_none() || self.hover.is_some_and(|h| e.from == h || e.to == h))
+                && (context.is_none() || in_context);
             let selected = self.selection == Some(Selection::Edge(i));
-            let color = if selected { SELECTED_RING } else if lit_edge { EDGE_COLOR } else { FADED };
+            let color = match () {
+                _ if selected => SELECTED_RING,
+                _ if !lit_edge => FADED,
+                _ if in_context => CONTEXT_EDGE,
+                _ => EDGE_COLOR,
+            };
+            let width = if selected || in_context { 2.0 } else { 1.2 };
             let a = self.camera.to_screen(bounds, self.graph.nodes[e.from].pos);
             let b = self.camera.to_screen(bounds, self.graph.nodes[e.to].pos);
-            draw_arrow(&mut frame, a, b, radius, color, if selected { 2.0 } else { 1.2 });
+            draw_arrow(&mut frame, a, b, radius, color, width);
             if lit_edge && scale > 0.5 {
                 frame.fill_text(Text {
                     content: e.label.clone(),
@@ -236,6 +254,12 @@ impl canvas::Program<Message> for GraphView<'_> {
             }
             let p = self.camera.to_screen(bounds, n.pos);
             let lit_node = is_lit(i);
+            if self.result.as_ref().is_some_and(|(answer, _)| answer.contains(&i)) {
+                frame.stroke(
+                    &Path::circle(p, radius + 4.0),
+                    Stroke::default().with_color(ANSWER_RING).with_width(3.0),
+                );
+            }
             frame.fill(&Path::circle(p, radius), if lit_node { n.color } else { FADED });
             if self.selection == Some(Selection::Node(i)) {
                 frame.stroke(
