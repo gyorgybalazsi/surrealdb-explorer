@@ -59,6 +59,9 @@ pub struct AssistantConfig {
     /// e.g. `op://Personal/my-key/credential`. The `ANTHROPIC_API_KEY`
     /// environment variable, if set, is used instead.
     pub api_key: String,
+    /// Running a suggested query also runs its context query, which shows
+    /// how the answer connects to the records the question is about.
+    pub show_connections: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,7 +100,7 @@ impl Default for Config {
 
 impl Default for AssistantConfig {
     fn default() -> Self {
-        AssistantConfig { mode: AssistantMode::Auto, api_key: String::new() }
+        AssistantConfig { mode: AssistantMode::Auto, api_key: String::new(), show_connections: true }
     }
 }
 

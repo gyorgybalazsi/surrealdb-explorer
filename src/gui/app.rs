@@ -76,8 +76,11 @@ pub enum Message {
     ToggleQuery,
     QueryEdited(text_editor::Action),
     RunQuery,
-    /// The query's outcome, and the outcome of its context query if one ran.
-    QueryDone(QueryOutcome, Option<QueryOutcome>),
+    /// The query's outcome, the outcome of its context query if one ran, and
+    /// whether it was a query Claude suggested.
+    QueryDone(QueryOutcome, Option<QueryOutcome>, bool),
+    /// Turns running the context query with a suggested query on or off.
+    ToggleConnections(bool),
     ShowQueryInGraph,
 
     // Plain-English questions
@@ -88,6 +91,8 @@ pub enum Message {
     AskDone(Option<Assistant>, String, Result<Suggestion, String>),
     /// Puts the query of a chat entry back in the editor.
     UseAnswer(usize),
+    /// Puts the context query of a chat entry in the editor, as a query of its own.
+    UseContext(usize),
     ClearChat,
 
     // Data actions
@@ -294,20 +299,19 @@ impl App {
             Message::ToggleQuery => self.query_open = !self.query_open,
             Message::QueryEdited(action) => self.query_text.perform(action),
             Message::RunQuery => return self.run_query(),
-            Message::QueryDone(outcome, context) => {
+            Message::QueryDone(outcome, context, suggested) => {
                 self.query_running = false;
                 let changed_anything = outcome
                     .statements
                     .as_ref()
                     .is_ok_and(|s| s.iter().any(|r| r.result.is_ok()));
-                let suggested = context.is_some();
                 self.query_outcome = Some(outcome);
                 self.query_context = context;
                 // The query may have changed data; show the current state.
                 if changed_anything {
                     self.reload();
                 }
-                // A suggested query shows its answer, and how it connects, straight away.
+                // A suggested query shows its answer (and how it connects) straight away.
                 if suggested {
                     self.show_query_in_graph();
                 }
@@ -348,6 +352,21 @@ impl App {
                     self.query_text = text_editor::Content::with_text(&suggestion.query);
                     self.query_outcome = None;
                     self.suggestion = Some(suggestion.clone());
+                }
+            }
+            Message::UseContext(i) => {
+                if let Some(Exchange { answer: Ok(s), .. }) = self.chat.get(i)
+                    && let Some(context) = &s.context_query
+                {
+                    self.query_text = text_editor::Content::with_text(context);
+                    self.query_outcome = None;
+                    self.suggestion = None;
+                }
+            }
+            Message::ToggleConnections(on) => {
+                self.config.assistant.show_connections = on;
+                if let Err(e) = self.config.save() {
+                    warn!(error = %e, "could not save the setting");
                 }
             }
             Message::ClearChat => {
@@ -552,11 +571,12 @@ impl App {
             return Task::none();
         }
         self.query_running = true;
-        // A query Claude suggested, run unchanged, brings its context query.
-        let context = self
-            .suggestion
-            .as_ref()
-            .filter(|s| s.query.trim() == sql.trim())
+        // A query Claude suggested, run unchanged, brings its context query
+        // (unless that's turned off).
+        let suggested = self.suggestion_in_editor();
+        let is_suggested = suggested.is_some();
+        let context = suggested
+            .filter(|_| self.config.assistant.show_connections)
             .and_then(|s| s.context_query.clone());
         // Run on our runtime (big thread stacks, see `runtime`), and only
         // wait for the result on iced's side, so the window stays responsive.
@@ -578,8 +598,13 @@ impl App {
                     (failed, None)
                 })
             },
-            |(outcome, context)| Message::QueryDone(outcome, context),
+            move |(outcome, context)| Message::QueryDone(outcome, context, is_suggested),
         )
+    }
+
+    /// The suggestion whose query is in the editor, unchanged.
+    pub(super) fn suggestion_in_editor(&self) -> Option<&Suggestion> {
+        self.suggestion.as_ref().filter(|s| s.query.trim() == self.query_text.text().trim())
     }
 
     fn save_chat(&self) {

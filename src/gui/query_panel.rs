@@ -2,7 +2,7 @@
 
 use iced::keyboard::{Key, key::Named};
 use iced::widget::text_editor::{Binding, KeyPress};
-use iced::widget::{Column, button, column, container, row, rule, scrollable, text, text_editor, text_input};
+use iced::widget::{Column, button, checkbox, column, container, row, rule, scrollable, text, text_editor, text_input};
 use iced::{Alignment, Color, Element, Fill, Font, Length};
 use surrealdb_explorer::assistant::Model;
 use surrealdb_explorer::assistant::history::Exchange;
@@ -45,6 +45,14 @@ impl App {
             .on_press_maybe(self.query_outcome.as_ref().map(|_| Message::ShowQueryInGraph));
 
         let mut status = row![run, show].spacing(8).align_y(Alignment::Center);
+        if self.suggestion_in_editor().is_some_and(|s| s.context_query.is_some()) {
+            status = status.push(
+                checkbox(self.config.assistant.show_connections)
+                    .label("Show how they connect")
+                    .on_toggle(Message::ToggleConnections)
+                    .text_size(12),
+            );
+        }
         if let Some(summary) = self.query_outcome.as_ref().map(summary) {
             status = status.push(summary);
         }
@@ -202,6 +210,24 @@ impl App {
                         .width(Fill)
                         .style(|_| container::background(Color::from_rgb(0.95, 0.95, 0.95))),
                 );
+                if let Some(context) = &s.context_query {
+                    col = col.push(
+                        row![
+                            text("How they connect").size(11).color(MUTED).width(Fill),
+                            button(text("Put in editor").size(11))
+                                .style(button::text)
+                                .padding(0)
+                                .on_press(Message::UseContext(i)),
+                        ]
+                        .align_y(Alignment::Center),
+                    );
+                    col = col.push(
+                        container(text(context).size(11).font(Font::MONOSPACE).color(MUTED))
+                            .padding(4)
+                            .width(Fill)
+                            .style(|_| container::background(Color::from_rgb(0.97, 0.97, 0.97))),
+                    );
+                }
                 if let Some(problem) = &s.problem {
                     col = col.push(text(format!("The check found a problem: {problem}")).size(12).color(ERROR));
                 } else if !s.confident {

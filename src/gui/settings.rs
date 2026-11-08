@@ -33,6 +33,9 @@ pub struct SettingsForm {
     pub assistant_mode: AssistantMode,
     /// 1Password reference, not the key itself.
     pub api_key: String,
+    /// Not edited here (the query panel has the checkbox); kept so saving
+    /// doesn't reset it.
+    pub show_connections: bool,
     /// Result of the last save: a confirmation or an error.
     pub message: Option<Result<String, String>>,
 }
@@ -48,6 +51,7 @@ impl SettingsForm {
             log_directory: c.logging.directory.clone(),
             assistant_mode: c.assistant.mode,
             api_key: c.assistant.api_key.clone(),
+            show_connections: c.assistant.show_connections,
             message: None,
         }
     }
@@ -87,6 +91,7 @@ impl SettingsForm {
             assistant: AssistantConfig {
                 mode: self.assistant_mode,
                 api_key: self.api_key.trim().into(),
+                show_connections: self.show_connections,
             },
         };
         config.validate().map_err(|e| e.to_string())?;
