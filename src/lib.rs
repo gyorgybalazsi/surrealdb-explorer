@@ -2,6 +2,7 @@
 //! and turning its records into nodes and edges. The desktop app is in `src/main.rs`.
 
 pub mod assistant;
+pub mod canton;
 pub mod config;
 pub mod data;
 pub mod db;

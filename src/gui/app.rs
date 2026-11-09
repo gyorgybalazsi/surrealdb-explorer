@@ -7,7 +7,7 @@ use iced::widget::{button, canvas, column, container, pin, row, rule, stack, tex
 use iced::{Color, Element, Fill, Font, Point, Subscription, Task, Theme, Vector, window};
 use surrealdb_explorer::assistant::history::{self, Exchange};
 use surrealdb_explorer::assistant::{self, Assistant, Attachment, Request, Suggestion};
-use surrealdb_explorer::config::{AssistantMode, Config};
+use surrealdb_explorer::config::{AssistantMode, Config, Visualization};
 use surrealdb_explorer::db::{self, Database};
 use surrealdb_explorer::graph::{self, GraphData};
 use surrealdb_explorer::config::DatabaseConfig;
@@ -41,6 +41,8 @@ pub enum Selection {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DataAction {
     LoadSampleData,
+    /// A sample Canton event graph, shown with the Canton visualization.
+    LoadCantonSample,
     EraseDatabase,
 }
 
@@ -64,6 +66,10 @@ pub enum Message {
     MenuCopy,
     ShowAll,
     Reload,
+    /// Switches how the graph is drawn (and remembers it).
+    SetVisualization(Visualization),
+    /// Fits the whole graph in view.
+    FitView,
 
     // Settings
     OpenSettings,
@@ -190,7 +196,7 @@ impl App {
             Err(e) => (None, GraphData::default(), Some(format!("Could not open the database: {e}"))),
         };
 
-        App {
+        let mut app = App {
             runtime,
             db,
             config,
@@ -221,7 +227,9 @@ impl App {
             assistant: None,
             pending_data_action: None,
             data_busy: false,
-        }
+        };
+        app.apply_visualization();
+        app
     }
 
     pub fn theme(&self) -> Theme {
@@ -290,8 +298,20 @@ impl App {
                 self.result_view = None;
                 self.notice = None;
                 self.layout.reheat(0.3);
+                self.relayout_canton();
             }
             Message::Reload => self.reload(),
+            Message::SetVisualization(v) => {
+                if v != self.config.graph.visualization {
+                    info!(visualization = %v, "visualization changed");
+                    self.config.graph.visualization = v;
+                    if let Err(e) = self.config.save() {
+                        warn!(error = %e, "could not save the setting");
+                    }
+                    self.apply_visualization();
+                }
+            }
+            Message::FitView => self.fit_view(),
 
             Message::OpenSettings => {
                 self.settings = Some(SettingsForm::from_config(&self.config));
@@ -423,8 +443,16 @@ impl App {
                 match result {
                     Ok(()) => {
                         self.reload();
+                        if action == DataAction::LoadCantonSample {
+                            self.config.graph.visualization = Visualization::Canton;
+                            if let Err(e) = self.config.save() {
+                                warn!(error = %e, "could not save the setting");
+                            }
+                            self.apply_visualization();
+                        }
                         self.notice = Some(match action {
                             DataAction::LoadSampleData => "Sample data loaded.".into(),
+                            DataAction::LoadCantonSample => "Canton sample loaded.".into(),
                             DataAction::EraseDatabase => "Database erased.".into(),
                         });
                     }
@@ -461,6 +489,9 @@ impl App {
         match self.runtime.block_on(graph::load(db, limit)) {
             Ok(data) => {
                 self.graph = Graph::new(data, Some(&self.graph));
+                if self.canton() {
+                    self.graph.canton_layout();
+                }
                 self.error = None;
                 self.notice = Some("Reloaded".into());
             }
@@ -476,6 +507,47 @@ impl App {
         self.layout.reheat(0.5);
     }
 
+    fn canton(&self) -> bool {
+        self.config.graph.visualization == Visualization::Canton
+    }
+
+    /// Lays the graph out for the current visualization: the Canton event
+    /// graph is placed like the Canton toolbox does and stays put; the
+    /// standard view starts the force-directed layout.
+    fn apply_visualization(&mut self) {
+        let canton = self.canton();
+        self.layout.set_enabled(!canton);
+        if canton {
+            self.graph.canton_layout();
+        }
+        self.fit_view();
+    }
+
+    /// In the Canton view, places the visible records again (after records
+    /// were shown or hidden in bulk) and fits them in view.
+    fn relayout_canton(&mut self) {
+        if self.canton() {
+            self.graph.canton_layout();
+            self.fit_view();
+        }
+    }
+
+    /// Zooms and pans so every visible record is in view. The standard view
+    /// just recentres, since its layout is still spreading out.
+    fn fit_view(&mut self) {
+        // Roughly the canvas: the window less the sidebar and the query bar.
+        const AREA: Vector = Vector::new(840.0, 640.0);
+        const MARGIN: f32 = 90.0;
+        let Some((min, max)) = self.graph.bounds() else {
+            self.camera = Camera::default();
+            return;
+        };
+        let size = max - min + Vector::new(2.0 * MARGIN, 2.0 * MARGIN);
+        let scale = if self.canton() { (AREA.x / size.x).min(AREA.y / size.y).clamp(0.1, 1.5) } else { 1.0 };
+        let centre = (min + max) * 0.5;
+        self.camera = Camera { offset: centre * -scale, scale };
+    }
+
     /// Runs a data action in the background, on our runtime (see `runtime`).
     fn run_data_action(&mut self, action: DataAction) -> Task<Message> {
         let Some(db) = self.db.clone() else { return Task::none() };
@@ -488,6 +560,7 @@ impl App {
         let handle = self.runtime.spawn(async move {
             match action {
                 DataAction::LoadSampleData => data::load_sample_data(&db).await,
+                DataAction::LoadCantonSample => data::load_canton_sample(&db).await,
                 DataAction::EraseDatabase => data::erase(&db, &config).await,
             }
             .map_err(|e| e.to_string())
@@ -740,6 +813,7 @@ impl App {
         self.selection = None;
         self.hover = None;
         self.layout.reheat(0.3);
+        self.relayout_canton();
     }
 
     /// The result view as record and relation indices into the current graph.
@@ -766,6 +840,7 @@ impl App {
             hover: self.hover,
             selection: self.selection,
             result: self.result_indices(),
+            visualization: self.config.graph.visualization,
         })
         .width(Fill)
         .height(Fill);

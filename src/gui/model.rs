@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use iced::{Color, Vector};
+use surrealdb_explorer::canton::{self, LayoutEdge, LayoutNode, NodeKind, RelKind};
 use surrealdb_explorer::graph::GraphData;
 
 const PALETTE: [Color; 10] = [
@@ -31,6 +32,9 @@ pub struct Node {
     pub label: String,
     pub data: serde_json::Value,
     pub color: Color,
+    /// What it is in a Canton event graph, and its name there.
+    pub kind: NodeKind,
+    pub canton_label: String,
     /// Position in graph space (the camera maps it to the screen).
     pub pos: Vector,
     pub vel: Vector,
@@ -43,6 +47,8 @@ pub struct Edge {
     pub to: usize,
     pub label: String,
     pub data: serde_json::Value,
+    /// What it is in a Canton event graph.
+    pub kind: RelKind,
 }
 
 pub struct Table {
@@ -87,8 +93,12 @@ impl Graph {
                 let angle = std::f32::consts::TAU * i as f32 / count;
                 let start = Vector::new(angle.cos(), angle.sin()) * (60.0 + 8.0 * count.sqrt());
                 let (pos, hidden) = old.get(n.id.as_str()).copied().unwrap_or((start, false));
+                let kind = NodeKind::from_table(&n.table);
+                let label = display_name(&n.id, &n.data);
                 Node {
-                    label: display_name(&n.id, &n.data),
+                    canton_label: canton::display_name(kind, &n.data).unwrap_or_else(|| label.clone()),
+                    label,
+                    kind,
                     color: color_of(&n.table),
                     id: n.id,
                     table: n.table,
@@ -108,6 +118,7 @@ impl Graph {
             .into_iter()
             .filter_map(|e| {
                 Some(Edge {
+                    kind: RelKind::from_table(&e.label),
                     from: *index.get(e.from.as_str())?,
                     to: *index.get(e.to.as_str())?,
                     id: e.id,
@@ -152,6 +163,52 @@ impl Graph {
             }
         }
         set
+    }
+
+    /// Places the visible records the way the Canton toolbox does (see
+    /// `canton::layout`), so hidden records leave no gaps.
+    pub fn canton_layout(&mut self) {
+        let visible: Vec<usize> = (0..self.nodes.len()).filter(|&i| !self.nodes[i].hidden).collect();
+        let slot: HashMap<usize, usize> = visible.iter().enumerate().map(|(s, &i)| (i, s)).collect();
+        let nodes: Vec<LayoutNode> =
+            visible.iter().map(|&i| LayoutNode { kind: self.nodes[i].kind, data: &self.nodes[i].data }).collect();
+        let edges: Vec<LayoutEdge> = self
+            .edges
+            .iter()
+            .filter_map(|e| Some(LayoutEdge { from: *slot.get(&e.from)?, to: *slot.get(&e.to)?, kind: e.kind }))
+            .collect();
+        let positions = canton::layout(&nodes, &edges);
+        // Centred on the origin, where the camera starts.
+        let (min, max) = positions.iter().fold(
+            (Vector::new(f32::MAX, f32::MAX), Vector::new(f32::MIN, f32::MIN)),
+            |(lo, hi), &(x, y)| (Vector::new(lo.x.min(x), lo.y.min(y)), Vector::new(hi.x.max(x), hi.y.max(y))),
+        );
+        let centre = (min + max) * 0.5;
+        for (&i, (x, y)) in visible.iter().zip(positions) {
+            self.nodes[i].pos = Vector::new(x, y) - centre;
+            self.nodes[i].vel = Vector::ZERO;
+        }
+    }
+
+    /// The smallest box around the visible records, as (min, max).
+    pub fn bounds(&self) -> Option<(Vector, Vector)> {
+        self.nodes.iter().filter(|n| !n.hidden).fold(None, |acc, n| {
+            let (lo, hi) = acc.unwrap_or((n.pos, n.pos));
+            Some((
+                Vector::new(lo.x.min(n.pos.x), lo.y.min(n.pos.y)),
+                Vector::new(hi.x.max(n.pos.x), hi.y.max(n.pos.y)),
+            ))
+        })
+    }
+
+    /// Whether the records include a Canton event graph.
+    pub fn looks_like_event_graph(&self) -> bool {
+        canton::looks_like_event_graph(self.tables.iter().map(|t| t.name.as_str()))
+    }
+
+    /// Records that a CONSUMES relation archives: drawn faded, as in the toolbox.
+    pub fn consumed(&self) -> HashSet<usize> {
+        self.edges.iter().filter(|e| e.kind == RelKind::Consumes).map(|e| e.to).collect()
     }
 
     pub fn hidden_count(&self) -> usize {

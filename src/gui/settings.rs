@@ -4,7 +4,7 @@ use iced::widget::{Column, button, column, pick_list, row, scrollable, text, tex
 use iced::{Element, Fill};
 use surrealdb_explorer::config::{
     AssistantConfig, AssistantMode, CONFIG_FILE, Config, DatabaseConfig, GraphConfig, LOG_LEVELS,
-    LoggingConfig,
+    LoggingConfig, Visualization,
 };
 
 use crate::gui::app::{DataAction, Message};
@@ -36,6 +36,8 @@ pub struct SettingsForm {
     /// Not edited here (the query panel has the checkbox); kept so saving
     /// doesn't reset it.
     pub show_connections: bool,
+    /// Not edited here either (the sidebar has the picker).
+    pub visualization: Visualization,
     /// Result of the last save: a confirmation or an error.
     pub message: Option<Result<String, String>>,
 }
@@ -52,6 +54,7 @@ impl SettingsForm {
             assistant_mode: c.assistant.mode,
             api_key: c.assistant.api_key.clone(),
             show_connections: c.assistant.show_connections,
+            visualization: c.graph.visualization,
             message: None,
         }
     }
@@ -83,7 +86,7 @@ impl SettingsForm {
                 namespace: self.namespace.trim().into(),
                 database: self.database.trim().into(),
             },
-            graph: GraphConfig { max_records_per_table },
+            graph: GraphConfig { max_records_per_table, visualization: self.visualization },
             logging: LoggingConfig {
                 level: self.log_level.clone(),
                 directory: self.log_directory.trim().into(),
@@ -199,12 +202,15 @@ fn data_section(pending: Option<DataAction>, busy: bool, connected: bool) -> Ele
                 button(text("Load sample data").size(13))
                     .style(button::secondary)
                     .on_press(Message::AskDataAction(DataAction::LoadSampleData)),
-                button(text("Erase database").size(13))
-                    .style(button::danger)
-                    .on_press(Message::AskDataAction(DataAction::EraseDatabase)),
+                button(text("Load Canton sample").size(13))
+                    .style(button::secondary)
+                    .on_press(Message::AskDataAction(DataAction::LoadCantonSample)),
             ]
             .spacing(8),
-            text("Both ask for confirmation first.").size(11).color(MUTED),
+            button(text("Erase database").size(13))
+                .style(button::danger)
+                .on_press(Message::AskDataAction(DataAction::EraseDatabase)),
+            text("Each asks for confirmation first.").size(11).color(MUTED),
         ]
         .spacing(4)
         .into(),
@@ -214,6 +220,11 @@ fn data_section(pending: Option<DataAction>, busy: bool, connected: bool) -> Ele
                     DataAction::LoadSampleData => (
                         "Add the sample people and their relations? This deletes all existing `knows` relations; other data is kept.",
                         "Load sample data",
+                        button::primary,
+                    ),
+                    DataAction::LoadCantonSample => (
+                        "Add a small Canton event graph (parties, transactions, created and exercised events) and show it as a Canton event graph? Other data is kept.",
+                        "Load Canton sample",
                         button::primary,
                     ),
                     DataAction::EraseDatabase => (

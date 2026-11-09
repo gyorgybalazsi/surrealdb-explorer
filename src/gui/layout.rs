@@ -20,11 +20,20 @@ const ALPHA_MIN: f32 = 0.005;
 
 pub struct Layout {
     alpha: f32,
+    /// Off while records are placed some other way (the Canton event graph
+    /// layout): then nothing moves unless dragged.
+    enabled: bool,
 }
 
 impl Layout {
     pub fn new() -> Self {
-        Layout { alpha: 1.0 }
+        Layout { alpha: 1.0, enabled: true }
+    }
+
+    /// Turns the simulation on (moving straight away) or off.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        self.alpha = if enabled { 1.0 } else { 0.0 };
     }
 
     /// Whether the layout is still moving (and needs animation frames).
@@ -34,6 +43,9 @@ impl Layout {
 
     /// Restarts movement, e.g. while a record is being dragged.
     pub fn reheat(&mut self, alpha: f32) {
+        if !self.enabled {
+            return;
+        }
         self.alpha = self.alpha.max(alpha);
     }
 
