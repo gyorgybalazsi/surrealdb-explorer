@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use iced::widget::{button, canvas, column, container, pin, row, rule, stack, text, text_editor};
 use iced::{Color, Element, Fill, Font, Point, Subscription, Task, Theme, Vector, window};
-use surrealdb_explorer::assistant;
 use surrealdb_explorer::config::{Config, Connection};
 use surrealdb_explorer::db::{self, Database};
 use surrealdb_explorer::graph::{self, GraphData, ResultGraph};
@@ -504,7 +503,6 @@ impl App {
             notes.push("The new log folder is used after a restart.");
         }
 
-        self.config.assistant = new.assistant.clone();
 
         let graph_changed = new.graph != old.graph;
         self.config.graph = new.graph.clone();
@@ -565,7 +563,7 @@ impl App {
             return Task::none();
         }
         self.query_running = true;
-        let changes_data = !assistant::is_read_only(&sql);
+        let changes_data = !query::is_read_only(&sql);
         // Run on our runtime (big thread stacks, see `runtime`), and only
         // wait for the result on iced's side, so the window stays responsive.
         let handle = self.runtime.spawn(async move { query::run(&db, sql).await });

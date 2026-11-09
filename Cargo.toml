@@ -6,8 +6,6 @@ edition = "2024"
 [dependencies]
 iced = { version = "0.14", features = ["canvas"] }
 csv = "1.4"
-rfd = "0.18"
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 surrealdb = { version = "4.0.0", features = ["kv-surrealkv"] }
@@ -18,3 +16,6 @@ tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 rmcp = { version = "3.9", features = ["server", "macros", "transport-streamable-http-server"] }
 axum = "0.8.9"
+
+[dev-dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }

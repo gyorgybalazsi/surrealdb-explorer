@@ -3,7 +3,7 @@
 use iced::widget::{Column, button, column, pick_list, row, scrollable, text, text_input};
 use iced::{Element, Fill};
 use surrealdb_explorer::config::{
-    AssistantConfig, AssistantMode, CONFIG_FILE, Config, Connection, DatabaseConfig, GraphConfig,
+    CONFIG_FILE, Config, Connection, DatabaseConfig, GraphConfig,
     LOG_LEVELS, LoggingConfig, McpConfig,
 };
 
@@ -41,12 +41,6 @@ pub struct SettingsForm {
     pub connect_results: bool,
     pub log_level: String,
     pub log_directory: String,
-    pub assistant_mode: AssistantMode,
-    /// Not edited here any more; kept so saving doesn't change it.
-    pub api_key: String,
-    /// Not edited here (the query panel has the checkbox); kept so saving
-    /// doesn't reset it.
-    pub show_connections: bool,
     /// Not edited in the form; kept so saving doesn't reset it.
     pub mcp: McpConfig,
     /// Result of the last save: a confirmation or an error.
@@ -68,9 +62,6 @@ impl SettingsForm {
             connect_results: c.graph.connect_results,
             log_level: c.logging.level.clone(),
             log_directory: c.logging.directory.clone(),
-            assistant_mode: c.assistant.mode,
-            api_key: c.assistant.api_key.clone(),
-            show_connections: c.assistant.show_connections,
             mcp: c.mcp.clone(),
             message: None,
         }
@@ -119,11 +110,6 @@ impl SettingsForm {
             logging: LoggingConfig {
                 level: self.log_level.clone(),
                 directory: self.log_directory.trim().into(),
-            },
-            assistant: AssistantConfig {
-                mode: self.assistant_mode,
-                api_key: self.api_key.trim().into(),
-                show_connections: self.show_connections,
             },
             mcp: self.mcp.clone(),
         };

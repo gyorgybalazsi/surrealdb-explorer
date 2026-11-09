@@ -16,10 +16,10 @@ use rmcp::{ErrorData as McpError, ServerHandler, schemars, tool, tool_handler, t
 use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::assistant::{describe, is_read_only};
 use crate::db::Database;
 use crate::graph::{self, ResultGraph};
-use crate::query::{self, QueryOutcome};
+use crate::query::{self, QueryOutcome, is_read_only};
+use crate::schema::describe;
 
 /// Results longer than this are cut before they are sent back, so a huge
 /// result can't flood the conversation.

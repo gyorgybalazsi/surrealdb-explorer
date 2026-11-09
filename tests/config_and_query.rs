@@ -36,11 +36,13 @@ fn missing_fields_take_defaults_and_bad_values_are_refused() {
     assert_eq!(config.graph.max_records_per_table, 7);
     assert_eq!(config.database, DatabaseConfig::default());
 
-    // Settings added later (like show_connections) take their default.
-    std::fs::write(&path, "[assistant]\nmode = \"haiku\"\n").unwrap();
+    // Settings added later take their default, and sections that are no
+    // longer used (like an old [assistant]) are ignored.
+    std::fs::write(&path, "[assistant]\nmode = \"haiku\"\n[mcp]\nport = 9000\n").unwrap();
     let (config, _) = Config::load_or_create_at(&path).unwrap();
-    assert_eq!(config.assistant.mode, surrealdb_explorer::config::AssistantMode::Haiku);
-    assert!(config.assistant.show_connections);
+    assert_eq!(config.mcp.port, 9000);
+    assert!(config.mcp.enabled);
+    assert!(!config.graph.connect_results);
 
     std::fs::write(&path, "[logging]\nlevel = \"loud\"\n").unwrap();
     assert!(Config::load_or_create_at(&path).is_err());
