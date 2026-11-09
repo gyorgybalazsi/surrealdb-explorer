@@ -3,9 +3,10 @@
 
 use crate::db::Database;
 
-/// What SurrealDB reports for statements that ran fine inside a cancelled
-/// transaction. Any other error is a problem with the query.
-const CANCELLED: &str = "cancelled transaction";
+/// What SurrealDB reports for the other statements of a transaction: those
+/// that ran fine before the CANCEL, and, when one statement fails, all the
+/// rest. Any other error is the problem with the query.
+const NOT_THE_CAUSE: [&str; 2] = ["cancelled transaction", "failed transaction"];
 
 /// Returns the first problem SurrealDB finds with `query`, or `None` if it
 /// runs. Queries with their own transaction statements can't be wrapped and
@@ -32,7 +33,7 @@ pub async fn check_with(db: &Database, query: &str, params: &serde_json::Value) 
                 .take_errors()
                 .into_iter()
                 .map(|(i, e)| (i, e.to_string()))
-                .filter(|(_, e)| !e.contains(CANCELLED))
+                .filter(|(_, e)| !NOT_THE_CAUSE.iter().any(|m| e.contains(m)))
                 .collect();
             errors.sort();
             errors.into_iter().next().map(|(_, e)| e)

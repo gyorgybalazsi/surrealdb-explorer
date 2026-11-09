@@ -41,6 +41,10 @@ fn the_check_finds_problems_and_changes_nothing() {
         let syntax = assistant::check(&db, "SELEC * FROM person;").await;
         assert!(syntax.is_some_and(|p| p.contains("Parse error")));
         assert!(assistant::check(&db, "  ").await.is_some());
+        // When one statement fails, the others say "failed transaction";
+        // the check reports the statement that actually failed.
+        let cast = assistant::check(&db, "LET $a = 1; LET $b = <array>'[1, 2]'; RETURN $b;").await;
+        assert!(cast.as_deref().is_some_and(|p| p.contains("Could not cast")), "{cast:?}");
 
         // A checked DELETE must not delete.
         assert_eq!(assistant::check(&db, "DELETE person;").await, None);

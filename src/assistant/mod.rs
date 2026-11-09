@@ -252,6 +252,8 @@ like '1995-11-22' casts fine), and `<option<int>>` and so on for columns that ca
 empty, since `<int>NONE` is an error. `<bool>` doesn't accept 'True' or 'False': \
 compare instead (`$row.isActor = 'True'`). A JSON file is its parsed value, a JSON \
 Lines file an array of its lines, any other file one string.
+- To read JSON held in a string (a JSON-lines export, for example), decode it with \
+`encoding::json::decode($text)`; casts like `<array>` or `<object>` don't parse text.
 - Large files are shown only in part, so read their data through the parameter \
 instead of copying values into the query. For example, to load rows: \
 `FOR $row IN $movies { CREATE type::record('movie', <int>$row.movieId) CONTENT { \
