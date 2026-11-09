@@ -27,8 +27,14 @@ pub struct QueryOutcome {
 
 /// Runs `sql` and collects every statement's result.
 pub async fn run(db: &Database, sql: String) -> QueryOutcome {
+    run_with(db, sql, &serde_json::Value::Object(Default::default())).await
+}
+
+/// Runs `sql` with parameters: `params` is an object whose fields the
+/// query can read as `$field`.
+pub async fn run_with(db: &Database, sql: String, params: &serde_json::Value) -> QueryOutcome {
     let started = Instant::now();
-    let statements = match db.query(sql.as_str()).with_stats().await {
+    let statements = match db.query(sql.as_str()).bind(params.clone()).with_stats().await {
         Ok(mut response) => Ok((0..response.num_statements())
             .filter_map(|i| response.take::<Value>(i))
             .map(|(stats, result)| StatementResult {

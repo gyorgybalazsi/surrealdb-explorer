@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 iced = { version = "0.14", features = ["canvas"] }
+csv = "1.4"
+rfd = "0.18"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
