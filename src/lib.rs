@@ -8,6 +8,7 @@ pub mod db;
 pub mod graph;
 pub mod logging;
 pub mod query;
+pub mod secret;
 
 /// The error type of fallible operations in this crate.
 pub type Error = Box<dyn std::error::Error + Send + Sync>;

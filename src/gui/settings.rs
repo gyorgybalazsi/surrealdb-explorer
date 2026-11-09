@@ -3,8 +3,8 @@
 use iced::widget::{Column, button, column, pick_list, row, scrollable, text, text_input};
 use iced::{Element, Fill};
 use surrealdb_explorer::config::{
-    AssistantConfig, AssistantMode, CONFIG_FILE, Config, DatabaseConfig, GraphConfig, LOG_LEVELS,
-    LoggingConfig,
+    AssistantConfig, AssistantMode, CONFIG_FILE, Config, Connection, DatabaseConfig, GraphConfig,
+    LOG_LEVELS, LoggingConfig,
 };
 
 use crate::gui::app::{DataAction, Message};
@@ -14,6 +14,9 @@ use crate::gui::sidebar::{ERROR, MUTED, SIDEBAR_WIDTH, SUCCESS, heading};
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SettingsField {
     DatabasePath,
+    Server,
+    Username,
+    Password,
     Namespace,
     Database,
     MaxRecords,
@@ -25,7 +28,12 @@ pub enum SettingsField {
 
 /// The settings as edited, kept as text until saved.
 pub struct SettingsForm {
+    pub connection: Connection,
     pub database_path: String,
+    pub server: String,
+    pub username: String,
+    /// The password or a 1Password reference; shown hidden.
+    pub password: String,
     pub namespace: String,
     pub database: String,
     pub max_records: String,
@@ -47,7 +55,11 @@ pub struct SettingsForm {
 impl SettingsForm {
     pub fn from_config(c: &Config) -> Self {
         SettingsForm {
+            connection: c.database.connection,
             database_path: c.database.path.clone(),
+            server: c.database.server.clone(),
+            username: c.database.username.clone(),
+            password: c.database.password.clone(),
             namespace: c.database.namespace.clone(),
             database: c.database.database.clone(),
             max_records: c.graph.max_records_per_table.to_string(),
@@ -65,6 +77,9 @@ impl SettingsForm {
     pub fn set(&mut self, field: SettingsField, value: String) {
         let target = match field {
             SettingsField::DatabasePath => &mut self.database_path,
+            SettingsField::Server => &mut self.server,
+            SettingsField::Username => &mut self.username,
+            SettingsField::Password => &mut self.password,
             SettingsField::Namespace => &mut self.namespace,
             SettingsField::Database => &mut self.database,
             SettingsField::MaxRecords => &mut self.max_records,
@@ -91,7 +106,11 @@ impl SettingsForm {
             .map_err(|_| "max records in a query result must be a whole number".to_string())?;
         let config = Config {
             database: DatabaseConfig {
+                connection: self.connection,
                 path: self.database_path.trim().into(),
+                server: self.server.trim().into(),
+                username: self.username.trim().into(),
+                password: self.password.clone(),
                 namespace: self.namespace.trim().into(),
                 database: self.database.trim().into(),
             },
@@ -135,7 +154,39 @@ impl SettingsForm {
         col = col.push(text(format!("Saved in {CONFIG_FILE}.")).size(12).color(MUTED));
 
         col = col.push(heading("Database"));
-        col = col.push(field("Folder", "Relative to the folder the app runs from.", &self.database_path, SettingsField::DatabasePath));
+        col = col.push(
+            column![
+                text("Connection").size(13),
+                pick_list(Connection::ALL, Some(self.connection), Message::ConnectionChanged).text_size(13),
+                text(match self.connection {
+                    Connection::Folder => "The app opens the folder itself; nothing else can use it while the app runs.",
+                    Connection::Server => "The app connects to a running SurrealDB server, which other programs can use at the same time.",
+                })
+                .size(11)
+                .color(MUTED),
+            ]
+            .spacing(3),
+        );
+        match self.connection {
+            Connection::Folder => {
+                col = col.push(field("Folder", "Relative to the folder the app runs from.", &self.database_path, SettingsField::DatabasePath));
+            }
+            Connection::Server => {
+                col = col.push(field("Server", "For example ws://127.0.0.1:8000", &self.server, SettingsField::Server));
+                col = col.push(field("Username", "A root user of the server.", &self.username, SettingsField::Username));
+                col = col.push(
+                    column![
+                        text("Password").size(13),
+                        text_input("", &self.password)
+                            .on_input(|v| Message::SettingChanged(SettingsField::Password, v))
+                            .secure(!self.password.trim().starts_with("op://"))
+                            .size(13),
+                        text("The password, or a 1Password reference (op://…).").size(11).color(MUTED),
+                    ]
+                    .spacing(3),
+                );
+            }
+        }
         col = col.push(field("Namespace", "", &self.namespace, SettingsField::Namespace));
         col = col.push(field("Database", "", &self.database, SettingsField::Database));
         col = col.push(heading("Graph"));

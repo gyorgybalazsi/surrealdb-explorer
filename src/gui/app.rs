@@ -7,7 +7,7 @@ use iced::widget::{button, canvas, column, container, pin, row, rule, stack, tex
 use iced::{Color, Element, Fill, Font, Point, Subscription, Task, Theme, Vector, window};
 use surrealdb_explorer::assistant::history::{self, Exchange};
 use surrealdb_explorer::assistant::{self, Assistant, Attachment, Request, Suggestion};
-use surrealdb_explorer::config::{AssistantMode, Config};
+use surrealdb_explorer::config::{AssistantMode, Config, Connection};
 use surrealdb_explorer::db::{self, Database};
 use surrealdb_explorer::graph::{self, GraphData, ResultGraph};
 use surrealdb_explorer::config::DatabaseConfig;
@@ -73,6 +73,7 @@ pub enum Message {
     CloseSettings,
     SettingChanged(SettingsField, String),
     AssistantModeChanged(AssistantMode),
+    ConnectionChanged(Connection),
     SaveSettings,
 
     // Query panel
@@ -323,6 +324,12 @@ impl App {
             Message::AssistantModeChanged(mode) => {
                 if let Some(form) = &mut self.settings {
                     form.assistant_mode = mode;
+                    form.message = None;
+                }
+            }
+            Message::ConnectionChanged(connection) => {
+                if let Some(form) = &mut self.settings {
+                    form.connection = connection;
                     form.message = None;
                 }
             }
@@ -624,14 +631,15 @@ impl App {
     }
 
     /// Opens the database `config` describes in place of the current one.
-    /// The same folder keeps its connection and only switches namespace and
-    /// database. A different folder is opened first, and the old one is
-    /// closed only if that succeeds, which releases its lock so it can be
-    /// opened again later.
+    /// A different folder or server is opened first, and the old connection
+    /// is closed only if that succeeds (closing a folder releases its lock,
+    /// so it can be opened again later).
     fn switch_database(&mut self, config: &DatabaseConfig) -> Result<(), String> {
-        let same_folder = config.path == self.config.database.path;
+        // The same folder or server keeps its connection and only switches
+        // namespace and database.
+        let same_place = config.same_place(&self.config.database);
         match &self.db {
-            Some(db) if same_folder => {
+            Some(db) if same_place => {
                 self.runtime
                     .block_on(async { db.use_ns(&config.namespace).use_db(&config.database).await })
                     .map_err(|e| e.to_string())?;
