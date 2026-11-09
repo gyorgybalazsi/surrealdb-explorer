@@ -31,7 +31,7 @@ const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 #[derive(Debug)]
 pub enum WindowCommand {
     /// Draw a query's result, as if it had been run in the query panel.
-    Show { query: String, outcome: QueryOutcome, context: Option<QueryOutcome>, graph: ResultGraph },
+    Show { query: String, outcome: QueryOutcome, graph: ResultGraph },
     /// Go back to the whole-database view.
     Overview,
     /// Ask the user to allow a query that changes data.
@@ -103,13 +103,10 @@ pub struct QueryRequest {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ShowRequest {
-    #[schemars(description = "Read-only SurrealQL whose result is drawn. Records it returns become \
-        the answer (ringed); relations bring the records at both ends. To get path rows like \
-        Neo4j, return one array per path: [record, relation, record, ...].")]
+    #[schemars(description = "Read-only SurrealQL whose result is drawn. Records it returns are \
+        drawn; relations bring the records at both ends. To get path rows in the window's Table \
+        view (like Neo4j), return one array per path: [record, relation, record, ...].")]
     pub query: String,
-    #[schemars(description = "Optional read-only SurrealQL returning relations that show how the \
-        answer connects to other records; they are drawn in bold.")]
-    pub context_query: Option<String>,
 }
 
 #[derive(Clone)]
@@ -157,26 +154,19 @@ impl Explorer {
     #[tool(description = "Draw a read-only query's result in the app window, replacing the graph. \
         The result also appears in the window's query panel; a list of paths \
         ([record, relation, record, ...]) is shown as path rows. Returns what was drawn.")]
-    async fn show(&self, Parameters(ShowRequest { query, context_query }): Parameters<ShowRequest>) -> Result<CallToolResult, McpError> {
-        for q in std::iter::once(&query).chain(context_query.as_ref()) {
-            refuse_use(q)?;
-            if !is_read_only(q) {
-                return Err(McpError::invalid_params("show only runs read-only queries; use the query tool to change data", None));
-            }
+    async fn show(&self, Parameters(ShowRequest { query }): Parameters<ShowRequest>) -> Result<CallToolResult, McpError> {
+        refuse_use(&query)?;
+        if !is_read_only(&query) {
+            return Err(McpError::invalid_params("show only runs read-only queries; use the query tool to change data", None));
         }
         let db = self.shared.database()?;
         let outcome = query::run(&db, query.clone()).await;
         if let Err(e) = &outcome.statements {
             return Ok(CallToolResult::error(vec![ContentBlock::text(format!("The query failed: {e}"))]));
         }
-        let context = match context_query {
-            Some(context) if !context.trim().is_empty() => Some(query::run(&db, context).await),
-            _ => None,
-        };
         let (limit, connect) = *self.shared.limits.lock().map_err(|_| internal("limits lock"))?;
         let answer = query::record_ids(&outcome);
-        let context_ids: Vec<String> = context.iter().flat_map(query::record_ids).collect();
-        let result = graph::load_result(&db, &answer, &context_ids, limit, connect).await.map_err(internal)?;
+        let result = graph::load_result(&db, &answer, &[], limit, connect).await.map_err(internal)?;
 
         let summary = format!(
             "Drew {} records and {} relations in the window{}.\n\n{}",
@@ -191,7 +181,7 @@ impl Explorer {
         );
         self.shared
             .to_window
-            .send(WindowCommand::Show { query, outcome, context, graph: result })
+            .send(WindowCommand::Show { query, outcome, graph: result })
             .map_err(|_| internal("the window is closed"))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(summary)]))
     }

@@ -1,14 +1,12 @@
 //! Window state and message handling. The views are in `sidebar.rs`,
 //! `settings.rs` and `query_panel.rs`.
 
-use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use iced::widget::{button, canvas, column, container, pin, row, rule, stack, text, text_editor};
 use iced::{Color, Element, Fill, Font, Point, Subscription, Task, Theme, Vector, window};
-use surrealdb_explorer::assistant::history::{self, Exchange};
-use surrealdb_explorer::assistant::{self, Assistant, Attachment, Request, Suggestion};
-use surrealdb_explorer::config::{AssistantMode, Config, Connection};
+use surrealdb_explorer::assistant;
+use surrealdb_explorer::config::{Config, Connection};
 use surrealdb_explorer::db::{self, Database};
 use surrealdb_explorer::graph::{self, GraphData, ResultGraph};
 use surrealdb_explorer::config::DatabaseConfig;
@@ -24,16 +22,16 @@ use crate::gui::layout::Layout;
 use crate::gui::model::Graph;
 use crate::gui::settings::{SettingsField, SettingsForm};
 
-/// A query's result shown as the graph: the records that answer it, and
-/// the relations that show how they connect.
-#[derive(Debug, Clone, Default)]
-pub struct ResultView {
-    pub answer: HashSet<String>,
-    pub context_edges: HashSet<String>,
-    /// Records and relations the queries returned.
-    pub found: usize,
-    /// How many weren't drawn because of the limit.
-    pub left_out: usize,
+/// A query's result is shown as the graph (instead of the overview).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ResultView;
+
+/// What the main area shows: the graph, or the last result as a table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tab {
+    #[default]
+    Graph,
+    Table,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -75,7 +73,6 @@ pub enum Message {
     OpenSettings,
     CloseSettings,
     SettingChanged(SettingsField, String),
-    AssistantModeChanged(AssistantMode),
     ConnectionChanged(Connection),
     SaveSettings,
 
@@ -83,9 +80,9 @@ pub enum Message {
     ToggleQuery,
     QueryEdited(text_editor::Action),
     RunQuery,
-    /// The query's outcome, the outcome of its context query if one ran, and
-    /// whether the query may have changed data.
-    QueryDone(QueryOutcome, Option<QueryOutcome>, bool),
+    /// The query's outcome, and whether the query may have changed data.
+    QueryDone(QueryOutcome, bool),
+    ShowTab(Tab),
     /// The last query's result, read from the database as a graph.
     ResultLoaded(Result<ResultGraph, String>),
     /// Turns drawing every relation between a result's records on or off.
@@ -96,29 +93,7 @@ pub enum Message {
     FromMcp(Arc<Mutex<Option<WindowCommand>>>),
     /// The user's answer to a write Claude Code asked for.
     AnswerWrite(bool),
-    /// Turns running the context query with a suggested query on or off.
-    ToggleConnections(bool),
     ShowQueryInGraph,
-    /// Switches path results between path rows and JSON.
-    ToggleJson,
-
-    // Plain-English questions
-    QuestionEdited(String),
-    Ask,
-    RetryWithOpus,
-    /// The assistant to keep (it holds the API key), the question, the
-    /// names of the files attached to it, and the answer.
-    AskDone(Option<Assistant>, String, Vec<String>, Result<Suggestion, String>),
-    /// Opens the file picker to attach files to the next question.
-    AttachFiles,
-    /// The files picked, read, or why one couldn't be.
-    FilesPicked(Vec<Result<Attachment, String>>),
-    RemoveAttachment(usize),
-    /// Puts the query of a chat entry back in the editor.
-    UseAnswer(usize),
-    /// Puts the context query of a chat entry in the editor, as a query of its own.
-    UseContext(usize),
-    ClearChat,
 
     // Data actions
     /// Shows the confirmation for an action.
@@ -161,27 +136,9 @@ pub struct App {
     pub(super) query_text: text_editor::Content,
     pub(super) query_running: bool,
     pub(super) query_outcome: Option<QueryOutcome>,
-    /// What the suggested context query returned for the last run.
-    pub(super) query_context: Option<QueryOutcome>,
-    /// The last query result, shown in the graph.
+    /// The last query result, shown as the graph.
     pub(super) result_view: Option<ResultView>,
-    /// Show path results as JSON instead of path rows.
-    pub(super) show_json: bool,
-
-    pub(super) question: String,
-    pub(super) asking: bool,
-    /// Attached files: Claude sees them with every question, and queries
-    /// read their data as parameters (`movies.csv` is `$movies`).
-    pub(super) attachments: Vec<Attachment>,
-    /// Why picked files couldn't be attached.
-    pub(super) attach_problems: Vec<String>,
-    pub(super) picking_files: bool,
-    /// The suggested query that is in the editor (Run uses its context query).
-    pub(super) suggestion: Option<Suggestion>,
-    /// Every question asked and its answer, oldest first.
-    pub(super) chat: Vec<Exchange>,
-    /// Kept after the first question, so the API key is read only once.
-    pub(super) assistant: Option<Assistant>,
+    pub(super) tab: Tab,
 
     /// Shared with the MCP server; `None` if it's turned off.
     pub(super) mcp: Option<mcp::Shared>,
@@ -247,17 +204,8 @@ impl App {
             query_text: text_editor::Content::with_text("SELECT * FROM person;"),
             query_running: false,
             query_outcome: None,
-            query_context: None,
             result_view: None,
-            show_json: false,
-            question: String::new(),
-            asking: false,
-            attachments: Vec::new(),
-            attach_problems: Vec::new(),
-            picking_files: false,
-            suggestion: None,
-            chat: history::load(&history::path()),
-            assistant: None,
+            tab: Tab::Graph,
             pending_data_action: None,
             data_busy: false,
         }
@@ -354,12 +302,6 @@ impl App {
                     form.set(field, value);
                 }
             }
-            Message::AssistantModeChanged(mode) => {
-                if let Some(form) = &mut self.settings {
-                    form.assistant_mode = mode;
-                    form.message = None;
-                }
-            }
             Message::ConnectionChanged(connection) => {
                 if let Some(form) = &mut self.settings {
                     form.connection = connection;
@@ -371,11 +313,11 @@ impl App {
             Message::ToggleQuery => self.query_open = !self.query_open,
             Message::QueryEdited(action) => self.query_text.perform(action),
             Message::RunQuery => return self.run_query(),
-            Message::QueryDone(outcome, context, changes_data) => {
+            Message::ShowTab(tab) => self.tab = tab,
+            Message::QueryDone(outcome, changes_data) => {
                 self.query_running = false;
                 let has_records = !query::record_ids(&outcome).is_empty();
                 self.query_outcome = Some(outcome);
-                self.query_context = context;
                 // A result with records becomes the graph. Otherwise, a query
                 // that changed data shows the current state of the database.
                 if has_records {
@@ -386,7 +328,6 @@ impl App {
                 }
             }
             Message::ShowQueryInGraph => return self.load_result(),
-            Message::ToggleJson => self.show_json = !self.show_json,
             Message::ResultLoaded(Ok(result)) => self.apply_result(result),
             Message::ResultLoaded(Err(e)) => {
                 error!(error = %e, "could not draw the query result");
@@ -395,13 +336,11 @@ impl App {
             Message::FromMcp(cell) => {
                 let Some(command) = cell.lock().ok().and_then(|mut c| c.take()) else { return Task::none() };
                 match command {
-                    WindowCommand::Show { query, outcome, context, graph } => {
+                    WindowCommand::Show { query, outcome, graph } => {
                         info!("showing a result from Claude Code");
                         self.query_open = true;
                         self.query_text = text_editor::Content::with_text(&query);
-                        self.suggestion = None;
                         self.query_outcome = Some(outcome);
-                        self.query_context = context;
                         self.apply_result(graph);
                     }
                     WindowCommand::Overview => {
@@ -431,83 +370,6 @@ impl App {
                 if self.result_view.is_some() {
                     return self.load_result();
                 }
-            }
-
-            Message::QuestionEdited(question) => self.question = question,
-            Message::Ask => return self.ask(false),
-            Message::RetryWithOpus => return self.ask(true),
-            Message::AttachFiles => {
-                if self.picking_files {
-                    return Task::none();
-                }
-                self.picking_files = true;
-                return Task::perform(pick_files(), Message::FilesPicked);
-            }
-            Message::FilesPicked(picked) => {
-                self.picking_files = false;
-                self.attach_problems = assistant::attachment::add(&mut self.attachments, picked);
-                for problem in &self.attach_problems {
-                    warn!(%problem, "could not attach a file");
-                }
-            }
-            Message::RemoveAttachment(i) => {
-                if i < self.attachments.len() {
-                    self.attachments.remove(i);
-                }
-                self.attach_problems.clear();
-            }
-            Message::AskDone(assistant, question, attached, result) => {
-                self.asking = false;
-                if assistant.is_some() {
-                    self.assistant = assistant;
-                }
-                match &result {
-                    Ok(suggestion) => {
-                        self.query_text = text_editor::Content::with_text(&suggestion.query);
-                        self.query_outcome = None;
-                        self.suggestion = Some(suggestion.clone());
-                        // Attached files stay: the query reads them as parameters.
-                        if self.question.trim() == question {
-                            self.question.clear();
-                        }
-                    }
-                    Err(e) => {
-                        // The question stays in the box, to ask again.
-                        warn!(error = %e, "question failed");
-                        // A rejected key is read again next time.
-                        if e.contains("rejected the API key") {
-                            self.assistant = None;
-                        }
-                    }
-                }
-                self.chat.push(Exchange { question, attachments: attached, answer: result });
-                self.save_chat();
-            }
-            Message::UseAnswer(i) => {
-                if let Some(Exchange { answer: Ok(suggestion), .. }) = self.chat.get(i) {
-                    self.query_text = text_editor::Content::with_text(&suggestion.query);
-                    self.query_outcome = None;
-                    self.suggestion = Some(suggestion.clone());
-                }
-            }
-            Message::UseContext(i) => {
-                if let Some(Exchange { answer: Ok(s), .. }) = self.chat.get(i)
-                    && let Some(context) = &s.context_query
-                {
-                    self.query_text = text_editor::Content::with_text(context);
-                    self.query_outcome = None;
-                    self.suggestion = None;
-                }
-            }
-            Message::ToggleConnections(on) => {
-                self.config.assistant.show_connections = on;
-                if let Err(e) = self.config.save() {
-                    warn!(error = %e, "could not save the setting");
-                }
-            }
-            Message::ClearChat => {
-                self.chat.clear();
-                self.save_chat();
             }
 
             Message::AskDataAction(action) => self.pending_data_action = Some(action),
@@ -642,10 +504,6 @@ impl App {
             notes.push("The new log folder is used after a restart.");
         }
 
-        if new.assistant.api_key != old.assistant.api_key {
-            // Read the key again from the new place on the next question.
-            self.assistant = None;
-        }
         self.config.assistant = new.assistant.clone();
 
         let graph_changed = new.graph != old.graph;
@@ -695,9 +553,7 @@ impl App {
         }
         // The query results and pending actions belong to the previous database.
         self.query_outcome = None;
-        self.query_context = None;
         self.result_view = None;
-        self.suggestion = None;
         self.pending_data_action = None;
         Ok(())
     }
@@ -709,36 +565,18 @@ impl App {
             return Task::none();
         }
         self.query_running = true;
-        // A query Claude suggested, run unchanged, brings its context query
-        // (unless that's turned off).
         let changes_data = !assistant::is_read_only(&sql);
-        let context = self
-            .suggestion_in_editor()
-            .filter(|_| self.config.assistant.show_connections)
-            .and_then(|s| s.context_query.clone());
-        // Attached files are parameters the query can read, e.g. `$movies`.
-        let params = assistant::attachment::params(&self.attachments);
         // Run on our runtime (big thread stacks, see `runtime`), and only
         // wait for the result on iced's side, so the window stays responsive.
-        let handle = self.runtime.spawn(async move {
-            let outcome = query::run_with(&db, sql, &params).await;
-            let context = match context {
-                Some(context) if outcome.statements.is_ok() => Some(query::run_with(&db, context, &params).await),
-                _ => None,
-            };
-            (outcome, context)
-        });
+        let handle = self.runtime.spawn(async move { query::run(&db, sql).await });
         Task::perform(
             async move {
-                handle.await.unwrap_or_else(|e| {
-                    let failed = QueryOutcome {
-                        statements: Err(format!("the query task failed: {e}")),
-                        elapsed: Default::default(),
-                    };
-                    (failed, None)
+                handle.await.unwrap_or_else(|e| QueryOutcome {
+                    statements: Err(format!("the query task failed: {e}")),
+                    elapsed: Default::default(),
                 })
             },
-            move |(outcome, context)| Message::QueryDone(outcome, context, changes_data),
+            move |outcome| Message::QueryDone(outcome, changes_data),
         )
     }
 
@@ -753,12 +591,7 @@ impl App {
         self.notice = (result.left_out > 0).then(|| {
             format!("Drew the first {limit} of {} records. Raise the limit in Settings to see more.", result.found)
         });
-        self.result_view = Some(ResultView {
-            answer: result.answer,
-            context_edges: result.context_edges,
-            found: result.found,
-            left_out: result.left_out,
-        });
+        self.result_view = Some(ResultView);
         self.camera = Camera::default();
         self.hover = None;
         self.selection = None;
@@ -821,96 +654,21 @@ impl App {
         }
     }
 
-    /// The suggestion whose query is in the editor, unchanged.
-    pub(super) fn suggestion_in_editor(&self) -> Option<&Suggestion> {
-        self.suggestion.as_ref().filter(|s| s.query.trim() == self.query_text.text().trim())
-    }
-
-    fn save_chat(&self) {
-        if let Err(e) = history::save(&history::path(), &self.chat) {
-            warn!(error = %e, "could not save the chat history");
-        }
-    }
-
-    /// Asks Claude for a query, in the background on our runtime. The first
-    /// time, the API key is read from 1Password, which may ask for approval.
-    /// `retry_with_opus` redoes the last answer with Opus.
-    fn ask(&mut self, retry_with_opus: bool) -> Task<Message> {
-        let Some(db) = self.db.clone() else { return Task::none() };
-        let previous = self.suggestion.clone();
-        let question = self.question.trim().to_string();
-        if self.asking || (retry_with_opus && previous.is_none()) || (!retry_with_opus && question.is_empty()) {
-            return Task::none();
-        }
-        self.asking = true;
-        let (asked, attached) = match (&previous, retry_with_opus) {
-            (Some(previous), true) => {
-                (previous.question.clone(), previous.attachments.iter().map(|a| a.name.clone()).collect())
-            }
-            _ => (question.clone(), self.attachments.iter().map(|a| a.name.clone()).collect::<Vec<_>>()),
-        };
-        // Claude sees the query in the editor, so the question can ask to change it.
-        let editor_query = Some(self.query_text.text()).filter(|q| !q.trim().is_empty());
-        let request = Request { question: question.clone(), editor_query, attachments: self.attachments.clone() };
-        let mode = self.config.assistant.mode;
-        let reference = self.config.assistant.api_key.clone();
-        let cached = self.assistant.clone();
-
-        let handle = self.runtime.spawn(async move {
-            let assistant = match cached {
-                Some(assistant) => assistant,
-                None => match tokio::task::spawn_blocking(move || assistant::key::fetch(&reference)).await {
-                    Ok(Ok(key)) => Assistant::new(key),
-                    Ok(Err(e)) => return (None, Err(e.to_string())),
-                    Err(e) => return (None, Err(format!("reading the API key failed: {e}"))),
-                },
-            };
-            let result = match (retry_with_opus, previous) {
-                (true, Some(previous)) => assistant.retry_with_opus(&db, &previous).await,
-                _ => assistant.ask(&db, &request, mode).await,
-            };
-            (Some(assistant), result.map_err(|e| e.to_string()))
-        });
-        Task::perform(
-            async move { handle.await.unwrap_or_else(|e| (None, Err(format!("the task failed: {e}")))) },
-            move |(assistant, result)| Message::AskDone(assistant, asked.clone(), attached.clone(), result),
-        )
-    }
-
     /// Draws the last query's result as the graph, in the background: the
-    /// records and relations it (and its context query) returned, read from
-    /// the database by id.
+    /// records and relations it returned, read from the database by id.
     fn load_result(&mut self) -> Task<Message> {
         let (Some(db), Some(outcome)) = (self.db.clone(), &self.query_outcome) else { return Task::none() };
         let answer = query::record_ids(outcome);
-        let context: Vec<String> = self.query_context.iter().flat_map(query::record_ids).collect();
         let limit = self.config.graph.max_result_records;
         let connect = self.config.graph.connect_results;
         self.notice = Some("Drawing the result…".into());
         let handle = self.runtime.spawn(async move {
-            graph::load_result(&db, &answer, &context, limit, connect).await.map_err(|e| e.to_string())
+            graph::load_result(&db, &answer, &[], limit, connect).await.map_err(|e| e.to_string())
         });
         Task::perform(
             async move { handle.await.unwrap_or_else(|e| Err(format!("the task failed: {e}"))) },
             Message::ResultLoaded,
         )
-    }
-
-    /// The result view as record and relation indices into the current graph.
-    pub(super) fn result_indices(&self) -> Option<(HashSet<usize>, HashSet<usize>)> {
-        let view = self.result_view.as_ref()?;
-        let nodes: HashMap<&str, usize> =
-            self.graph.nodes.iter().enumerate().map(|(i, n)| (n.id.as_str(), i)).collect();
-        let answer = view.answer.iter().filter_map(|id| nodes.get(id.as_str()).copied()).collect();
-        let edges = self
-            .graph
-            .edges
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| view.context_edges.contains(&e.id))
-            .map(|(i, _)| i)
-            .collect();
-        Some((answer, edges))
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -919,7 +677,6 @@ impl App {
             camera: self.camera,
             hover: self.hover,
             selection: self.selection,
-            result: self.result_indices(),
         })
         .width(Fill)
         .height(Fill);
@@ -937,12 +694,36 @@ impl App {
             None => self.sidebar(),
         };
 
+        let main: Element<'_, Message> = match self.tab {
+            Tab::Graph => layers.into(),
+            Tab::Table => self.table_view(),
+        };
+        // A pending write must be answered whichever tab is open.
+        let main: Element<'_, Message> = match (&self.pending_write, self.tab) {
+            (Some((query, _)), Tab::Table) => column![write_banner(query), main].into(),
+            _ => main,
+        };
+
         row![
-            column![layers, rule::horizontal(1), self.query_panel()].width(Fill),
+            column![self.tab_bar(), main, rule::horizontal(1), self.query_panel()].width(Fill),
             rule::vertical(1),
             side
         ]
         .into()
+    }
+
+    /// Switches the main area between the graph and the result table.
+    fn tab_bar(&self) -> Element<'_, Message> {
+        let tab = |label: &'static str, which: Tab| {
+            button(text(label).size(13))
+                .style(if self.tab == which { button::primary } else { button::text })
+                .padding([3, 12])
+                .on_press(Message::ShowTab(which))
+        };
+        container(row![tab("Graph", Tab::Graph), tab("Table", Tab::Table)].spacing(4))
+            .padding([4, 8])
+            .width(Fill)
+            .into()
     }
 
     fn record_menu(&self, node: usize) -> Element<'_, Message> {
@@ -971,29 +752,6 @@ impl App {
 
 pub(super) fn plural(n: usize, word: &str) -> String {
     format!("{n} {word}{}", if n == 1 { "" } else { "s" })
-}
-
-/// Asks which files to attach, and reads them.
-async fn pick_files() -> Vec<Result<Attachment, String>> {
-    let Some(files) = rfd::AsyncFileDialog::new()
-        .set_title("Attach files to the question")
-        .pick_files()
-        .await
-    else {
-        return Vec::new();
-    };
-    let mut picked = Vec::new();
-    for file in files {
-        let name = file.file_name();
-        // Check the size first, so a huge file isn't read for nothing.
-        let size = std::fs::metadata(file.path()).map(|m| m.len()).unwrap_or(0);
-        if size > assistant::attachment::MAX_BYTES as u64 {
-            picked.push(Err(assistant::attachment::too_large(&name, size)));
-            continue;
-        }
-        picked.push(Attachment::from_bytes(&name, file.read().await));
-    }
-    picked
 }
 
 /// Where the MCP server's commands wait for the window's subscription.

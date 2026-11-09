@@ -23,7 +23,6 @@ pub enum SettingsField {
     MaxResultRecords,
     LogLevel,
     LogDirectory,
-    ApiKey,
 }
 
 /// The settings as edited, kept as text until saved.
@@ -43,7 +42,7 @@ pub struct SettingsForm {
     pub log_level: String,
     pub log_directory: String,
     pub assistant_mode: AssistantMode,
-    /// 1Password reference, not the key itself.
+    /// Not edited here any more; kept so saving doesn't change it.
     pub api_key: String,
     /// Not edited here (the query panel has the checkbox); kept so saving
     /// doesn't reset it.
@@ -89,7 +88,6 @@ impl SettingsForm {
             SettingsField::MaxResultRecords => &mut self.max_result_records,
             SettingsField::LogLevel => &mut self.log_level,
             SettingsField::LogDirectory => &mut self.log_directory,
-            SettingsField::ApiKey => &mut self.api_key,
         };
         *target = value;
         self.message = None;
@@ -220,24 +218,6 @@ impl SettingsForm {
             .spacing(3),
         );
         col = col.push(field("Folder", "Daily log files are written here.", &self.log_directory, SettingsField::LogDirectory));
-
-        col = col.push(heading("Assistant"));
-        col = col.push(
-            column![
-                text("Model").size(13),
-                pick_list(AssistantMode::ALL, Some(self.assistant_mode), Message::AssistantModeChanged).text_size(13),
-                text("Auto asks Haiku first, and Opus when Haiku isn't sure or its query fails the check.")
-                    .size(11)
-                    .color(MUTED),
-            ]
-            .spacing(3),
-        );
-        col = col.push(field(
-            "API key in 1Password",
-            "A reference like op://Personal/item/credential, read with the op tool. Never the key itself.",
-            &self.api_key,
-            SettingsField::ApiKey,
-        ));
 
         col = col.push(
             text("Saving applies the changes straight away; only a new log folder waits for a restart.")
