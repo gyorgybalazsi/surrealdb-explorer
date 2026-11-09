@@ -2,6 +2,7 @@
 //! `settings.rs` and `query_panel.rs`.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use iced::widget::{button, canvas, column, container, pin, row, rule, stack, text, text_editor};
 use iced::{Color, Element, Fill, Font, Point, Subscription, Task, Theme, Vector, window};
@@ -13,6 +14,8 @@ use surrealdb_explorer::graph::{self, GraphData, ResultGraph};
 use surrealdb_explorer::config::DatabaseConfig;
 use surrealdb_explorer::data;
 use surrealdb_explorer::logging::LogControl;
+use surrealdb_explorer::mcp::{self, WindowCommand};
+use tokio::sync::{mpsc, oneshot};
 use surrealdb_explorer::query::{self, QueryOutcome};
 use tracing::{debug, error, info, warn};
 
@@ -87,6 +90,12 @@ pub enum Message {
     ResultLoaded(Result<ResultGraph, String>),
     /// Turns drawing every relation between a result's records on or off.
     ToggleConnectResults(bool),
+
+    // Claude Code, through the MCP server
+    /// A command from the MCP server (taken out of the cell once handled).
+    FromMcp(Arc<Mutex<Option<WindowCommand>>>),
+    /// The user's answer to a write Claude Code asked for.
+    AnswerWrite(bool),
     /// Turns running the context query with a suggested query on or off.
     ToggleConnections(bool),
     ShowQueryInGraph,
@@ -174,6 +183,14 @@ pub struct App {
     /// Kept after the first question, so the API key is read only once.
     pub(super) assistant: Option<Assistant>,
 
+    /// Shared with the MCP server; `None` if it's turned off.
+    pub(super) mcp: Option<mcp::Shared>,
+    /// A query Claude Code wants to run that changes data, waiting for the
+    /// user, and where to send the answer.
+    pub(super) pending_write: Option<(String, Arc<Mutex<Option<oneshot::Sender<bool>>>>)>,
+    /// The selection last reported to the MCP server.
+    synced_selection: Option<String>,
+
     /// A data action waiting for confirmation.
     pub(super) pending_data_action: Option<DataAction>,
     /// A data action is running.
@@ -202,7 +219,16 @@ impl App {
             Err(e) => (None, GraphData::default(), Some(format!("Could not open the database: {e}"))),
         };
 
+        let mcp = config.mcp.enabled.then(|| start_mcp(&runtime, config.mcp.port));
+        if let Some(shared) = &mcp {
+            *shared.db.lock().unwrap() = db.clone();
+            *shared.limits.lock().unwrap() = (config.graph.max_result_records, config.graph.connect_results);
+        }
+
         App {
+            mcp,
+            pending_write: None,
+            synced_selection: None,
             runtime,
             db,
             config,
@@ -242,14 +268,21 @@ impl App {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        if self.layout.is_active() || self.dragging.is_some() {
+        let frames = if self.layout.is_active() || self.dragging.is_some() {
             window::frames().map(|_| Message::Tick)
         } else {
             Subscription::none()
-        }
+        };
+        Subscription::batch([frames, Subscription::run(mcp_commands)])
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.handle(message);
+        self.sync_mcp();
+        task
+    }
+
+    fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tick => self.layout.step(&mut self.graph, self.dragging),
             Message::Hover(hover) => self.hover = hover,
@@ -354,36 +387,42 @@ impl App {
             }
             Message::ShowQueryInGraph => return self.load_result(),
             Message::ToggleJson => self.show_json = !self.show_json,
-            Message::ResultLoaded(Ok(result)) => {
-                if result.data.nodes.is_empty() {
-                    self.notice = Some("None of the returned records could be drawn.".into());
-                    return Task::none();
-                }
-                let limit = self.config.graph.max_result_records;
-                self.graph = Graph::new(result.data, None);
-                self.notice = (result.left_out > 0).then(|| {
-                    format!(
-                        "Drew the first {limit} of {} records. Raise the limit in Settings to see more.",
-                        result.found
-                    )
-                });
-                self.result_view = Some(ResultView {
-                    answer: result.answer,
-                    context_edges: result.context_edges,
-                    found: result.found,
-                    left_out: result.left_out,
-                });
-                self.camera = Camera::default();
-                self.hover = None;
-                self.selection = None;
-                self.menu = None;
-                self.dragging = None;
-                self.layout.reheat(1.0);
-            }
+            Message::ResultLoaded(Ok(result)) => self.apply_result(result),
             Message::ResultLoaded(Err(e)) => {
                 error!(error = %e, "could not draw the query result");
                 self.error = Some(format!("Could not draw the result: {e}"));
             }
+            Message::FromMcp(cell) => {
+                let Some(command) = cell.lock().ok().and_then(|mut c| c.take()) else { return Task::none() };
+                match command {
+                    WindowCommand::Show { query, outcome, context, graph } => {
+                        info!("showing a result from Claude Code");
+                        self.query_open = true;
+                        self.query_text = text_editor::Content::with_text(&query);
+                        self.suggestion = None;
+                        self.query_outcome = Some(outcome);
+                        self.query_context = context;
+                        self.apply_result(graph);
+                    }
+                    WindowCommand::Overview => {
+                        self.reload();
+                        self.notice = None;
+                    }
+                    WindowCommand::DataChanged => {
+                        if self.result_view.is_none() {
+                            self.reload();
+                        } else {
+                            self.notice = Some("Claude Code changed data. Show the whole graph to see it.".into());
+                        }
+                    }
+                    WindowCommand::ApproveWrite { query, reply } => {
+                        // A newer request replaces an unanswered one, which counts as declined.
+                        self.answer_write(false);
+                        self.pending_write = Some((query, Arc::new(Mutex::new(Some(reply)))));
+                    }
+                }
+            }
+            Message::AnswerWrite(allow) => self.answer_write(allow),
             Message::ToggleConnectResults(on) => {
                 self.config.graph.connect_results = on;
                 if let Err(e) = self.config.save() {
@@ -703,6 +742,85 @@ impl App {
         )
     }
 
+    /// Draws a query result as the graph.
+    fn apply_result(&mut self, result: ResultGraph) {
+        if result.data.nodes.is_empty() {
+            self.notice = Some("None of the returned records could be drawn.".into());
+            return;
+        }
+        let limit = self.config.graph.max_result_records;
+        self.graph = Graph::new(result.data, None);
+        self.notice = (result.left_out > 0).then(|| {
+            format!("Drew the first {limit} of {} records. Raise the limit in Settings to see more.", result.found)
+        });
+        self.result_view = Some(ResultView {
+            answer: result.answer,
+            context_edges: result.context_edges,
+            found: result.found,
+            left_out: result.left_out,
+        });
+        self.camera = Camera::default();
+        self.hover = None;
+        self.selection = None;
+        self.menu = None;
+        self.dragging = None;
+        self.layout.reheat(1.0);
+    }
+
+    fn answer_write(&mut self, allow: bool) {
+        if let Some((query, reply)) = self.pending_write.take() {
+            info!(allow, %query, "answered a write from Claude Code");
+            if let Some(reply) = reply.lock().ok().and_then(|mut r| r.take()) {
+                let _ = reply.send(allow);
+            }
+        }
+    }
+
+    /// Keeps the MCP server's view of the app current: the open database,
+    /// the result limits and the selection.
+    fn sync_mcp(&mut self) {
+        let Some(shared) = &self.mcp else { return };
+        if let Ok(mut db) = shared.db.lock() {
+            // A cheap handle copy; keeps up with database switches in Settings.
+            *db = self.db.clone();
+        }
+        if let Ok(mut limits) = shared.limits.lock() {
+            *limits = (self.config.graph.max_result_records, self.config.graph.connect_results);
+        }
+        let key = self.selection.map(|s| match s {
+            Selection::Node(i) => self.graph.nodes.get(i).map(|n| n.id.clone()).unwrap_or_default(),
+            Selection::Edge(i) => self.graph.edges.get(i).map(|e| e.id.clone()).unwrap_or_default(),
+        });
+        if key != self.synced_selection {
+            let json = self.selection.map(|s| self.selection_json(s));
+            if let Ok(mut window) = shared.window.lock() {
+                window.selection = json;
+            }
+            self.synced_selection = key;
+        }
+    }
+
+    /// The selected record or relation, with its fields and connections.
+    fn selection_json(&self, selection: Selection) -> serde_json::Value {
+        let g = &self.graph;
+        match selection {
+            Selection::Node(i) => {
+                let n = &g.nodes[i];
+                let outgoing: Vec<_> = g.edges.iter().filter(|e| e.from == i)
+                    .map(|e| serde_json::json!({"relation": e.id, "table": e.label, "to": g.nodes[e.to].id})).collect();
+                let incoming: Vec<_> = g.edges.iter().filter(|e| e.to == i)
+                    .map(|e| serde_json::json!({"relation": e.id, "table": e.label, "from": g.nodes[e.from].id})).collect();
+                serde_json::json!({"record": n.id, "table": n.table, "fields": n.data,
+                    "outgoing_in_view": outgoing, "incoming_in_view": incoming})
+            }
+            Selection::Edge(i) => {
+                let e = &g.edges[i];
+                serde_json::json!({"relation": e.id, "table": e.label, "from": g.nodes[e.from].id,
+                    "to": g.nodes[e.to].id, "fields": e.data})
+            }
+        }
+    }
+
     /// The suggestion whose query is in the editor, unchanged.
     pub(super) fn suggestion_in_editor(&self) -> Option<&Suggestion> {
         self.suggestion.as_ref().filter(|s| s.query.trim() == self.query_text.text().trim())
@@ -810,6 +928,9 @@ impl App {
         if let Some((node, at)) = self.menu {
             layers = layers.push(pin(self.record_menu(node)).x(at.x).y(at.y));
         }
+        if let Some((query, _)) = &self.pending_write {
+            layers = layers.push(write_banner(query));
+        }
 
         let side = match &self.settings {
             Some(form) => form.view(self.pending_data_action, self.data_busy, self.db.is_some()),
@@ -873,4 +994,62 @@ async fn pick_files() -> Vec<Result<Attachment, String>> {
         picked.push(Attachment::from_bytes(&name, file.read().await));
     }
     picked
+}
+
+/// Where the MCP server's commands wait for the window's subscription.
+static MCP_COMMANDS: OnceLock<Mutex<Option<mpsc::UnboundedReceiver<WindowCommand>>>> = OnceLock::new();
+
+/// Starts the MCP server on our runtime and returns what it shares with the window.
+fn start_mcp(runtime: &tokio::runtime::Runtime, port: u16) -> mcp::Shared {
+    let (to_window, commands) = mpsc::unbounded_channel();
+    let _ = MCP_COMMANDS.set(Mutex::new(Some(commands)));
+    let shared = mcp::Shared::new(to_window);
+    let server = shared.clone();
+    runtime.spawn(async move {
+        if let Err(e) = mcp::serve(server, port).await {
+            error!(error = %e, "the MCP server stopped");
+        }
+    });
+    shared
+}
+
+/// The MCP server's commands, as messages for the window.
+fn mcp_commands() -> impl iced::futures::Stream<Item = Message> {
+    let commands = MCP_COMMANDS.get().and_then(|cell| cell.lock().ok()?.take());
+    iced::futures::stream::unfold(commands, |commands| async move {
+        let mut commands = commands?;
+        let command = commands.recv().await?;
+        Some((Message::FromMcp(Arc::new(Mutex::new(Some(command)))), Some(commands)))
+    })
+}
+
+/// Asks the user to allow a query from Claude Code that changes data.
+fn write_banner(query: &str) -> Element<'_, Message> {
+    let shown: String = {
+        let lines: Vec<&str> = query.lines().take(15).collect();
+        let more = query.lines().count().saturating_sub(15);
+        if more > 0 { format!("{}\n… {more} more lines", lines.join("\n")) } else { lines.join("\n") }
+    };
+    container(
+        column![
+            text("Claude Code wants to run a query that changes data:").size(14).font(Font {
+                weight: iced::font::Weight::Bold,
+                ..Font::default()
+            }),
+            container(text(shown).size(12).font(Font::MONOSPACE))
+                .padding(6)
+                .width(Fill)
+                .style(|_| container::background(Color::from_rgb(0.95, 0.95, 0.95))),
+            row![
+                button(text("Allow").size(13)).style(button::danger).on_press(Message::AnswerWrite(true)),
+                button(text("Don't allow").size(13)).style(button::secondary).on_press(Message::AnswerWrite(false)),
+            ]
+            .spacing(8),
+        ]
+        .spacing(8),
+    )
+    .padding(12)
+    .width(Fill)
+    .style(|theme| container::bordered_box(theme).background(Color::from_rgb(1.0, 0.95, 0.88)))
+    .into()
 }

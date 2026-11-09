@@ -22,6 +22,23 @@ pub struct Config {
     pub graph: GraphConfig,
     pub logging: LoggingConfig,
     pub assistant: AssistantConfig,
+    pub mcp: McpConfig,
+}
+
+/// The app's MCP server, through which Claude Code reads the database and
+/// draws in the window.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpConfig {
+    pub enabled: bool,
+    /// Served at `http://127.0.0.1:<port>/mcp`. Changes apply at the next start.
+    pub port: u16,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        McpConfig { enabled: true, port: 8765 }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -153,6 +170,7 @@ impl Default for Config {
             graph: GraphConfig::default(),
             logging: LoggingConfig::default(),
             assistant: AssistantConfig::default(),
+            mcp: McpConfig::default(),
         }
     }
 }

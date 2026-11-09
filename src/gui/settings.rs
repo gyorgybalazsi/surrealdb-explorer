@@ -4,7 +4,7 @@ use iced::widget::{Column, button, column, pick_list, row, scrollable, text, tex
 use iced::{Element, Fill};
 use surrealdb_explorer::config::{
     AssistantConfig, AssistantMode, CONFIG_FILE, Config, Connection, DatabaseConfig, GraphConfig,
-    LOG_LEVELS, LoggingConfig,
+    LOG_LEVELS, LoggingConfig, McpConfig,
 };
 
 use crate::gui::app::{DataAction, Message};
@@ -48,6 +48,8 @@ pub struct SettingsForm {
     /// Not edited here (the query panel has the checkbox); kept so saving
     /// doesn't reset it.
     pub show_connections: bool,
+    /// Not edited in the form; kept so saving doesn't reset it.
+    pub mcp: McpConfig,
     /// Result of the last save: a confirmation or an error.
     pub message: Option<Result<String, String>>,
 }
@@ -70,6 +72,7 @@ impl SettingsForm {
             assistant_mode: c.assistant.mode,
             api_key: c.assistant.api_key.clone(),
             show_connections: c.assistant.show_connections,
+            mcp: c.mcp.clone(),
             message: None,
         }
     }
@@ -124,6 +127,7 @@ impl SettingsForm {
                 api_key: self.api_key.trim().into(),
                 show_connections: self.show_connections,
             },
+            mcp: self.mcp.clone(),
         };
         config.validate().map_err(|e| e.to_string())?;
         Ok(config)
@@ -246,6 +250,26 @@ impl SettingsForm {
             Some(Err(e)) => col = col.push(text(e).size(12).color(ERROR)),
             None => {}
         }
+
+        col = col.push(heading("Claude Code"));
+        col = col.push(if self.mcp.enabled {
+            column![
+                text(format!("Tools for Claude Code at http://127.0.0.1:{}/mcp", self.mcp.port)).size(12),
+                text("Register them once, in a terminal:").size(11).color(MUTED),
+                text(format!(
+                    "claude mcp add --transport http --scope user surrealdb-explorer http://127.0.0.1:{}/mcp",
+                    self.mcp.port
+                ))
+                .size(11)
+                .font(iced::Font::MONOSPACE),
+                text("Turn off or change the port with [mcp] in config.toml (applies at the next start).")
+                    .size(11)
+                    .color(MUTED),
+            ]
+            .spacing(3)
+        } else {
+            column![text("Turned off ([mcp] enabled = false in config.toml).").size(12).color(MUTED)]
+        });
 
         col = col.push(heading("Data"));
         col = col.push(data_section(pending, busy, connected));
