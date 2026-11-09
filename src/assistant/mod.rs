@@ -230,6 +230,14 @@ clearly asks for a change, and say so in the explanation.
 - Several statements are fine, separated by semicolons.
 - query: return the records that answer the question (whole records, or with their \
 `id`), not just names or counts, unless the question asks for a number or a value.
+- When the question asks for paths (for example a Cypher query that returns a path), \
+return one array per path, alternating records and the relations between them: \
+`[person:1, acted_in:x, movie:2, directed:y, person:3]`. The app shows these as path \
+rows like Neo4j. For example, for actor -acted_in-> movie <-directed- director paths \
+from Tom Hanks: `array::flatten((SELECT VALUE (SELECT VALUE [$parent.in, $parent.id, \
+$parent.out, id, in] FROM $parent.out<-directed) FROM array::flatten((SELECT VALUE \
+->acted_in FROM person WHERE name = 'Tom Hanks'))));`. Paths already hold their \
+relations, so context_query can be empty.
 - context_query: a read-only query that returns the relation records (edges) linking \
 the answer records to the records the question is about, so the app can show how \
 they're connected. Example: for \"who knows someone who knows bob?\" it could be \

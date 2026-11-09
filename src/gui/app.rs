@@ -89,6 +89,8 @@ pub enum Message {
     /// Turns running the context query with a suggested query on or off.
     ToggleConnections(bool),
     ShowQueryInGraph,
+    /// Switches path results between path rows and JSON.
+    ToggleJson,
 
     // Plain-English questions
     QuestionEdited(String),
@@ -153,6 +155,8 @@ pub struct App {
     pub(super) query_context: Option<QueryOutcome>,
     /// The last query result, shown in the graph.
     pub(super) result_view: Option<ResultView>,
+    /// Show path results as JSON instead of path rows.
+    pub(super) show_json: bool,
 
     pub(super) question: String,
     pub(super) asking: bool,
@@ -218,6 +222,7 @@ impl App {
             query_outcome: None,
             query_context: None,
             result_view: None,
+            show_json: false,
             question: String::new(),
             asking: false,
             attachments: Vec::new(),
@@ -341,6 +346,7 @@ impl App {
                 }
             }
             Message::ShowQueryInGraph => return self.load_result(),
+            Message::ToggleJson => self.show_json = !self.show_json,
             Message::ResultLoaded(Ok(result)) => {
                 if result.data.nodes.is_empty() {
                     self.notice = Some("None of the returned records could be drawn.".into());

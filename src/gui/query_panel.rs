@@ -3,6 +3,8 @@
 use iced::keyboard::{Key, key::Named};
 use iced::widget::text_editor::{Binding, KeyPress};
 use iced::widget::{Column, button, checkbox, column, container, row, rule, scrollable, text, text_editor, text_input};
+use std::collections::HashMap;
+
 use iced::{Alignment, Color, Element, Fill, Font, Length};
 use surrealdb_explorer::assistant::Model;
 use surrealdb_explorer::assistant::history::Exchange;
@@ -75,7 +77,7 @@ impl App {
                 if let Some(answer) = self.answer_view() {
                     col = col.push(answer);
                 }
-                scrollable(col.push(results_view(outcome))).height(Fill).into()
+                scrollable(col.push(self.results_view(outcome))).height(Fill).into()
             }
         };
 
@@ -152,6 +154,109 @@ impl App {
                 .style(|_| container::background(Color::from_rgb(1.0, 0.97, 0.92)))
                 .into(),
         )
+    }
+
+    /// Each statement's result: as path rows when it is a list of paths,
+    /// otherwise as JSON.
+    fn results_view<'a>(&'a self, outcome: &'a QueryOutcome) -> Element<'a, Message> {
+        let results = match &outcome.statements {
+            Err(e) => return text(e.clone()).size(12).font(Font::MONOSPACE).color(ERROR).into(),
+            Ok(results) => results,
+        };
+        let mut col = Column::new().spacing(8).width(Fill);
+        for (i, r) in results.iter().enumerate() {
+            let time = r
+                .time
+                .map(|t| format!(" · {:.2} ms", t.as_secs_f64() * 1000.0))
+                .unwrap_or_default();
+            let paths = r.result.as_ref().ok().and_then(|v| self.paths(v));
+            let mut heading = row![
+                text(format!("Statement {}", i + 1)).size(12).font(bold()),
+                text(format!("{}{time}", if r.result.is_ok() { "ok" } else { "error" }))
+                    .size(12)
+                    .color(if r.result.is_ok() { SUCCESS } else { ERROR }),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center);
+            if let Some(paths) = &paths {
+                heading = heading.push(text(plural(paths.len(), "path")).size(12).color(MUTED));
+                heading = heading.push(
+                    button(text(if self.show_json { "Show paths" } else { "Show JSON" }).size(11))
+                        .style(button::text)
+                        .padding(0)
+                        .on_press(Message::ToggleJson),
+                );
+            }
+            let body: Element<'a, Message> = match (&r.result, paths) {
+                (Ok(_), Some(paths)) if !self.show_json => self.path_rows(paths),
+                (Ok(v), _) => grey_box(cut(serde_json::to_string_pretty(v).unwrap_or_default())),
+                (Err(e), _) => grey_box(e.clone()),
+            };
+            col = col.push(column![heading, body].spacing(3));
+        }
+        col.into()
+    }
+
+    /// A result that is a list of paths, each `[record, relation, record, …]`
+    /// with every record and relation in the graph, as graph indices.
+    fn paths(&self, value: &serde_json::Value) -> Option<Vec<Vec<usize>>> {
+        let rows = value.as_array().filter(|rows| !rows.is_empty())?;
+        let nodes: HashMap<&str, usize> =
+            self.graph.nodes.iter().enumerate().map(|(i, n)| (n.id.as_str(), i)).collect();
+        let edges: HashMap<&str, usize> =
+            self.graph.edges.iter().enumerate().map(|(i, e)| (e.id.as_str(), i)).collect();
+        rows.iter()
+            .map(|row| {
+                let ids = row.as_array().filter(|ids| ids.len() >= 3 && ids.len() % 2 == 1)?;
+                let mut steps = Vec::with_capacity(ids.len());
+                for (k, id) in ids.iter().enumerate() {
+                    let id = id.as_str()?;
+                    steps.push(if k % 2 == 0 { *nodes.get(id)? } else { *edges.get(id)? });
+                }
+                // Each relation must join the records on either side of it.
+                for k in (1..steps.len()).step_by(2) {
+                    let e = &self.graph.edges[steps[k]];
+                    let (a, b) = (steps[k - 1], steps[k + 1]);
+                    if !((e.from == a && e.to == b) || (e.from == b && e.to == a)) {
+                        return None;
+                    }
+                }
+                Some(steps)
+            })
+            .collect()
+    }
+
+    /// Paths drawn like `Tom Hanks —ACTED_IN→ Big ←DIRECTED— Penny Marshall`.
+    fn path_rows(&self, paths: Vec<Vec<usize>>) -> Element<'_, Message> {
+        const MAX_ROWS: usize = 300;
+        let g = &self.graph;
+        let more = paths.len().saturating_sub(MAX_ROWS);
+        let mut col = Column::new().spacing(4).width(Fill);
+        for steps in paths.into_iter().take(MAX_ROWS) {
+            let mut line = row![].spacing(4).align_y(Alignment::Center);
+            for (k, &step) in steps.iter().enumerate() {
+                if k % 2 == 0 {
+                    let n = &g.nodes[step];
+                    let tint = Color { a: 0.25, ..n.color };
+                    line = line.push(
+                        container(text(n.label.clone()).size(12))
+                            .padding([2, 8])
+                            .style(move |_| container::background(tint).border(iced::border::rounded(10))),
+                    );
+                } else {
+                    let e = &g.edges[step];
+                    let forward = e.from == steps[k - 1];
+                    let label = e.label.to_uppercase();
+                    let arrow = if forward { format!("—{label}→") } else { format!("←{label}—") };
+                    line = line.push(text(arrow).size(11).font(Font::MONOSPACE).color(MUTED));
+                }
+            }
+            col = col.push(line);
+        }
+        if more > 0 {
+            col = col.push(text(format!("… and {more} more paths")).size(12).color(MUTED));
+        }
+        container(col).padding(6).width(Fill).into()
     }
 
     /// The chat with Claude: every question and answer, newest at the
@@ -334,39 +439,6 @@ fn summary(outcome: &QueryOutcome) -> Element<'static, Message> {
     }
 }
 
-fn results_view(outcome: &QueryOutcome) -> Element<'static, Message> {
-    let results = match &outcome.statements {
-        Err(e) => return text(e.clone()).size(12).font(Font::MONOSPACE).color(ERROR).into(),
-        Ok(results) => results,
-    };
-    let mut col = Column::new().spacing(8).width(Fill);
-    for (i, r) in results.iter().enumerate() {
-        let time = r
-            .time
-            .map(|t| format!(" · {:.2} ms", t.as_secs_f64() * 1000.0))
-            .unwrap_or_default();
-        let (status, color, body) = match &r.result {
-            Ok(v) => ("ok", SUCCESS, cut(serde_json::to_string_pretty(v).unwrap_or_default())),
-            Err(e) => ("error", ERROR, e.clone()),
-        };
-        col = col.push(
-            column![
-                row![
-                    text(format!("Statement {}", i + 1)).size(12).font(bold()),
-                    text(format!("{status}{time}")).size(12).color(color),
-                ]
-                .spacing(8),
-                container(text(body).size(12).font(Font::MONOSPACE))
-                    .padding(6)
-                    .width(Fill)
-                    .style(|_| container::background(Color::from_rgb(0.95, 0.95, 0.95))),
-            ]
-            .spacing(3),
-        );
-    }
-    col.into()
-}
-
 fn cut(text: String) -> String {
     let lines = text.lines().count();
     if lines <= MAX_RESULT_LINES {
@@ -387,3 +459,11 @@ fn listed(items: Vec<String>, max: usize) -> Element<'static, Message> {
     col.into()
 }
 
+/// Monospace text in a grey box.
+fn grey_box(body: String) -> Element<'static, Message> {
+    container(text(body).size(12).font(Font::MONOSPACE))
+        .padding(6)
+        .width(Fill)
+        .style(|_| container::background(Color::from_rgb(0.95, 0.95, 0.95)))
+        .into()
+}
