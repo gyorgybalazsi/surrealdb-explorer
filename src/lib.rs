@@ -7,6 +7,7 @@ pub mod data;
 pub mod db;
 pub mod graph;
 pub mod logging;
+pub mod mcp;
 pub mod query;
 pub mod secret;
 
