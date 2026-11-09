@@ -177,10 +177,9 @@ impl Explorer {
         let result = graph::load_result(&db, &answer, &context_ids, limit, connect).await.map_err(internal)?;
 
         let summary = format!(
-            "Drew {} records and {} relations ({} answer records){}.\n\n{}",
+            "Drew {} records and {} relations in the window{}.\n\n{}",
             result.data.nodes.len(),
             result.data.edges.len(),
-            result.answer.len(),
             if result.left_out > 0 {
                 format!("; {} more weren't drawn because of the {limit}-record limit", result.left_out)
             } else {
