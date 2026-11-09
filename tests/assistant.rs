@@ -5,7 +5,7 @@
 
 mod common;
 
-use surrealdb_explorer::assistant::{self, Assistant, Model};
+use surrealdb_explorer::assistant::{self, Assistant, Model, Request};
 use surrealdb_explorer::config::{AssistantMode, Config};
 use surrealdb_explorer::{data, db, query};
 
@@ -73,7 +73,7 @@ fn asks_claude() {
         let assistant = Assistant::new(key);
 
         for question in ["who does alice know?", "how many people are there?", "who knows someone who knows bob?"] {
-            let s = assistant.ask(&db, question, AssistantMode::Auto).await.unwrap();
+            let s = assistant.ask(&db, &Request::new(question), AssistantMode::Auto).await.unwrap();
             println!(
                 "Q: {question}\n  {} {:?} confident={} problem={:?}\n  query:   {}\n  context: {:?}\n  {}\n",
                 s.model.name(),
@@ -88,13 +88,13 @@ fn asks_claude() {
         }
 
         // The answer comes with the relations that explain it.
-        let s = assistant.ask(&db, "who knows someone who knows bob?", AssistantMode::Auto).await.unwrap();
+        let s = assistant.ask(&db, &Request::new("who knows someone who knows bob?"), AssistantMode::Auto).await.unwrap();
         let context = s.context_query.expect("a context query");
         let ids = query::record_ids(&query::run(&db, context).await);
         println!("context ids: {ids:?}");
         assert!(ids.iter().any(|id| id.starts_with("knows:")), "the context returns knows relations");
 
-        let first = assistant.ask(&db, "who does alice know?", AssistantMode::Haiku).await.unwrap();
+        let first = assistant.ask(&db, &Request::new("who does alice know?"), AssistantMode::Haiku).await.unwrap();
         assert_eq!(first.model, Model::Haiku);
         let again = assistant.retry_with_opus(&db, &first).await.unwrap();
         assert_eq!(again.model, Model::Opus);
@@ -113,6 +113,7 @@ fn the_chat_history_survives_a_restart() {
 
     let answered = Exchange {
         question: "who does alice know?".into(),
+        attachments: vec![],
         answer: Ok(Suggestion {
             question: "who does alice know?".into(),
             query: "SELECT ->knows->person.* FROM person:alice;".into(),
@@ -122,9 +123,11 @@ fn the_chat_history_survives_a_restart() {
             confident: true,
             problem: None,
             notes: vec![],
+            editor_query: None,
+            attachments: vec![],
         }),
     };
-    let failed = Exchange { question: "and bob?".into(), answer: Err("no network".into()) };
+    let failed = Exchange { question: "and bob?".into(), attachments: vec!["names.csv".into()], answer: Err("no network".into()) };
     history::save(&path, &[answered, failed]).unwrap();
 
     let loaded = history::load(&path);
@@ -133,10 +136,11 @@ fn the_chat_history_survives_a_restart() {
     assert_eq!(first.model, Model::Haiku);
     assert_eq!(first.context_query.as_deref(), Some("SELECT * FROM knows WHERE in = person:alice;"));
     assert_eq!(loaded[1].answer.as_ref().unwrap_err(), "no network");
+    assert_eq!(loaded[1].attachments, ["names.csv"]);
 
     // Only the newest exchanges are kept.
     let many: Vec<Exchange> = (0..MAX_KEPT + 5)
-        .map(|i| Exchange { question: format!("q{i}"), answer: Err("x".into()) })
+        .map(|i| Exchange { question: format!("q{i}"), attachments: vec![], answer: Err("x".into()) })
         .collect();
     history::save(&path, &many).unwrap();
     let loaded = history::load(&path);

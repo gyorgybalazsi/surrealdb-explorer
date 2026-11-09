@@ -152,7 +152,7 @@ impl App {
         let mut entries = Column::new().spacing(12).padding([0, 10]);
         if self.chat.is_empty() {
             entries = entries.push(
-                text("Ask about the data in plain English. Claude writes the SurrealQL; it goes in the editor for you to check and run.")
+                text("Ask about the data in plain English, or say how to change the query in the editor. Attach files, such as a list of names or CSV rows, for Claude to use. Claude writes the SurrealQL; it goes in the editor for you to check and run.")
                     .size(12)
                     .color(MUTED),
             );
@@ -171,7 +171,7 @@ impl App {
             entries = entries.push(text(format!("Asking {who}…{key_note}")).size(12).color(MUTED));
         }
 
-        let input = text_input("Ask in plain English, e.g. who does alice know?", &self.question)
+        let input = text_input("Ask, or say how to change the query in the editor", &self.question)
             .on_input(Message::QuestionEdited)
             .on_submit_maybe(can_ask.then_some(Message::Ask))
             .size(13);
@@ -179,13 +179,32 @@ impl App {
             .style(button::primary)
             .on_press_maybe((can_ask && !self.question.trim().is_empty()).then_some(Message::Ask));
 
-        column![
+        let attach = button(text("Attach…").size(13))
+            .style(button::secondary)
+            .on_press_maybe((!self.asking && !self.picking_files).then_some(Message::AttachFiles));
+
+        let mut col = column![
             header,
             // Anchored to the bottom, like a chat: new answers stay in view.
             scrollable(entries).anchor_bottom().height(Fill).width(Fill),
-            row![input, ask].spacing(8).align_y(Alignment::Center),
         ]
-        .spacing(6)
+        .spacing(6);
+        for (i, file) in self.attachments.iter().enumerate() {
+            col = col.push(
+                row![
+                    text(format!("Attached: {}", file.label())).size(12).width(Fill),
+                    button(text("Remove").size(11))
+                        .style(button::text)
+                        .padding(0)
+                        .on_press_maybe((!self.asking).then_some(Message::RemoveAttachment(i))),
+                ]
+                .align_y(Alignment::Center),
+            );
+        }
+        for problem in &self.attach_problems {
+            col = col.push(text(problem).size(12).color(ERROR));
+        }
+        col.push(row![attach, input, ask].spacing(8).align_y(Alignment::Center))
         .width(CHAT_WIDTH)
         .into()
     }
@@ -195,6 +214,9 @@ impl App {
             .padding([4, 8])
             .style(|_| container::background(Color::from_rgb(0.9, 0.94, 1.0)));
         let mut col = column![question].spacing(4);
+        if !exchange.attachments.is_empty() {
+            col = col.push(text(format!("Attached: {}", exchange.attachments.join(", "))).size(11).color(MUTED));
+        }
 
         match &exchange.answer {
             Err(e) => col = col.push(text(e).size(12).color(ERROR)),
@@ -245,7 +267,9 @@ impl App {
                 } else {
                     actions.push(button(text("Use this query").size(11)).style(button::secondary).on_press(Message::UseAnswer(i)))
                 };
-                if is_last && in_editor && (s.model == Model::Haiku || s.problem.is_some()) {
+                // After a restart the attached files' text is gone, so Opus couldn't see them.
+                let files_kept = s.attachments.iter().all(|a| !a.text.is_empty());
+                if is_last && in_editor && files_kept && (s.model == Model::Haiku || s.problem.is_some()) {
                     actions = actions.push(
                         button(text("Try with Opus").size(11))
                             .style(button::secondary)

@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use iced::widget::{button, canvas, column, container, pin, row, rule, stack, text, text_editor};
 use iced::{Color, Element, Fill, Font, Point, Subscription, Task, Theme, Vector, window};
 use surrealdb_explorer::assistant::history::{self, Exchange};
-use surrealdb_explorer::assistant::{self, Assistant, Suggestion};
+use surrealdb_explorer::assistant::{self, Assistant, Attachment, Request, Suggestion};
 use surrealdb_explorer::config::{AssistantMode, Config};
 use surrealdb_explorer::db::{self, Database};
 use surrealdb_explorer::graph::{self, GraphData};
@@ -87,8 +87,14 @@ pub enum Message {
     QuestionEdited(String),
     Ask,
     RetryWithOpus,
-    /// The assistant to keep (it holds the API key), the question and the answer.
-    AskDone(Option<Assistant>, String, Result<Suggestion, String>),
+    /// The assistant to keep (it holds the API key), the question, the
+    /// names of the files attached to it, and the answer.
+    AskDone(Option<Assistant>, String, Vec<String>, Result<Suggestion, String>),
+    /// Opens the file picker to attach files to the next question.
+    AttachFiles,
+    /// The files picked, read, or why one couldn't be.
+    FilesPicked(Vec<Result<Attachment, String>>),
+    RemoveAttachment(usize),
     /// Puts the query of a chat entry back in the editor.
     UseAnswer(usize),
     /// Puts the context query of a chat entry in the editor, as a query of its own.
@@ -143,6 +149,11 @@ pub struct App {
 
     pub(super) question: String,
     pub(super) asking: bool,
+    /// Files that go with the next question.
+    pub(super) attachments: Vec<Attachment>,
+    /// Why picked files couldn't be attached.
+    pub(super) attach_problems: Vec<String>,
+    pub(super) picking_files: bool,
     /// The suggested query that is in the editor (Run uses its context query).
     pub(super) suggestion: Option<Suggestion>,
     /// Every question asked and its answer, oldest first.
@@ -201,6 +212,9 @@ impl App {
             result_view: None,
             question: String::new(),
             asking: false,
+            attachments: Vec::new(),
+            attach_problems: Vec::new(),
+            picking_files: false,
             suggestion: None,
             chat: history::load(&history::path()),
             assistant: None,
@@ -321,7 +335,27 @@ impl App {
             Message::QuestionEdited(question) => self.question = question,
             Message::Ask => return self.ask(false),
             Message::RetryWithOpus => return self.ask(true),
-            Message::AskDone(assistant, question, result) => {
+            Message::AttachFiles => {
+                if self.picking_files {
+                    return Task::none();
+                }
+                self.picking_files = true;
+                return Task::perform(pick_files(), Message::FilesPicked);
+            }
+            Message::FilesPicked(picked) => {
+                self.picking_files = false;
+                self.attach_problems = assistant::attachment::add(&mut self.attachments, picked);
+                for problem in &self.attach_problems {
+                    warn!(%problem, "could not attach a file");
+                }
+            }
+            Message::RemoveAttachment(i) => {
+                if i < self.attachments.len() {
+                    self.attachments.remove(i);
+                }
+                self.attach_problems.clear();
+            }
+            Message::AskDone(assistant, question, attached, result) => {
                 self.asking = false;
                 if assistant.is_some() {
                     self.assistant = assistant;
@@ -333,6 +367,12 @@ impl App {
                         self.suggestion = Some(suggestion.clone());
                         if self.question.trim() == question {
                             self.question.clear();
+                            // The files went with this question; the next one starts without.
+                            let names: Vec<String> = self.attachments.iter().map(|a| a.name.clone()).collect();
+                            if names == attached {
+                                self.attachments.clear();
+                                self.attach_problems.clear();
+                            }
                         }
                     }
                     Err(e) => {
@@ -344,7 +384,7 @@ impl App {
                         }
                     }
                 }
-                self.chat.push(Exchange { question, answer: result });
+                self.chat.push(Exchange { question, attachments: attached, answer: result });
                 self.save_chat();
             }
             Message::UseAnswer(i) => {
@@ -624,10 +664,15 @@ impl App {
             return Task::none();
         }
         self.asking = true;
-        let asked = match (&previous, retry_with_opus) {
-            (Some(previous), true) => previous.question.clone(),
-            _ => question.clone(),
+        let (asked, attached) = match (&previous, retry_with_opus) {
+            (Some(previous), true) => {
+                (previous.question.clone(), previous.attachments.iter().map(|a| a.name.clone()).collect())
+            }
+            _ => (question.clone(), self.attachments.iter().map(|a| a.name.clone()).collect::<Vec<_>>()),
         };
+        // Claude sees the query in the editor, so the question can ask to change it.
+        let editor_query = Some(self.query_text.text()).filter(|q| !q.trim().is_empty());
+        let request = Request { question: question.clone(), editor_query, attachments: self.attachments.clone() };
         let mode = self.config.assistant.mode;
         let reference = self.config.assistant.api_key.clone();
         let cached = self.assistant.clone();
@@ -643,13 +688,13 @@ impl App {
             };
             let result = match (retry_with_opus, previous) {
                 (true, Some(previous)) => assistant.retry_with_opus(&db, &previous).await,
-                _ => assistant.ask(&db, &question, mode).await,
+                _ => assistant.ask(&db, &request, mode).await,
             };
             (Some(assistant), result.map_err(|e| e.to_string()))
         });
         Task::perform(
             async move { handle.await.unwrap_or_else(|e| (None, Err(format!("the task failed: {e}")))) },
-            move |(assistant, result)| Message::AskDone(assistant, asked.clone(), result),
+            move |(assistant, result)| Message::AskDone(assistant, asked.clone(), attached.clone(), result),
         )
     }
 
@@ -771,4 +816,27 @@ impl App {
 
 pub(super) fn plural(n: usize, word: &str) -> String {
     format!("{n} {word}{}", if n == 1 { "" } else { "s" })
+}
+
+/// Asks which files to attach, and reads them.
+async fn pick_files() -> Vec<Result<Attachment, String>> {
+    let Some(files) = rfd::AsyncFileDialog::new()
+        .set_title("Attach files to the question")
+        .pick_files()
+        .await
+    else {
+        return Vec::new();
+    };
+    let mut picked = Vec::new();
+    for file in files {
+        let name = file.file_name();
+        // Check the size first, so a huge file isn't read for nothing.
+        let size = std::fs::metadata(file.path()).map(|m| m.len()).unwrap_or(0);
+        if size > assistant::attachment::MAX_BYTES as u64 {
+            picked.push(Err(assistant::attachment::too_large(&name, size)));
+            continue;
+        }
+        picked.push(Attachment::from_bytes(&name, file.read().await));
+    }
+    picked
 }

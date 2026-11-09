@@ -16,6 +16,9 @@ pub const MAX_KEPT: usize = 200;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Exchange {
     pub question: String,
+    /// Names of the files attached to the question.
+    #[serde(default)]
+    pub attachments: Vec<String>,
     pub answer: Result<Suggestion, String>,
 }
 
