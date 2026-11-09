@@ -36,6 +36,10 @@ impl App {
         if let Some(error) = &self.error {
             col = col.push(text(error).size(12).color(ERROR));
         }
+        let mcp_error = self.mcp.as_ref().and_then(|m| m.window.lock().ok()?.server_error.clone());
+        if let Some(error) = mcp_error {
+            col = col.push(text(error).size(12).color(ERROR));
+        }
         if !g.truncated.is_empty() {
             col = col.push(
                 text(format!(

@@ -1006,8 +1006,16 @@ fn start_mcp(runtime: &tokio::runtime::Runtime, port: u16) -> mcp::Shared {
     let shared = mcp::Shared::new(to_window);
     let server = shared.clone();
     runtime.spawn(async move {
-        if let Err(e) = mcp::serve(server, port).await {
+        if let Err(e) = mcp::serve(server.clone(), port).await {
             error!(error = %e, "the MCP server stopped");
+            let hint = if e.to_string().contains("in use") {
+                " Is another copy of SurrealDB Explorer open? Close it and restart this one."
+            } else {
+                ""
+            };
+            if let Ok(mut window) = server.window.lock() {
+                window.server_error = Some(format!("Claude Code's tools aren't available: {e}.{hint}"));
+            }
         }
     });
     shared

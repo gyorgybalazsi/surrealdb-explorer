@@ -45,6 +45,8 @@ pub enum WindowCommand {
 pub struct WindowState {
     /// The selected record or relation, as JSON (id, fields, connections).
     pub selection: Option<serde_json::Value>,
+    /// Why the MCP server isn't running, if it stopped.
+    pub server_error: Option<String>,
 }
 
 /// Everything the tools share with the window.
