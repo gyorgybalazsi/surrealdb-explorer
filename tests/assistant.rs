@@ -152,3 +152,44 @@ fn the_chat_history_survives_a_restart() {
     assert!(history::load(&path).is_empty());
     assert!(dir.join("chat-history.json.bad").exists());
 }
+
+/// Attached files are query parameters, so a query can load a whole file,
+/// like the example in Claude's instructions.
+#[test]
+fn queries_load_attached_files_through_parameters() {
+    use surrealdb_explorer::assistant::attachment::{self, Attachment};
+
+    let config = common::temp_database("assistant-files");
+    common::run(async move {
+        let db = db::connect(&config).await.unwrap();
+        let mut attached = Vec::new();
+        let problems = attachment::add(
+            &mut attached,
+            vec![
+                Attachment::from_bytes("movies.csv", b"movieId,title,year\n1,Toy Story,1995\n2,Jumanji,\n".to_vec()),
+                Attachment::from_bytes("people.csv", b"tmdbId,name\n31,Tom Hanks\n".to_vec()),
+                Attachment::from_bytes("acted_in.csv", b"personTmdbId,movieId,role\n31,1,Woody (voice)\n".to_vec()),
+            ],
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+        let params = attachment::params(&attached);
+
+        let load = "\
+            FOR $row IN $movies { CREATE type::record('movie', <int>$row.movieId) CONTENT { title: $row.title, year: <option<int>>$row.year } };\n\
+            FOR $row IN $people { CREATE type::record('person', <int>$row.tmdbId) CONTENT { name: $row.name } };\n\
+            FOR $row IN $acted_in { RELATE (type::record('person', <int>$row.personTmdbId))->acted_in->(type::record('movie', <int>$row.movieId)) CONTENT { role: $row.role } };";
+
+        // The check sees the files too, and changes nothing.
+        assert_eq!(assistant::check_with(&db, load, &params).await, None);
+
+        let outcome = query::run_with(&db, load.into(), &params).await;
+        let statements = outcome.statements.unwrap();
+        assert!(statements.iter().all(|s| s.result.is_ok()), "{statements:?}");
+
+        let roles = query::run(&db, "SELECT VALUE ->acted_in->movie.title FROM person:31;".into()).await;
+        let roles = roles.statements.unwrap()[0].result.clone().unwrap();
+        assert_eq!(roles, serde_json::json!([["Toy Story"]]));
+        let year = query::run(&db, "SELECT VALUE year FROM movie ORDER BY id;".into()).await;
+        assert_eq!(year.statements.unwrap()[0].result.clone().unwrap(), serde_json::json!([1995, null]), "an empty cell isn't stored");
+    });
+}

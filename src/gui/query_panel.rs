@@ -152,7 +152,7 @@ impl App {
         let mut entries = Column::new().spacing(12).padding([0, 10]);
         if self.chat.is_empty() {
             entries = entries.push(
-                text("Ask about the data in plain English, or say how to change the query in the editor. Attach files, such as a list of names or CSV rows, for Claude to use. Claude writes the SurrealQL; it goes in the editor for you to check and run.")
+                text("Ask about the data in plain English, or say how to change the query in the editor. Attach files, such as CSV or JSON data or a list of names: Claude sees them, and queries can read them, e.g. movies.csv as $movies. Claude writes the SurrealQL; it goes in the editor for you to check and run.")
                     .size(12)
                     .color(MUTED),
             );
@@ -267,8 +267,8 @@ impl App {
                 } else {
                     actions.push(button(text("Use this query").size(11)).style(button::secondary).on_press(Message::UseAnswer(i)))
                 };
-                // After a restart the attached files' text is gone, so Opus couldn't see them.
-                let files_kept = s.attachments.iter().all(|a| !a.text.is_empty());
+                // After a restart the attached files' contents are gone, so Opus couldn't see them.
+                let files_kept = s.attachments.iter().all(|a| a.is_loaded());
                 if is_last && in_editor && files_kept && (s.model == Model::Haiku || s.problem.is_some()) {
                     actions = actions.push(
                         button(text("Try with Opus").size(11))

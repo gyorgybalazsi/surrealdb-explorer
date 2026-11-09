@@ -6542,6 +6542,7 @@ dependencies = [
 name = "surrealdb-explorer"
 version = "0.1.0"
 dependencies = [
+ "csv",
  "iced",
  "reqwest",
  "rfd",

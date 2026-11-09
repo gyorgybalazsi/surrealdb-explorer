@@ -11,6 +11,11 @@ const CANCELLED: &str = "cancelled transaction";
 /// runs. Queries with their own transaction statements can't be wrapped and
 /// are not checked.
 pub async fn check(db: &Database, query: &str) -> Option<String> {
+    check_with(db, query, &serde_json::Value::Object(Default::default())).await
+}
+
+/// Like `check`, with parameters the query can read (see `query::run_with`).
+pub async fn check_with(db: &Database, query: &str, params: &serde_json::Value) -> Option<String> {
     if query.trim().is_empty() {
         return Some("the query is empty".into());
     }
@@ -20,7 +25,7 @@ pub async fn check(db: &Database, query: &str) -> Option<String> {
     // New lines around the query, so a trailing `-- comment` can't swallow
     // the CANCEL.
     let sql = format!("BEGIN TRANSACTION;\n{query}\n;CANCEL TRANSACTION;");
-    match db.query(sql).await {
+    match db.query(sql).bind(params.clone()).await {
         Err(e) => Some(e.to_string()),
         Ok(mut response) => {
             let mut errors: Vec<(usize, String)> = response

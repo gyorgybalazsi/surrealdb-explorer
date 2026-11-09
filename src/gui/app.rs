@@ -149,7 +149,8 @@ pub struct App {
 
     pub(super) question: String,
     pub(super) asking: bool,
-    /// Files that go with the next question.
+    /// Attached files: Claude sees them with every question, and queries
+    /// read their data as parameters (`movies.csv` is `$movies`).
     pub(super) attachments: Vec<Attachment>,
     /// Why picked files couldn't be attached.
     pub(super) attach_problems: Vec<String>,
@@ -365,14 +366,9 @@ impl App {
                         self.query_text = text_editor::Content::with_text(&suggestion.query);
                         self.query_outcome = None;
                         self.suggestion = Some(suggestion.clone());
+                        // Attached files stay: the query reads them as parameters.
                         if self.question.trim() == question {
                             self.question.clear();
-                            // The files went with this question; the next one starts without.
-                            let names: Vec<String> = self.attachments.iter().map(|a| a.name.clone()).collect();
-                            if names == attached {
-                                self.attachments.clear();
-                                self.attach_problems.clear();
-                            }
                         }
                     }
                     Err(e) => {
@@ -618,12 +614,14 @@ impl App {
         let context = suggested
             .filter(|_| self.config.assistant.show_connections)
             .and_then(|s| s.context_query.clone());
+        // Attached files are parameters the query can read, e.g. `$movies`.
+        let params = assistant::attachment::params(&self.attachments);
         // Run on our runtime (big thread stacks, see `runtime`), and only
         // wait for the result on iced's side, so the window stays responsive.
         let handle = self.runtime.spawn(async move {
-            let outcome = query::run(&db, sql).await;
+            let outcome = query::run_with(&db, sql, &params).await;
             let context = match context {
-                Some(context) if outcome.statements.is_ok() => Some(query::run(&db, context).await),
+                Some(context) if outcome.statements.is_ok() => Some(query::run_with(&db, context, &params).await),
                 _ => None,
             };
             (outcome, context)
