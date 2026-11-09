@@ -17,6 +17,7 @@ pub enum SettingsField {
     Namespace,
     Database,
     MaxRecords,
+    MaxResultRecords,
     LogLevel,
     LogDirectory,
     ApiKey,
@@ -28,6 +29,9 @@ pub struct SettingsForm {
     pub namespace: String,
     pub database: String,
     pub max_records: String,
+    pub max_result_records: String,
+    /// Changed with the checkbox in the query panel; kept so saving doesn't reset it.
+    pub connect_results: bool,
     pub log_level: String,
     pub log_directory: String,
     pub assistant_mode: AssistantMode,
@@ -47,6 +51,8 @@ impl SettingsForm {
             namespace: c.database.namespace.clone(),
             database: c.database.database.clone(),
             max_records: c.graph.max_records_per_table.to_string(),
+            max_result_records: c.graph.max_result_records.to_string(),
+            connect_results: c.graph.connect_results,
             log_level: c.logging.level.clone(),
             log_directory: c.logging.directory.clone(),
             assistant_mode: c.assistant.mode,
@@ -62,6 +68,7 @@ impl SettingsForm {
             SettingsField::Namespace => &mut self.namespace,
             SettingsField::Database => &mut self.database,
             SettingsField::MaxRecords => &mut self.max_records,
+            SettingsField::MaxResultRecords => &mut self.max_result_records,
             SettingsField::LogLevel => &mut self.log_level,
             SettingsField::LogDirectory => &mut self.log_directory,
             SettingsField::ApiKey => &mut self.api_key,
@@ -77,13 +84,18 @@ impl SettingsForm {
             .trim()
             .parse()
             .map_err(|_| "max records per table must be a whole number".to_string())?;
+        let max_result_records = self
+            .max_result_records
+            .trim()
+            .parse()
+            .map_err(|_| "max records in a query result must be a whole number".to_string())?;
         let config = Config {
             database: DatabaseConfig {
                 path: self.database_path.trim().into(),
                 namespace: self.namespace.trim().into(),
                 database: self.database.trim().into(),
             },
-            graph: GraphConfig { max_records_per_table },
+            graph: GraphConfig { max_records_per_table, max_result_records, connect_results: self.connect_results },
             logging: LoggingConfig {
                 level: self.log_level.clone(),
                 directory: self.log_directory.trim().into(),
@@ -129,9 +141,15 @@ impl SettingsForm {
         col = col.push(heading("Graph"));
         col = col.push(field(
             "Max records per table",
-            "Applies on save (the graph reloads).",
+            "For the whole-database view. Applies on save (the graph reloads).",
             &self.max_records,
             SettingsField::MaxRecords,
+        ));
+        col = col.push(field(
+            "Max records in a query result",
+            "A query's result replaces the graph; at most this many records are drawn.",
+            &self.max_result_records,
+            SettingsField::MaxResultRecords,
         ));
 
         col = col.push(heading("Logging"));

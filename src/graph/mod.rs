@@ -5,9 +5,11 @@
 
 mod model;
 mod records;
+mod result;
 pub(crate) mod tables;
 
 pub use model::{GraphData, GraphEdge, GraphNode};
+pub use result::{ResultGraph, load_result};
 
 use surrealdb::types::Value;
 

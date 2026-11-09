@@ -219,6 +219,11 @@ for example `person:alice`.
 - Follow relations with arrows: `->knows->person` (outgoing), `<-knows<-person` \
 (incoming), `<->knows<->person` (either direction).
 - Selecting from a table that doesn't exist is an error in this SurrealDB version.
+- Tables can be large. Start from the specific records the question names and follow \
+arrows from there, e.g. `SELECT ->acted_in->movie FROM person WHERE name = 'Tom Hanks'`, \
+instead of scanning a whole relation table with conditions like `WHERE in.name = ...`. \
+The same goes for context_query: start from those records and select their relations, \
+e.g. `SELECT VALUE ->acted_in FROM person WHERE name = 'Tom Hanks'`.
 - Prefer read-only queries. Write statements that change data only when the question \
 clearly asks for a change, and say so in the explanation.
 - Don't use transactions (BEGIN, COMMIT, CANCEL).
@@ -228,8 +233,8 @@ clearly asks for a change, and say so in the explanation.
 - context_query: a read-only query that returns the relation records (edges) linking \
 the answer records to the records the question is about, so the app can show how \
 they're connected. Example: for \"who knows someone who knows bob?\" it could be \
-`SELECT * FROM knows WHERE out = person:bob OR out IN (SELECT VALUE in FROM knows \
-WHERE out = person:bob);`. Use an empty string if the answer doesn't involve relations.
+`RETURN array::flatten([person:bob<-knows, person:bob<-knows<-person<-knows]);`. \
+Use an empty string if the answer doesn't involve relations.
 - explanation: one or two short sentences in plain language about what the query \
 finds.
 - The message may show the query that is in the editor now. If the question asks to \

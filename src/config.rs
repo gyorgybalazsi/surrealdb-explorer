@@ -38,6 +38,11 @@ pub struct DatabaseConfig {
 pub struct GraphConfig {
     /// Most records loaded per table, so a big table can't freeze the app.
     pub max_records_per_table: usize,
+    /// Most records drawn for a query's result.
+    pub max_result_records: usize,
+    /// Also draw every relation between the records of a query's result,
+    /// not only the relations the query returned.
+    pub connect_results: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -116,7 +121,7 @@ impl Default for DatabaseConfig {
 
 impl Default for GraphConfig {
     fn default() -> Self {
-        GraphConfig { max_records_per_table: 1000 }
+        GraphConfig { max_records_per_table: 1000, max_result_records: 2000, connect_results: false }
     }
 }
 
@@ -171,8 +176,8 @@ impl Config {
         if d.path.trim().is_empty() || d.namespace.trim().is_empty() || d.database.trim().is_empty() {
             return Err("database path, namespace and database must not be empty".into());
         }
-        if self.graph.max_records_per_table == 0 {
-            return Err("max records per table must be at least 1".into());
+        if self.graph.max_records_per_table == 0 || self.graph.max_result_records == 0 {
+            return Err("the record limits must be at least 1".into());
         }
         if !LOG_LEVELS.contains(&self.logging.level.as_str()) {
             return Err(format!("log level must be one of: {}", LOG_LEVELS.join(", ")).into());

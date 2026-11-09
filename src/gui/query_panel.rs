@@ -53,12 +53,20 @@ impl App {
                     .text_size(12),
             );
         }
+        if self.query_outcome.is_some() {
+            status = status.push(
+                checkbox(self.config.graph.connect_results)
+                    .label("Connect shown records")
+                    .on_toggle(Message::ToggleConnectResults)
+                    .text_size(12),
+            );
+        }
         if let Some(summary) = self.query_outcome.as_ref().map(summary) {
             status = status.push(summary);
         }
 
         let results: Element<'_, Message> = match &self.query_outcome {
-            None => text("Results appear here. Queries that change data reload the graph.")
+            None => text("Results appear here. A result with records replaces the graph; Show the whole graph brings the overview back.")
                 .size(12)
                 .color(MUTED)
                 .into(),
@@ -114,6 +122,17 @@ impl App {
         ]
         .spacing(4)
         .width(Length::FillPortion(1));
+        if let Some(view) = self.result_view.as_ref().filter(|v| v.left_out > 0) {
+            answer_col = answer_col.push(
+                text(format!(
+                    "Only the first {} of {} returned records are drawn; the limit is in Settings.",
+                    view.found - view.left_out,
+                    view.found
+                ))
+                .size(12)
+                .color(WARNING),
+            );
+        }
         answer_col = answer_col.push(
             button(text("Show the whole graph").size(12)).style(button::text).padding(0).on_press(Message::ShowAll),
         );

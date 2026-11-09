@@ -9,7 +9,7 @@ use surrealdb_explorer::assistant::history::{self, Exchange};
 use surrealdb_explorer::assistant::{self, Assistant, Attachment, Request, Suggestion};
 use surrealdb_explorer::config::{AssistantMode, Config};
 use surrealdb_explorer::db::{self, Database};
-use surrealdb_explorer::graph::{self, GraphData};
+use surrealdb_explorer::graph::{self, GraphData, ResultGraph};
 use surrealdb_explorer::config::DatabaseConfig;
 use surrealdb_explorer::data;
 use surrealdb_explorer::logging::LogControl;
@@ -21,13 +21,16 @@ use crate::gui::layout::Layout;
 use crate::gui::model::Graph;
 use crate::gui::settings::{SettingsField, SettingsForm};
 
-/// A query's result shown in the graph: the records that answer it, and
-/// the relations that show how they connect. Kept as ids, so it survives
-/// reloads.
+/// A query's result shown as the graph: the records that answer it, and
+/// the relations that show how they connect.
 #[derive(Debug, Clone, Default)]
 pub struct ResultView {
     pub answer: HashSet<String>,
     pub context_edges: HashSet<String>,
+    /// Records and relations the queries returned.
+    pub found: usize,
+    /// How many weren't drawn because of the limit.
+    pub left_out: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -77,8 +80,12 @@ pub enum Message {
     QueryEdited(text_editor::Action),
     RunQuery,
     /// The query's outcome, the outcome of its context query if one ran, and
-    /// whether it was a query Claude suggested.
+    /// whether the query may have changed data.
     QueryDone(QueryOutcome, Option<QueryOutcome>, bool),
+    /// The last query's result, read from the database as a graph.
+    ResultLoaded(Result<ResultGraph, String>),
+    /// Turns drawing every relation between a result's records on or off.
+    ToggleConnectResults(bool),
     /// Turns running the context query with a suggested query on or off.
     ToggleConnections(bool),
     ShowQueryInGraph,
@@ -284,12 +291,17 @@ impl App {
                 }
             }
             Message::ShowAll => {
-                for n in &mut self.graph.nodes {
-                    n.hidden = false;
+                if self.result_view.is_some() {
+                    // Back from a query result to the whole-database view.
+                    self.reload();
+                    self.notice = None;
+                } else {
+                    for n in &mut self.graph.nodes {
+                        n.hidden = false;
+                    }
+                    self.notice = None;
+                    self.layout.reheat(0.3);
                 }
-                self.result_view = None;
-                self.notice = None;
-                self.layout.reheat(0.3);
             }
             Message::Reload => self.reload(),
 
@@ -314,24 +326,60 @@ impl App {
             Message::ToggleQuery => self.query_open = !self.query_open,
             Message::QueryEdited(action) => self.query_text.perform(action),
             Message::RunQuery => return self.run_query(),
-            Message::QueryDone(outcome, context, suggested) => {
+            Message::QueryDone(outcome, context, changes_data) => {
                 self.query_running = false;
-                let changed_anything = outcome
-                    .statements
-                    .as_ref()
-                    .is_ok_and(|s| s.iter().any(|r| r.result.is_ok()));
+                let has_records = !query::record_ids(&outcome).is_empty();
                 self.query_outcome = Some(outcome);
                 self.query_context = context;
-                // The query may have changed data; show the current state.
-                if changed_anything {
+                // A result with records becomes the graph. Otherwise, a query
+                // that changed data shows the current state of the database.
+                if has_records {
+                    return self.load_result();
+                }
+                if changes_data {
                     self.reload();
                 }
-                // A suggested query shows its answer (and how it connects) straight away.
-                if suggested {
-                    self.show_query_in_graph();
+            }
+            Message::ShowQueryInGraph => return self.load_result(),
+            Message::ResultLoaded(Ok(result)) => {
+                if result.data.nodes.is_empty() {
+                    self.notice = Some("None of the returned records could be drawn.".into());
+                    return Task::none();
+                }
+                let limit = self.config.graph.max_result_records;
+                self.graph = Graph::new(result.data, None);
+                self.notice = (result.left_out > 0).then(|| {
+                    format!(
+                        "Drew the first {limit} of {} records. Raise the limit in Settings to see more.",
+                        result.found
+                    )
+                });
+                self.result_view = Some(ResultView {
+                    answer: result.answer,
+                    context_edges: result.context_edges,
+                    found: result.found,
+                    left_out: result.left_out,
+                });
+                self.camera = Camera::default();
+                self.hover = None;
+                self.selection = None;
+                self.menu = None;
+                self.dragging = None;
+                self.layout.reheat(1.0);
+            }
+            Message::ResultLoaded(Err(e)) => {
+                error!(error = %e, "could not draw the query result");
+                self.error = Some(format!("Could not draw the result: {e}"));
+            }
+            Message::ToggleConnectResults(on) => {
+                self.config.graph.connect_results = on;
+                if let Err(e) = self.config.save() {
+                    warn!(error = %e, "could not save the setting");
+                }
+                if self.result_view.is_some() {
+                    return self.load_result();
                 }
             }
-            Message::ShowQueryInGraph => self.show_query_in_graph(),
 
             Message::QuestionEdited(question) => self.question = question,
             Message::Ask => return self.ask(false),
@@ -461,6 +509,7 @@ impl App {
         match self.runtime.block_on(graph::load(db, limit)) {
             Ok(data) => {
                 self.graph = Graph::new(data, Some(&self.graph));
+                self.result_view = None;
                 self.error = None;
                 self.notice = Some("Reloaded".into());
             }
@@ -609,9 +658,9 @@ impl App {
         self.query_running = true;
         // A query Claude suggested, run unchanged, brings its context query
         // (unless that's turned off).
-        let suggested = self.suggestion_in_editor();
-        let is_suggested = suggested.is_some();
-        let context = suggested
+        let changes_data = !assistant::is_read_only(&sql);
+        let context = self
+            .suggestion_in_editor()
             .filter(|_| self.config.assistant.show_connections)
             .and_then(|s| s.context_query.clone());
         // Attached files are parameters the query can read, e.g. `$movies`.
@@ -636,7 +685,7 @@ impl App {
                     (failed, None)
                 })
             },
-            move |(outcome, context)| Message::QueryDone(outcome, context, is_suggested),
+            move |(outcome, context)| Message::QueryDone(outcome, context, changes_data),
         )
     }
 
@@ -696,50 +745,23 @@ impl App {
         )
     }
 
-    /// Shows the last query's result in the graph: the records it returned,
-    /// marked as the answer, plus the relations its context query returned
-    /// and the records along them. Everything else is hidden.
-    fn show_query_in_graph(&mut self) {
-        let Some(outcome) = &self.query_outcome else { return };
-        let answer_ids: HashSet<String> = query::record_ids(outcome).into_iter().collect();
-        let context_ids: HashSet<String> =
-            self.query_context.iter().flat_map(query::record_ids).collect();
-
-        let mut answer: HashSet<usize> = HashSet::new();
-        let mut keep: HashSet<usize> = HashSet::new();
-        for (i, n) in self.graph.nodes.iter().enumerate() {
-            if answer_ids.contains(&n.id) {
-                answer.insert(i);
-                keep.insert(i);
-            } else if context_ids.contains(&n.id) {
-                keep.insert(i);
-            }
-        }
-        // Relations the query or its context returned bring both of their records.
-        let mut context_edges: HashSet<String> = HashSet::new();
-        for e in &self.graph.edges {
-            if answer_ids.contains(&e.id) || context_ids.contains(&e.id) {
-                keep.insert(e.from);
-                keep.insert(e.to);
-                context_edges.insert(e.id.clone());
-            }
-        }
-        if keep.is_empty() {
-            self.notice = Some("None of the query's records are in the graph.".into());
-            return;
-        }
-        for (i, n) in self.graph.nodes.iter_mut().enumerate() {
-            n.hidden = !keep.contains(&i);
-        }
-        info!(answer = answer.len(), shown = keep.len(), relations = context_edges.len(), "showing query results in the graph");
-        self.notice = None;
-        self.result_view = Some(ResultView {
-            answer: answer.iter().map(|&i| self.graph.nodes[i].id.clone()).collect(),
-            context_edges,
+    /// Draws the last query's result as the graph, in the background: the
+    /// records and relations it (and its context query) returned, read from
+    /// the database by id.
+    fn load_result(&mut self) -> Task<Message> {
+        let (Some(db), Some(outcome)) = (self.db.clone(), &self.query_outcome) else { return Task::none() };
+        let answer = query::record_ids(outcome);
+        let context: Vec<String> = self.query_context.iter().flat_map(query::record_ids).collect();
+        let limit = self.config.graph.max_result_records;
+        let connect = self.config.graph.connect_results;
+        self.notice = Some("Drawing the result…".into());
+        let handle = self.runtime.spawn(async move {
+            graph::load_result(&db, &answer, &context, limit, connect).await.map_err(|e| e.to_string())
         });
-        self.selection = None;
-        self.hover = None;
-        self.layout.reheat(0.3);
+        Task::perform(
+            async move { handle.await.unwrap_or_else(|e| Err(format!("the task failed: {e}"))) },
+            Message::ResultLoaded,
+        )
     }
 
     /// The result view as record and relation indices into the current graph.

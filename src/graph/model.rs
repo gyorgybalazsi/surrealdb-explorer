@@ -1,6 +1,7 @@
 //! The graph data: records as nodes and relations as edges.
 
 /// A record drawn as a node.
+#[derive(Debug, Clone)]
 pub struct GraphNode {
     pub id: String,
     pub table: String,
@@ -10,6 +11,7 @@ pub struct GraphNode {
 
 /// A relation between two records: a record in a relation table
 /// (created with `RELATE`), drawn from its `in` to its `out`.
+#[derive(Debug, Clone)]
 pub struct GraphEdge {
     pub id: String,
     pub from: String,
@@ -20,7 +22,7 @@ pub struct GraphEdge {
     pub data: serde_json::Value,
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct GraphData {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
