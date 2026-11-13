@@ -1,12 +1,13 @@
 //! The sidebar: graph summary, legend, actions and the selected record.
 
-use iced::widget::{Column, button, column, container, pick_list, row, scrollable, text};
+use iced::widget::{Column, button, checkbox, column, container, pick_list, row, scrollable, text, text_input};
 use iced::{Color, Element, Fill, Font};
-use surrealdb_explorer::canton::{NodeKind, RelKind};
+use surrealdb_explorer::canton::{NodeKind, StatusFilter};
 use surrealdb_explorer::config::Visualization;
 
-use crate::gui::app::{App, DataAction, Message, Selection, plural};
+use crate::gui::app::{App, CantonFilterChange as F, DataAction, Message, Selection, plural};
 use crate::gui::canton_draw;
+use surrealdb_explorer::canton;
 
 pub(super) const SIDEBAR_WIDTH: f32 = 320.0;
 pub(super) const MUTED: Color = Color::from_rgb(0.47, 0.47, 0.47);
@@ -92,7 +93,7 @@ impl App {
             );
         }
         if visualization == Visualization::Canton {
-            col = col.push(canton_legend(g.looks_like_event_graph()));
+            col = col.push(self.canton_filters_view());
         } else {
             col = col.push(self.tables_legend());
         }
@@ -227,48 +228,141 @@ pub(super) fn json_block(data: &serde_json::Value) -> Element<'static, Message> 
         .into()
 }
 
-/// What the shapes and arrows mean in the Canton event graph.
-fn canton_legend(has_event_graph: bool) -> Element<'static, Message> {
-    let mut col = Column::new().spacing(4);
-    col = col.push(heading("Events"));
-    let shapes = [
-        (NodeKind::Transaction, "▬", "a committed transaction"),
-        (NodeKind::Created, "●", "a contract created (pale once consumed)"),
-        (NodeKind::Exercised, "◆", "a choice exercised"),
-        (NodeKind::Party, "⬢", "a party that requested a transaction"),
-    ];
-    for (kind, symbol, meaning) in shapes {
-        let (color, _, _) = canton_draw::colors(kind);
-        col = col.push(
-            row![text(symbol).color(color), text(kind.name()).size(14), text(meaning).size(12).color(MUTED)]
+/// "any party" / "any template" and the names, for a pick list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Choice {
+    value: Option<String>,
+    label: String,
+}
+
+impl std::fmt::Display for Choice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+impl App {
+    /// The Canton view's filters, as alt-canton's explorer has them: node
+    /// kinds, party, template, contract status and a search.
+    fn canton_filters_view(&self) -> Element<'_, Message> {
+        let f = &self.canton_filters;
+        let model = self.graph.canton_model();
+        let counts = model.counts();
+        let mut col = Column::new().spacing(5);
+
+        col = col.push(heading("Node kinds"));
+        for kind in NodeKind::ALL {
+            col = col.push(
+                row![
+                    checkbox(f.kinds.contains(&kind))
+                        .on_toggle(move |on| Message::CantonFilter(F::Kind(kind, on)))
+                        .size(15),
+                    text("●").color(canton_draw::kind_color(kind)),
+                    text(kind.name()).size(14).width(Fill),
+                    text(counts.get(&kind).copied().unwrap_or(0).to_string()).size(13).color(MUTED),
+                ]
                 .spacing(6)
                 .align_y(iced::Alignment::Center),
-        );
-    }
-    col = col.push(heading("Relations"));
-    let meanings = [
-        (RelKind::Action, "a transaction's root event"),
-        (RelKind::Consequence, "an event an exercise caused (dashed)"),
-        (RelKind::Target, "the contract exercised on (dotted)"),
-        (RelKind::Consumes, "the contract the exercise archived"),
-        (RelKind::Requested, "who submitted the transaction"),
-    ];
-    for (kind, meaning) in meanings {
-        let (color, _, _) = canton_draw::edge_style(kind);
-        col = col.push(
-            row![text("→").color(color), text(kind.name()).size(12), text(meaning).size(12).color(MUTED)]
+            );
+        }
+        if let Some(&other) = counts.get(&NodeKind::Other) {
+            col = col.push(
+                row![
+                    checkbox(f.kinds.contains(&NodeKind::Other))
+                        .on_toggle(|on| Message::CantonFilter(F::Kind(NodeKind::Other, on)))
+                        .size(15),
+                    text("●").color(canton_draw::kind_color(NodeKind::Other)),
+                    text("Other tables").size(14).width(Fill),
+                    text(other.to_string()).size(13).color(MUTED),
+                ]
                 .spacing(6)
                 .align_y(iced::Alignment::Center),
-        );
-    }
-    if !has_event_graph {
+            );
+        }
+        let small = |label: &'static str, kinds: &[NodeKind]| {
+            button(text(label).size(12))
+                .style(button::secondary)
+                .padding([2, 8])
+                .on_press(Message::CantonFilter(F::Kinds(kinds.to_vec())))
+        };
         col = col.push(
-            text("No Canton event graph found: expected tables transaction, created, exercised and party, \
-                  with action, consequence, target, consumes and requested relations. \
-                  Settings → Data → Load Canton sample adds one.")
+            row![
+                small("all", &NodeKind::ALL),
+                small(
+                    "events",
+                    &[NodeKind::Transaction, NodeKind::Created, NodeKind::Exercised, NodeKind::Fetched, NodeKind::Reassignment]
+                ),
+                small("topology", &[NodeKind::Topology, NodeKind::Party]),
+            ]
+            .spacing(6),
+        );
+
+        let choices = |any: &str, names: Vec<(String, String)>| -> Vec<Choice> {
+            std::iter::once(Choice { value: None, label: any.to_string() })
+                .chain(names.into_iter().map(|(value, label)| Choice { value: Some(value), label }))
+                .collect()
+        };
+        let parties = choices(
+            "any party",
+            model.parties().into_iter().map(|p| (p.clone(), canton::ellipsize(&p, 34))).collect(),
+        );
+        let party = parties.iter().find(|c| c.value == f.party).cloned();
+        col = col.push(heading("Party"));
+        col = col.push(
+            pick_list(parties, party, |c: Choice| Message::CantonFilter(F::Party(c.value))).text_size(13).width(Fill),
+        );
+        let templates = choices("any template", model.templates().into_iter().map(|t| (t.clone(), t)).collect());
+        let template = templates.iter().find(|c| c.value == f.template).cloned();
+        col = col.push(heading("Template"));
+        col = col.push(
+            pick_list(templates, template, |c: Choice| Message::CantonFilter(F::Template(c.value)))
+                .text_size(13)
+                .width(Fill),
+        );
+
+        col = col.push(heading("Contracts"));
+        let status = |label: &'static str, value: StatusFilter| {
+            button(text(label).size(13).width(Fill).align_x(iced::Alignment::Center))
+                .width(Fill)
+                .style(if f.status == value { button::primary } else { button::secondary })
+                .on_press(Message::CantonFilter(F::Status(value)))
+        };
+        col = col.push(
+            row![
+                status("all", StatusFilter::All),
+                status("active", StatusFilter::Active),
+                status("archived", StatusFilter::Archived)
+            ]
+            .spacing(2),
+        );
+
+        col = col.push(heading("Search"));
+        col = col.push(
+            text_input("contract id, choice, party…", &f.search)
+                .on_input(|t| Message::CantonFilter(F::Search(t)))
+                .size(13),
+        );
+        col = col.push(
+            button(text("Reset filters").size(13).width(Fill).align_x(iced::Alignment::Center))
+                .width(Fill)
+                .style(button::secondary)
+                .on_press(Message::CantonFilter(F::Reset)),
+        );
+        let shown = self.graph.nodes.iter().filter(|n| n.card.shown).count();
+        col = col.push(text(format!("{shown} of {} records shown", self.graph.nodes.len())).size(12).color(MUTED));
+        if shown == 0 && !self.graph.nodes.is_empty() {
+            col = col.push(text("Nothing matches these filters.").size(12).color(WARNING));
+        }
+        if !self.graph.looks_like_event_graph() {
+            col = col.push(
+                text(
+                    "No Canton event graph found: expected tables such as transaction, created, exercised and party, \
+                     with action, consequence, target and consumes relations. Settings → Data → Load Canton sample adds one.",
+                )
                 .size(12)
-                .color(crate::gui::sidebar::WARNING),
-        );
+                .color(WARNING),
+            );
+        }
+        col.into()
     }
-    col.into()
 }

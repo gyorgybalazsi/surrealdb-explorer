@@ -63,6 +63,8 @@ pub struct GraphView<'a> {
     /// relations that connect them.
     pub result: Option<(HashSet<usize>, HashSet<usize>)>,
     pub visualization: Visualization,
+    /// The canvas size the app last heard of, so a change can be reported.
+    pub known_size: iced::Size,
 }
 
 /// Mouse state kept by the canvas between events.
@@ -79,7 +81,11 @@ pub enum Interaction {
 impl GraphView<'_> {
     /// The visible record under `point`, topmost first.
     fn node_at(&self, bounds: Rectangle, point: Point) -> Option<usize> {
-        let canton = self.visualization == Visualization::Canton;
+        if self.visualization == Visualization::Canton {
+            return (0..self.graph.nodes.len())
+                .rev()
+                .find(|&i| self.graph.nodes[i].card.shown && canton_draw::on_card(self, bounds, i, point));
+        }
         let r = NODE_RADIUS * self.camera.scale.max(0.6) + 3.0;
         self.graph
             .nodes
@@ -87,10 +93,7 @@ impl GraphView<'_> {
             .enumerate()
             .rev()
             .filter(|(_, n)| !n.hidden)
-            .find(|(_, n)| {
-                let r = if canton { canton_draw::hit_radius(n.kind) * self.camera.scale + 2.0 } else { r };
-                self.camera.to_screen(bounds, n.pos).distance(point) <= r
-            })
+            .find(|(_, n)| self.camera.to_screen(bounds, n.pos).distance(point) <= r)
             .map(|(i, _)| i)
     }
 
@@ -100,7 +103,10 @@ impl GraphView<'_> {
             .edges
             .iter()
             .enumerate()
-            .filter(|(_, e)| self.graph.edge_visible(e))
+            .filter(|(_, e)| match self.visualization {
+                Visualization::Canton => canton_draw::edge_drawn(self, e),
+                Visualization::Standard => self.graph.edge_visible(e),
+            })
             .find(|(_, e)| {
                 if self.visualization == Visualization::Canton {
                     return canton_draw::near_edge(self, bounds, e, point);
@@ -113,8 +119,13 @@ impl GraphView<'_> {
     }
 
     /// Records (and their relations) to draw in full colour while hovering.
+    /// In the Canton view a selected record lights up its neighbours too, as in alt-canton's explorer.
     fn lit(&self) -> Option<HashSet<usize>> {
-        self.hover.map(|h| self.graph.neighbourhood(h))
+        let selected = match self.selection {
+            Some(Selection::Node(n)) if self.visualization == Visualization::Canton => Some(n),
+            _ => None,
+        };
+        self.hover.or(selected).map(|h| self.graph.neighbourhood(h))
     }
 }
 
@@ -128,6 +139,11 @@ impl canvas::Program<Message> for GraphView<'_> {
         bounds: Rectangle,
         cursor: Cursor,
     ) -> Option<Action<Message>> {
+        // Tell the app the canvas size, which the Canton layout wraps to.
+        let size = bounds.size();
+        if (size.width - self.known_size.width).abs() > 1.0 || (size.height - self.known_size.height).abs() > 1.0 {
+            return Some(Action::publish(Message::CanvasResized(size)));
+        }
         let Event::Mouse(event) = event else { return None };
 
         // Releases and drags are handled even if the cursor left the canvas.

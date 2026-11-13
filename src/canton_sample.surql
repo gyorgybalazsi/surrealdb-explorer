@@ -22,11 +22,11 @@ UPSERT party:⟨Bob::12209c5d1e8a⟩   MERGE { party_id: 'Bob::12209c5d1e8a' };
 UPSERT party:⟨Carol::1220d2a6b3c7⟩ MERGE { party_id: 'Carol::1220d2a6b3c7' };
 
 -- Transactions
-UPSERT transaction:1 MERGE { offset: 1, label: 'TX@1', update_id: '1220a01c5e6f7d8e9f00', command_id: 'issue-cash-1',     workflow_id: '', effective_at: '2026-11-02T09:00:00Z', record_time: '2026-11-02T09:00:00Z' };
-UPSERT transaction:2 MERGE { offset: 2, label: 'TX@2', update_id: '1220a02d6f708192a3b4', command_id: 'offer-ticket-1',   workflow_id: '', effective_at: '2026-11-02T09:05:00Z', record_time: '2026-11-02T09:05:00Z' };
-UPSERT transaction:3 MERGE { offset: 3, label: 'TX@3', update_id: '1220a03e7081a2b3c4d5', command_id: 'accept-offer-1',   workflow_id: '', effective_at: '2026-11-02T09:12:00Z', record_time: '2026-11-02T09:12:00Z' };
-UPSERT transaction:4 MERGE { offset: 4, label: 'TX@4', update_id: '1220a04f8192b3c4d5e6', command_id: 'give-ticket-1',    workflow_id: '', effective_at: '2026-11-02T10:30:00Z', record_time: '2026-11-02T10:30:00Z' };
-UPSERT transaction:5 MERGE { offset: 5, label: 'TX@5', update_id: '1220a0509203c4d5e6f7', command_id: 'show-ticket-1',    workflow_id: '', effective_at: '2026-11-02T19:45:00Z', record_time: '2026-11-02T19:45:00Z' };
+UPSERT transaction:1 MERGE { offset: 1, label: 'TX@1', update_id: '1220a01c5e6f7d8e9f00', command_id: 'issue-cash-1',     workflow_id: '', synchronizer_id: 'global-domain::1220ab', effective_at: '2026-11-02T09:00:00Z', record_time: '2026-11-02T09:00:00Z' };
+UPSERT transaction:2 MERGE { offset: 2, label: 'TX@2', update_id: '1220a02d6f708192a3b4', command_id: 'offer-ticket-1',   workflow_id: '', synchronizer_id: 'global-domain::1220ab', effective_at: '2026-11-02T09:05:00Z', record_time: '2026-11-02T09:05:00Z' };
+UPSERT transaction:3 MERGE { offset: 3, label: 'TX@3', update_id: '1220a03e7081a2b3c4d5', command_id: 'accept-offer-1',   workflow_id: '', synchronizer_id: 'global-domain::1220ab', effective_at: '2026-11-02T09:12:00Z', record_time: '2026-11-02T09:12:00Z' };
+UPSERT transaction:4 MERGE { offset: 4, label: 'TX@4', update_id: '1220a04f8192b3c4d5e6', command_id: 'give-ticket-1',    workflow_id: '', synchronizer_id: 'global-domain::1220ab', effective_at: '2026-11-02T10:30:00Z', record_time: '2026-11-02T10:30:00Z' };
+UPSERT transaction:5 MERGE { offset: 5, label: 'TX@5', update_id: '1220a0509203c4d5e6f7', command_id: 'show-ticket-1',    workflow_id: '', synchronizer_id: 'global-domain::1220ab', effective_at: '2026-11-02T19:45:00Z', record_time: '2026-11-02T19:45:00Z' };
 
 -- Created events (contracts)
 UPSERT created:⟨00c1a5b2⟩ MERGE { contract_id: '00c1a5b2', label: 'Cash@1',        template_name: 'Main.Cash',        offset: 1, node_id: 0, signatories: ['Bank::1220f3a9c1d2'],  created_at: '2026-11-02T09:00:00Z', create_arg: { issuer: 'Bank::1220f3a9c1d2', owner: 'Bob::12209c5d1e8a', amount: 100.0, currency: 'USD' } };
