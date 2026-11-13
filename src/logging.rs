@@ -38,6 +38,16 @@ impl LogControl {
 /// iced, …) log warnings and errors only. `RUST_LOG` overrides both, e.g.
 /// `RUST_LOG=debug cargo run`.
 pub fn init(config: &LoggingConfig) -> Result<(WorkerGuard, LogControl), Error> {
+    init_with(config, false)
+}
+
+/// Like `init`, but the terminal copy of the log goes to stderr, keeping
+/// stdout free for the MCP server's messages.
+pub fn init_to_stderr(config: &LoggingConfig) -> Result<(WorkerGuard, LogControl), Error> {
+    init_with(config, true)
+}
+
+fn init_with(config: &LoggingConfig, to_stderr: bool) -> Result<(WorkerGuard, LogControl), Error> {
     std::fs::create_dir_all(&config.directory)?;
     let file = tracing_appender::rolling::daily(&config.directory, "surrealdb-explorer.log");
     let (file_writer, guard) = tracing_appender::non_blocking(file);
@@ -49,7 +59,8 @@ pub fn init(config: &LoggingConfig) -> Result<(WorkerGuard, LogControl), Error> 
 
     tracing_subscriber::registry()
         .with(filter)
-        .with(fmt::layer().with_target(false))
+        .with((!to_stderr).then(|| fmt::layer().with_target(false)))
+        .with(to_stderr.then(|| fmt::layer().with_target(false).with_ansi(false).with_writer(std::io::stderr)))
         .with(fmt::layer().with_ansi(false).with_writer(file_writer))
         .try_init()
         .map_err(|e| format!("could not start logging: {e}"))?;

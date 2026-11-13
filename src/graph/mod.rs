@@ -4,6 +4,7 @@
 //! - All other records become nodes.
 
 mod model;
+pub mod neighbourhood;
 mod records;
 pub(crate) mod tables;
 

@@ -27,3 +27,19 @@ pub struct GraphData {
     /// Tables that had more than `MAX_PER_TABLE` records.
     pub truncated: Vec<String>,
 }
+
+impl GraphData {
+    /// The graph as JSON: `{ nodes: [{ id, table, data }], edges: [{ id,
+    /// from, to, label, data }], truncated: [table, …] }`.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "nodes": self.nodes.iter().map(|n| serde_json::json!({
+                "id": n.id, "table": n.table, "data": n.data,
+            })).collect::<Vec<_>>(),
+            "edges": self.edges.iter().map(|e| serde_json::json!({
+                "id": e.id, "from": e.from, "to": e.to, "label": e.label, "data": e.data,
+            })).collect::<Vec<_>>(),
+            "truncated": self.truncated,
+        })
+    }
+}

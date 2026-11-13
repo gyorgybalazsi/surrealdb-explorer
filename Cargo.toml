@@ -16,3 +16,5 @@ toml = "1.2.0"
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+rmcp = { version = "3.10", features = ["server", "transport-io", "macros"] }
+schemars = "1.2.3"
