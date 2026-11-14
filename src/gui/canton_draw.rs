@@ -130,6 +130,7 @@ pub fn near_edge(view: &GraphView, bounds: Rectangle, e: &Edge, point: Point) ->
 /// selected record and its neighbours); the rest are dimmed.
 pub fn draw(view: &GraphView, frame: &mut Frame, bounds: Rectangle, lit: Option<&HashSet<usize>>) {
     frame.fill_rectangle(Point::ORIGIN, bounds.size(), BACKGROUND);
+    super::canvas::draw_grid(frame, bounds, view.camera);
     let s = view.camera.scale;
     let g = view.graph;
 
@@ -216,23 +217,40 @@ pub fn draw(view: &GraphView, frame: &mut Frame, bounds: Rectangle, lit: Option<
         if archived {
             alpha *= 0.5;
         }
-        let card = Path::rounded_rectangle(p, size, (7.0 * s).into());
-        frame.fill(&card, faded(NODE_BG, alpha.max(0.9)));
+        let card = Path::rounded_rectangle(p, size, (8.0 * s).into());
+        // A soft shadow, stronger under the hovered card.
+        let lift = if hovered || selected { 2.0 } else { 1.0 };
+        for (grow, a) in [(0.0, 0.07), (2.0 * s, 0.035)] {
+            let shadow = Path::rounded_rectangle(
+                p + Vector::new(-grow, (1.5 * lift - grow * 0.5) * s.max(0.5)),
+                Size::new(size.width + 2.0 * grow, size.height + 2.0 * grow),
+                ((8.0 + grow) * s).into(),
+            );
+            frame.fill(&shadow, Color { a: a * lift * alpha, ..Color::BLACK });
+        }
+        // A light tint of the kind's colour, so kinds read at a glance.
+        let tint = Color {
+            r: 1.0 + (color.r - 1.0) * 0.07,
+            g: 1.0 + (color.g - 1.0) * 0.07,
+            b: 1.0 + (color.b - 1.0) * 0.07,
+            a: 1.0,
+        };
+        frame.fill(&card, faded(if archived { NODE_BG } else { tint }, alpha.max(0.9)));
         let mut outline = Stroke::default()
             .with_color(faded(if selected { SELECTED } else { color }, alpha))
-            .with_width(if selected { 3.0 } else if hovered { 2.5 } else { 1.5 });
+            .with_width(if selected { 2.5 } else if hovered { 2.0 } else { 1.0 });
         if n.card.status == Some(Status::InTransit) {
             outline.line_dash = LineDash { segments: &[5.0, 3.0], offset: 0 };
         }
         frame.stroke(&card, outline);
-        frame.fill(&Path::rounded_rectangle(p, Size::new(5.0 * s, size.height), (2.0 * s).into()), faded(color, alpha));
+        frame.fill(&Path::rounded_rectangle(p, Size::new(6.0 * s, size.height), (3.0 * s).into()), faded(color, alpha));
 
         if s < 0.3 {
             continue;
         }
         let title = canton::ellipsize(&n.card.title, 20);
         let title_size = 12.0 * s;
-        let title_at = p + Vector::new(12.0 * s, 16.0 * s);
+        let title_at = p + Vector::new(13.0 * s, 18.5 * s);
         frame.fill_text(Text {
             content: title.clone(),
             position: title_at,
@@ -244,8 +262,8 @@ pub fn draw(view: &GraphView, frame: &mut Frame, bounds: Rectangle, lit: Option<
         });
         if archived {
             // Struck through, as the explorer's `text-decoration: line-through`.
-            let width = title.chars().count() as f32 * title_size * 0.6;
-            let y = title_at.y - title_size * 0.35;
+            let width = title.chars().count() as f32 * title_size * 0.5;
+            let y = title_at.y - title_size * 0.55;
             frame.stroke(
                 &Path::line(Point::new(title_at.x, y), Point::new(title_at.x + width, y)),
                 Stroke::default().with_color(faded(TEXT, alpha)).with_width(1.0),
@@ -253,7 +271,7 @@ pub fn draw(view: &GraphView, frame: &mut Frame, bounds: Rectangle, lit: Option<
         }
         frame.fill_text(Text {
             content: canton::ellipsize(&n.card.subtitle, 24),
-            position: p + Vector::new(12.0 * s, 31.0 * s),
+            position: p + Vector::new(13.0 * s, 33.5 * s),
             color: faded(MUTED, alpha),
             size: (11.0 * s).into(),
             font: Font::MONOSPACE,
@@ -262,7 +280,7 @@ pub fn draw(view: &GraphView, frame: &mut Frame, bounds: Rectangle, lit: Option<
         });
     }
 
-    legend(frame, bounds);
+    legend(frame, bounds, g);
 }
 
 fn bold() -> Font {
@@ -270,11 +288,22 @@ fn bold() -> Font {
 }
 
 /// The key at the bottom left, as the explorer's legend.
-fn legend(frame: &mut Frame, bounds: Rectangle) {
-    let mut items: Vec<(Color, &str, Option<&'static [f32]>)> =
-        NodeKind::ALL.iter().map(|&k| (kind_color(k), k.name(), None)).collect();
-    items.push((edge_style("CONSUMES").0, "consumes", Some(&[])));
-    items.push((edge_style("TARGET").0, "target", Some(&[4.0, 3.0])));
+/// Only lists the kinds of records and relations the graph has.
+fn legend(frame: &mut Frame, bounds: Rectangle, g: &crate::gui::model::Graph) {
+    let mut items: Vec<(Color, &str, Option<&'static [f32]>)> = NodeKind::ALL
+        .iter()
+        .filter(|&&k| g.nodes.iter().any(|n| n.card.shown && n.kind == k))
+        .map(|&k| (kind_color(k), k.name(), None))
+        .collect();
+    if g.edges.iter().any(|e| e.kind == "CONSUMES") {
+        items.push((edge_style("CONSUMES").0, "consumes", Some(&[])));
+    }
+    if g.edges.iter().any(|e| e.kind == "TARGET") {
+        items.push((edge_style("TARGET").0, "target", Some(&[4.0, 3.0])));
+    }
+    if items.is_empty() {
+        return;
+    }
     let char_w = 11.0 * 0.6;
     let widths: Vec<f32> = items.iter().map(|(_, name, _)| 18.0 + name.len() as f32 * char_w + 10.0).collect();
     let total: f32 = widths.iter().sum::<f32>() + 10.0;

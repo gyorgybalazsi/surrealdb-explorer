@@ -8,6 +8,7 @@ use surrealdb_explorer::config::Visualization;
 use crate::gui::app::{App, CantonFilterChange as F, DataAction, Message, Selection, plural};
 use crate::gui::canton_draw;
 use surrealdb_explorer::canton;
+use surrealdb_explorer::graph;
 
 pub(super) const SIDEBAR_WIDTH: f32 = 320.0;
 pub(super) const MUTED: Color = Color::from_rgb(0.47, 0.47, 0.47);
@@ -27,16 +28,18 @@ impl App {
             ]
             .align_y(iced::Alignment::Center),
         );
-        col = col.push(
-            text(format!(
+        let summary = if self.overview {
+            let records: i64 = g.nodes.iter().filter_map(|n| n.data["records"].as_i64()).sum();
+            format!("Table overview: {} with {records} records", plural(g.nodes.len(), "table"))
+        } else {
+            format!(
                 "{} in {}, {}",
                 plural(g.nodes.len(), "record"),
                 plural(g.tables.len(), "table"),
                 plural(g.edges.len(), "relation")
-            ))
-            .size(12)
-            .color(MUTED),
-        );
+            )
+        };
+        col = col.push(text(summary).size(12).color(MUTED));
         if let Some(error) = &self.error {
             col = col.push(text(error).size(12).color(ERROR));
         }
@@ -113,9 +116,28 @@ impl App {
                 .spacing(8),
             );
         }
+        if self.overview {
+            let records: i64 = g.nodes.iter().filter_map(|n| n.data["records"].as_i64()).sum();
+            col = col.push(
+                text(format!(
+                    "{records} records: too many to draw at once (more than {}). Each dot is a table. Right-click one to show its records, then right-click a record to show its neighbours.",
+                    self.config.graph.overview_above
+                ))
+                .size(12)
+                .color(MUTED),
+            );
+            col = col.push(
+                button(text("Draw all records anyway").size(12))
+                    .style(button::secondary)
+                    .on_press(Message::LoadEverything),
+            );
+        }
         col = col.push(
             row![
                 button(text("Reload").size(13)).on_press(Message::Reload),
+                button(text("Tables").size(13))
+                    .style(button::secondary)
+                    .on_press_maybe((!self.overview && self.db.is_some()).then_some(Message::ShowOverview)),
                 checkbox(self.config.graph.auto_refresh)
                     .label("Auto refresh")
                     .on_toggle(Message::ToggleAutoRefresh)
@@ -146,6 +168,15 @@ impl App {
         scrollable(col).height(Fill).into()
     }
 
+    /// A table's records: drawn ones, or in the overview all of them.
+    fn table_count(&self, t: &crate::gui::model::Table) -> i64 {
+        if self.overview {
+            self.graph.nodes.iter().find(|n| n.table == t.name).and_then(|n| n.data["records"].as_i64()).unwrap_or(0)
+        } else {
+            t.count as i64
+        }
+    }
+
     fn tables_legend(&self) -> Element<'_, Message> {
         let g = &self.graph;
         let mut col = Column::new().spacing(6);
@@ -158,7 +189,7 @@ impl App {
                 row![
                     text("●").color(t.color),
                     text(&t.name).size(14),
-                    text(format!("({})", t.count)).size(12).color(MUTED)
+                    text(format!("({})", self.table_count(t))).size(12).color(MUTED)
                 ]
                 .spacing(6),
             );
@@ -360,14 +391,43 @@ impl App {
         col = col.push(heading("Offset"));
         let from = f.offset_from.map(|o| o.to_string()).unwrap_or_default();
         let to = f.offset_to.map(|o| o.to_string()).unwrap_or_default();
+        let range = Message::CantonPage(match (f.offset_from, f.offset_to) {
+            (None, None) => graph::CantonWindow::Latest(self.config.graph.canton_transactions),
+            (from, to) => graph::CantonWindow::Range(from.unwrap_or(i64::MIN), to.unwrap_or(i64::MAX)),
+        });
         col = col.push(
             row![
-                text_input("from", &from).on_input(|t| Message::CantonFilter(F::OffsetFrom(t))).size(13),
+                text_input("from", &from)
+                    .on_input(|t| Message::CantonFilter(F::OffsetFrom(t)))
+                    .on_submit(range.clone())
+                    .size(13),
                 text("–").size(13),
-                text_input("to", &to).on_input(|t| Message::CantonFilter(F::OffsetTo(t))).size(13),
+                text_input("to", &to)
+                    .on_input(|t| Message::CantonFilter(F::OffsetTo(t)))
+                    .on_submit(range)
+                    .size(13),
             ]
             .spacing(6)
             .align_y(iced::Alignment::Center),
+        );
+        // Paging through the history: the database is read a window at a time.
+        let n = self.config.graph.canton_transactions;
+        let loaded = match self.canton_offsets {
+            Some((lo, hi)) => format!("Loaded transactions at offsets {lo}–{hi}. Press Enter in a field to load that range."),
+            None => "No transactions loaded.".to_string(),
+        };
+        col = col.push(text(loaded).size(12).color(MUTED));
+        let (lo, hi) = self.canton_offsets.unwrap_or((0, 0));
+        let page = |label: &'static str, window: Option<graph::CantonWindow>| {
+            button(text(label).size(12)).style(button::secondary).on_press_maybe(window.map(Message::CantonPage))
+        };
+        col = col.push(
+            row![
+                page("◀ Older", self.canton_offsets.map(|_| graph::CantonWindow::Before(lo, n))),
+                page("Newer ▶", self.canton_offsets.map(|_| graph::CantonWindow::After(hi, n))),
+                page("Latest", Some(graph::CantonWindow::Latest(n))),
+            ]
+            .spacing(6),
         );
 
         col = col.push(heading("Search"));

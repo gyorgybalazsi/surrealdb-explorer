@@ -19,3 +19,11 @@ axum = "0.8.9"
 
 [dev-dependencies]
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+
+# The graph layout and drawing run every frame: build them (and the
+# dependencies that draw) with optimisation even in development builds.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

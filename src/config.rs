@@ -118,6 +118,11 @@ pub struct GraphConfig {
     pub auto_refresh: bool,
     /// How often auto refresh checks the database, in seconds.
     pub refresh_seconds: u64,
+    /// A database with more records than this opens on an overview of its
+    /// tables instead of drawing them all.
+    pub overview_above: usize,
+    /// How many transactions the Canton view loads at a time.
+    pub canton_transactions: usize,
     /// How the graph is drawn.
     pub visualization: Visualization,
 }
@@ -190,6 +195,8 @@ impl Default for GraphConfig {
             connect_results: false,
             auto_refresh: false,
             refresh_seconds: 2,
+            overview_above: 2000,
+            canton_transactions: 50,
             visualization: Visualization::Standard,
         }
     }
@@ -257,6 +264,12 @@ impl Config {
         }
         if self.graph.max_records_per_table == 0 || self.graph.max_result_records == 0 {
             return Err("the record limits must be at least 1".into());
+        }
+        if self.graph.canton_transactions == 0 {
+            return Err("canton_transactions must be at least 1".into());
+        }
+        if self.graph.overview_above == 0 {
+            return Err("overview_above must be at least 1".into());
         }
         if self.graph.refresh_seconds == 0 {
             return Err("refresh_seconds must be at least 1".into());

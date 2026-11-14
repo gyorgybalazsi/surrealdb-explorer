@@ -1,6 +1,7 @@
 //! Window state and message handling. The views are in `sidebar.rs`,
 //! `settings.rs` and `query_panel.rs`.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use iced::widget::{button, canvas, column, container, pin, row, rule, stack, text, text_editor};
@@ -86,6 +87,18 @@ pub enum Message {
     MenuCopy,
     ShowAll,
     Reload,
+    /// Shows the tables as a graph.
+    ShowOverview,
+    /// Loads another window of transactions in the Canton view.
+    CantonPage(graph::CantonWindow),
+    /// Draws the whole database even though it's bigger than `overview_above`.
+    LoadEverything,
+    /// From an overview table's menu: draws that table's records.
+    MenuShowRecords,
+    /// From a record's menu: adds its neighbours to the graph.
+    MenuNeighbours,
+    /// A record's neighbours, read from the database.
+    NeighboursLoaded(String, Result<ResultGraph, String>),
     /// Turns auto refresh on or off (and remembers it).
     ToggleAutoRefresh(bool),
     /// Time for auto refresh to look for changes in the database.
@@ -194,6 +207,13 @@ pub struct App {
     record_counts: Option<Vec<(String, i64)>>,
     /// Auto refresh is counting records.
     counting: bool,
+    /// The camera follows the standard layout while it settles.
+    following: bool,
+    /// The graph shows the database's tables, not its records.
+    pub(super) overview: bool,
+    /// Which transactions the Canton view loads, and the offsets it got.
+    pub(super) canton_window: graph::CantonWindow,
+    pub(super) canton_offsets: Option<(i64, i64)>,
 }
 
 impl App {
@@ -207,7 +227,10 @@ impl App {
             .expect("failed to start the async runtime");
 
         let limit = config.graph.max_records_per_table;
+        let config_canton_transactions = config.graph.canton_transactions;
         let (db, data, error) = match runtime.block_on(db::connect(&config.database)) {
+            // The Canton view loads its own window of transactions below.
+            Ok(db) if config.graph.visualization == Visualization::Canton => (Some(db), GraphData::default(), None),
             Ok(db) => match runtime.block_on(graph::load(&db, limit)) {
                 Ok(data) => (Some(db), data, None),
                 Err(e) => {
@@ -254,8 +277,19 @@ impl App {
             canton_filters: Filters::default(),
             record_counts: None,
             counting: false,
+            following: true,
+            overview: false,
+            canton_window: graph::CantonWindow::Latest(config_canton_transactions),
+            canton_offsets: None,
         };
         app.apply_visualization();
+        if app.canton() {
+            // The Canton view loads a window of transactions, not the first records of each table.
+            app.load_everything();
+            app.relayout_canton();
+        } else if app.too_big().is_some() {
+            app.show_overview();
+        }
         app
     }
 
@@ -286,20 +320,28 @@ impl App {
 
     fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Tick => self.layout.step(&mut self.graph, self.dragging),
+            Message::Tick => {
+                self.layout.step(&mut self.graph, self.dragging);
+                self.follow_layout();
+            }
             Message::Hover(hover) => self.hover = hover,
             Message::Select(selection) => {
                 self.selection = selection;
                 self.menu = None;
             }
             Message::DragNode(node, pos) => {
+                self.following = false;
                 self.dragging = Some(node);
                 self.graph.nodes[node].pos = pos;
                 self.layout.reheat(0.3);
             }
             Message::DragEnd => self.dragging = None,
-            Message::Pan(delta) => self.camera.offset = self.camera.offset + delta,
+            Message::Pan(delta) => {
+                self.following = false;
+                self.camera.offset = self.camera.offset + delta;
+            }
             Message::Zoom { factor, anchor, from_centre } => {
+                self.following = false;
                 let scale = (self.camera.scale * factor).clamp(0.1, 5.0);
                 self.camera.offset = from_centre - anchor * scale;
                 self.camera.scale = scale;
@@ -346,6 +388,46 @@ impl App {
                 self.relayout_canton();
             }
             Message::Reload => self.reload(),
+            Message::ShowOverview => self.show_overview(),
+            Message::LoadEverything => {
+                self.load_everything();
+                self.layout.reheat(0.5);
+                self.following = true;
+                self.presettle();
+            }
+            Message::MenuShowRecords => {
+                let Some((node, _)) = self.menu.take() else { return Task::none() };
+                let table = self.graph.nodes[node].table.clone();
+                let Some(db) = self.db.clone() else { return Task::none() };
+                let limit = self.config.graph.max_records_per_table;
+                self.notice = Some(format!("Loading {table}…"));
+                let handle = self.runtime.spawn(async move {
+                    graph::table_records(&db, &table, limit).await.map_err(|e| e.to_string())
+                });
+                return Task::perform(
+                    async move { handle.await.unwrap_or_else(|e| Err(format!("the task failed: {e}"))) },
+                    Message::ResultLoaded,
+                );
+            }
+            Message::MenuNeighbours => {
+                let Some((node, _)) = self.menu.take() else { return Task::none() };
+                let id = self.graph.nodes[node].id.clone();
+                let Some(db) = self.db.clone() else { return Task::none() };
+                let limit = self.config.graph.max_result_records;
+                let handle = self.runtime.spawn({
+                    let id = id.clone();
+                    async move { graph::neighbours(&db, &id, limit).await.map_err(|e| e.to_string()) }
+                });
+                return Task::perform(
+                    async move { handle.await.unwrap_or_else(|e| Err(format!("the task failed: {e}"))) },
+                    move |result| Message::NeighboursLoaded(id.clone(), result),
+                );
+            }
+            Message::NeighboursLoaded(id, Ok(result)) => self.add_neighbours(&id, result),
+            Message::NeighboursLoaded(_, Err(e)) => {
+                error!(error = %e, "could not load the neighbours");
+                self.error = Some(format!("Could not load the neighbours: {e}"));
+            }
             Message::ToggleAutoRefresh(on) => {
                 info!(on, "auto refresh changed");
                 self.config.graph.auto_refresh = on;
@@ -381,13 +463,20 @@ impl App {
                         warn!(error = %e, "could not save the setting");
                     }
                     self.apply_visualization();
+                    // The views load different records: a window of transactions, or every table.
+                    self.reload();
+                    self.relayout_canton();
                 }
+            }
+            Message::CantonPage(window) => {
+                self.canton_window = window;
+                self.load_everything();
+                self.relayout_canton();
             }
             Message::FitView => self.fit_view(),
             Message::CanvasResized(size) => {
-                let wrap_before = self.canton_wrap();
                 self.canvas_size = size;
-                if self.canton() && self.canton_wrap() != wrap_before {
+                if self.canton() {
                     self.relayout_canton();
                 }
             }
@@ -412,7 +501,7 @@ impl App {
                 }
                 // Filtering keeps the view where it is, as in the explorer.
                 if self.canton() {
-                    self.graph.canton_layout(&self.canton_filters, self.canton_wrap());
+                    self.canton_layout_fitted();
                     if self.selection.is_some_and(|s| matches!(s, Selection::Node(n) if !self.graph.nodes[n].card.shown)) {
                         self.selection = None;
                     }
@@ -554,15 +643,87 @@ impl App {
 
     /// Reads the database again; records already on screen keep their place.
     fn reload(&mut self) {
+        if !self.canton() && self.too_big().is_some() {
+            self.show_overview();
+            return;
+        }
+        self.load_everything();
+    }
+
+    /// How many records the database has, if more than `overview_above`.
+    fn too_big(&self) -> Option<usize> {
+        let db = self.db.as_ref()?;
+        match self.runtime.block_on(graph::record_count(db)) {
+            Ok(n) if n > self.config.graph.overview_above => Some(n),
+            Ok(_) => None,
+            Err(e) => {
+                warn!(error = %e, "could not count the records");
+                None
+            }
+        }
+    }
+
+    /// Draws the tables as a graph: dots sized by their records, arrows for
+    /// the relations between them.
+    fn show_overview(&mut self) {
         let Some(db) = &self.db else { return };
-        let limit = self.config.graph.max_records_per_table;
+        match self.runtime.block_on(graph::overview(db)) {
+            Ok(data) => {
+                info!(tables = data.nodes.len(), "showing the table overview");
+                self.graph = Graph::new(data, None);
+                self.overview = true;
+                self.result_view = None;
+                self.error = None;
+                self.notice = None;
+            }
+            Err(e) => {
+                error!(error = %e, "could not load the table overview");
+                self.error = Some(e.to_string());
+                return;
+            }
+        }
+        self.camera = Camera::default();
+        self.hover = None;
+        self.selection = None;
+        self.menu = None;
+        self.dragging = None;
+        self.layout.reheat(1.0);
+        self.following = true;
+    }
+
+    /// Reads the graph to draw: in the Canton view the current window of
+    /// transactions, otherwise every table's records up to the per-table limit.
+    fn fetch_graph(&mut self) -> Result<GraphData, String> {
+        let Some(db) = &self.db else { return Err("not connected".into()) };
+        let per_table = self.config.graph.max_records_per_table;
+        if self.canton() {
+            let loaded = self
+                .runtime
+                .block_on(graph::load_canton_window(db, self.canton_window, per_table, self.config.graph.max_result_records))
+                .map_err(|e| e.to_string())?;
+            self.canton_offsets = loaded.offsets;
+            if loaded.left_out > 0 {
+                warn!(left_out = loaded.left_out, "the Canton window had more records than max_result_records");
+            }
+            return Ok(loaded.data);
+        }
+        self.runtime.block_on(graph::load(db, per_table)).map_err(|e| e.to_string())
+    }
+
+    /// Draws every table's records, up to the per-table limit (in the Canton
+    /// view: the current window of transactions).
+    fn load_everything(&mut self) {
+        self.overview = false;
+        if self.db.is_none() {
+            return;
+        }
         self.record_counts = None;
-        match self.runtime.block_on(graph::load(db, limit)) {
+        match self.fetch_graph() {
             Ok(data) => {
                 self.graph = Graph::new(data, Some(&self.graph));
                 self.result_view = None;
                 if self.canton() {
-                    self.graph.canton_layout(&self.canton_filters, self.canton_wrap());
+                    self.canton_layout_fitted();
                 }
                 self.error = None;
                 self.notice = Some("Reloaded".into());
@@ -577,12 +738,27 @@ impl App {
         self.menu = None;
         self.dragging = None;
         self.layout.reheat(0.5);
+        self.following = true;
+        self.presettle();
+    }
+
+    /// A graph past a few hundred records is laid out (mostly) before it's
+    /// drawn and fitted at once: animating it would take many seconds.
+    fn presettle(&mut self) {
+        const BIG: usize = 200;
+        if self.canton() || self.graph.nodes.iter().filter(|n| !n.hidden).count() < BIG {
+            return;
+        }
+        let started = std::time::Instant::now();
+        self.layout.settle(&mut self.graph, std::time::Duration::from_millis(700));
+        debug!(elapsed_ms = started.elapsed().as_millis() as u64, "pre-settled a big graph");
+        self.camera = self.standard_fit();
     }
 
     /// Whether auto refresh is checking the database: it's on, and the whole
     /// database is shown (not a query result, which it would replace).
     pub(super) fn auto_refresh_running(&self) -> bool {
-        self.config.graph.auto_refresh && self.db.is_some() && self.result_view.is_none()
+        self.config.graph.auto_refresh && self.db.is_some() && self.result_view.is_none() && !self.overview
     }
 
     /// Counts the records in the background, for auto refresh.
@@ -606,9 +782,10 @@ impl App {
     /// Reload, it keeps the view as it is: the camera, the selected record
     /// and the records the user hid.
     fn refresh(&mut self) {
-        let Some(db) = &self.db else { return };
-        let limit = self.config.graph.max_records_per_table;
-        let data = match self.runtime.block_on(graph::load(db, limit)) {
+        if self.db.is_none() {
+            return;
+        }
+        let data = match self.fetch_graph() {
             Ok(data) => data,
             Err(e) => {
                 warn!(error = %e, "auto refresh could not load the graph");
@@ -635,7 +812,7 @@ impl App {
             .map(Selection::Node);
         self.hover = None;
         if self.canton() {
-            self.graph.canton_layout(&self.canton_filters, self.canton_wrap());
+            self.canton_layout_fitted();
         } else {
             self.layout.reheat(0.3);
         }
@@ -658,9 +835,10 @@ impl App {
         let canton = self.canton();
         self.layout.set_enabled(!canton);
         if canton {
-            self.graph.canton_layout(&self.canton_filters, self.canton_wrap());
+            self.canton_layout_fitted();
         } else {
             self.graph.clear_canton();
+            self.following = true;
         }
         self.fit_view();
     }
@@ -669,7 +847,7 @@ impl App {
     /// were shown or hidden in bulk, or the canvas changed width) and fits them in view.
     fn relayout_canton(&mut self) {
         if self.canton() {
-            self.graph.canton_layout(&self.canton_filters, self.canton_wrap());
+            self.canton_layout_fitted();
             self.fit_view();
         }
     }
@@ -677,6 +855,29 @@ impl App {
     /// The width the Canton view's columns wrap at, in layout units, as the explorer picks it.
     fn canton_wrap(&self) -> f32 {
         (self.canvas_size.width * 1.35).max(1000.0).round()
+    }
+
+    /// Lays out the Canton view with as many lines as suit the canvas's
+    /// shape: first on one line to measure it, then wrapped so the whole
+    /// history fills the canvas instead of a narrow strip.
+    fn canton_layout_fitted(&mut self) {
+        let filters = self.canton_filters.clone();
+        self.graph.canton_layout(&filters, f32::MAX);
+        let corner = Vector::new(canton::NODE_W, canton::NODE_H);
+        let (width, height) = self
+            .graph
+            .nodes
+            .iter()
+            .filter(|n| n.card.shown)
+            .fold((0.0_f32, 0.0_f32), |(w, h), n| (w.max(n.pos.x + corner.x), h.max(n.pos.y + corner.y)));
+        let aspect = (self.canvas_size.width - 40.0).max(100.0) / (self.canvas_size.height - 20.0).max(100.0);
+        if width <= 0.0 || height <= 0.0 {
+            return;
+        }
+        // Lines of width W/r stacked r high match the canvas when W / (r² · H) = aspect.
+        let lines = (width / (height * aspect)).sqrt().max(1.0);
+        let wrap = (width / lines + canton::NODE_W).max(self.canton_wrap().min(width + 1.0));
+        self.graph.canton_layout(&filters, wrap);
     }
 
     /// Zooms and pans so every shown record is in view. The Canton view puts
@@ -696,15 +897,43 @@ impl App {
                     Vector::new(m.x.max(far.x), m.y.max(far.y))
                 });
             let (lw, lh) = (extent.x, extent.y + 56.0);
-            let k = ((w - 40.0) / lw).min((h - 20.0) / lh).clamp(0.15, 1.0);
+            let k = ((w - 40.0) / lw).min((h - 20.0) / lh).clamp(0.15, 1.3);
             self.camera = Camera { offset: Vector::new(20.0 - w / 2.0, 10.0 - h / 2.0), scale: k };
             return;
         }
-        let Some((min, max)) = self.graph.bounds() else {
-            self.camera = Camera::default();
+        self.camera = self.standard_fit();
+    }
+
+    /// The camera that fits every visible record in the canvas, with room
+    /// for labels, never zoomed in past 1.6.
+    fn standard_fit(&self) -> Camera {
+        let Some((min, max)) = self.graph.bounds() else { return Camera::default() };
+        let size = max - min;
+        let (w, h) = (self.canvas_size.width, self.canvas_size.height);
+        const MARGIN: f32 = 90.0;
+        let scale = ((w - 2.0 * MARGIN) / size.x.max(1.0)).min((h - 2.0 * MARGIN) / size.y.max(1.0)).clamp(0.2, 1.6);
+        Camera { offset: (min + max) * (-0.5 * scale), scale }
+    }
+
+    /// While the standard layout spreads out after a load, eases the camera
+    /// toward fitting it, until the user takes over by panning, zooming or
+    /// dragging.
+    fn follow_layout(&mut self) {
+        if !self.following || self.canton() {
             return;
+        }
+        let goal = self.standard_fit();
+        if !self.layout.is_active() {
+            self.camera = goal;
+            self.following = false;
+            return;
+        }
+        // Ease in small graphs; big ones redraw too slowly for easing to look smooth.
+        let k = if self.graph.nodes.len() > 200 { 1.0 } else { 0.12 };
+        self.camera = Camera {
+            offset: self.camera.offset + (goal.offset - self.camera.offset) * k,
+            scale: self.camera.scale + (goal.scale - self.camera.scale) * k,
         };
-        self.camera = Camera { offset: (min + max) * -0.5, scale: 1.0 };
     }
 
     /// Runs a data action in the background, on our runtime (see `runtime`).
@@ -849,12 +1078,46 @@ impl App {
     }
 
     /// Draws a query result as the graph.
+    /// Adds a record's neighbours to the graph, placed around it.
+    fn add_neighbours(&mut self, id: &str, result: ResultGraph) {
+        let Some(centre) = self.graph.nodes.iter().find(|n| n.id == id).map(|n| n.pos) else { return };
+        let mut data = self.graph.to_data();
+        let have: HashSet<String> = data.nodes.iter().map(|n| n.id.clone()).collect();
+        let have_edges: HashSet<String> = data.edges.iter().map(|e| e.id.clone()).collect();
+        let new_nodes: Vec<_> = result.data.nodes.into_iter().filter(|n| !have.contains(&n.id)).collect();
+        let new_edges: Vec<_> = result.data.edges.into_iter().filter(|e| !have_edges.contains(&e.id)).collect();
+        let (added, links) = (new_nodes.len(), new_edges.len());
+        let new_ids: Vec<String> = new_nodes.iter().map(|n| n.id.clone()).collect();
+        data.nodes.extend(new_nodes);
+        data.edges.extend(new_edges);
+        self.graph = Graph::new(data, Some(&self.graph));
+        // New records start on a small circle around the one they came from.
+        for (k, nid) in new_ids.iter().enumerate() {
+            if let Some(n) = self.graph.nodes.iter_mut().find(|n| &n.id == nid) {
+                let angle = std::f32::consts::TAU * k as f32 / added.max(1) as f32;
+                n.pos = centre + Vector::new(angle.cos(), angle.sin()) * 60.0;
+            }
+        }
+        self.selection = self.graph.nodes.iter().position(|n| n.id == id).map(Selection::Node);
+        self.result_view = Some(ResultView);
+        self.notice = Some(match (added, links) {
+            (0, 0) => format!("{id} has no other relations"),
+            (a, l) => format!("Added {} and {} around {id}", plural(a, "record"), plural(l, "relation")),
+        });
+        if self.canton() {
+            self.relayout_canton();
+        } else {
+            self.layout.reheat(0.4);
+        }
+    }
+
     fn apply_result(&mut self, result: ResultGraph) {
         if result.data.nodes.is_empty() {
             self.notice = Some("None of the returned records could be drawn.".into());
             return;
         }
         let limit = self.config.graph.max_result_records;
+        self.overview = false;
         self.graph = Graph::new(result.data, None);
         self.notice = (result.left_out > 0).then(|| {
             format!("Drew the first {limit} of {} records. Raise the limit in Settings to see more.", result.found)
@@ -866,6 +1129,8 @@ impl App {
         self.menu = None;
         self.dragging = None;
         self.layout.reheat(1.0);
+        self.following = true;
+        self.presettle();
         self.relayout_canton();
     }
 
@@ -1005,15 +1270,25 @@ impl App {
                 .style(button::text)
                 .on_press(message)
         };
-        container(column![
-            container(row![text("●").color(n.color), text(&n.id).font(Font::MONOSPACE).size(13)].spacing(8))
-                .padding([6, 10]),
-            rule::horizontal(1),
-            item("Inspect", Message::MenuInspect),
-            item("Hide record", Message::MenuHide),
-            item("Focus record", Message::MenuFocus),
-            item("Copy record id", Message::MenuCopy),
-        ])
+        let header = container(
+            row![text("●").color(n.color), text(if self.overview { &n.table } else { &n.id }).font(Font::MONOSPACE).size(13)]
+                .spacing(8),
+        )
+        .padding([6, 10]);
+        let items = if self.overview {
+            column![header, rule::horizontal(1), item("Show records", Message::MenuShowRecords), item("Inspect", Message::MenuInspect)]
+        } else {
+            column![
+                header,
+                rule::horizontal(1),
+                item("Show neighbours", Message::MenuNeighbours),
+                item("Inspect", Message::MenuInspect),
+                item("Hide record", Message::MenuHide),
+                item("Focus record", Message::MenuFocus),
+                item("Copy record id", Message::MenuCopy),
+            ]
+        };
+        container(items)
         .width(210)
         .padding(4)
         .style(|theme| container::bordered_box(theme).background(Color::WHITE))
