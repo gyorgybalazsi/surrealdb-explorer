@@ -191,9 +191,10 @@ impl SettingsForm {
             }
             Connection::Server => {
                 col = col.push(field("Server", "For example ws://127.0.0.1:8000", &self.server, SettingsField::Server));
-                col = col.push(field("Username", "", &self.username, SettingsField::Username));
+                col = col.push(field("Username", "A user of the server; the next setting says where it is defined.", &self.username, SettingsField::Username));
                 col = col.push(
                     column![
+                        text("User level").size(13),
                         pick_list(UserLevel::ALL, Some(self.user_level), Message::UserLevelChanged).text_size(13),
                         text("Where the user is defined. A namespace or database user signs in to the namespace and database below.")
                             .size(11)
