@@ -1024,6 +1024,9 @@ impl App {
 
 
         let graph_changed = new.graph != old.graph;
+        if let graph::CantonWindow::Latest(_) = self.canton_window {
+            self.canton_window = graph::CantonWindow::Latest(new.graph.canton_transactions);
+        }
         self.config.graph = new.graph.clone();
         if database_changed || graph_changed {
             self.reload();

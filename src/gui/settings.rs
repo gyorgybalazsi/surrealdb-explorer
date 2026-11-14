@@ -21,6 +21,9 @@ pub enum SettingsField {
     Database,
     MaxRecords,
     MaxResultRecords,
+    RefreshSeconds,
+    OverviewAbove,
+    CantonTransactions,
     LogLevel,
     LogDirectory,
 }
@@ -43,12 +46,12 @@ pub struct SettingsForm {
     pub log_directory: String,
     /// Not edited in the form; kept so saving doesn't reset it.
     pub mcp: McpConfig,
-    /// Not edited here (the sidebar has the picker and the checkbox).
+    pub refresh_seconds: String,
+    pub overview_above: String,
+    pub canton_transactions: String,
+    /// Not edited here (the sidebar has the picker and the checkboxes).
     pub visualization: Visualization,
     pub auto_refresh: bool,
-    pub refresh_seconds: u64,
-    pub overview_above: usize,
-    pub canton_transactions: usize,
     pub fit_on_filter: bool,
     /// Result of the last save: a confirmation or an error.
     pub message: Option<Result<String, String>>,
@@ -72,9 +75,9 @@ impl SettingsForm {
             mcp: c.mcp.clone(),
             visualization: c.graph.visualization,
             auto_refresh: c.graph.auto_refresh,
-            refresh_seconds: c.graph.refresh_seconds,
-            overview_above: c.graph.overview_above,
-            canton_transactions: c.graph.canton_transactions,
+            refresh_seconds: c.graph.refresh_seconds.to_string(),
+            overview_above: c.graph.overview_above.to_string(),
+            canton_transactions: c.graph.canton_transactions.to_string(),
             fit_on_filter: c.graph.fit_on_filter,
             message: None,
         }
@@ -90,6 +93,9 @@ impl SettingsForm {
             SettingsField::Database => &mut self.database,
             SettingsField::MaxRecords => &mut self.max_records,
             SettingsField::MaxResultRecords => &mut self.max_result_records,
+            SettingsField::RefreshSeconds => &mut self.refresh_seconds,
+            SettingsField::OverviewAbove => &mut self.overview_above,
+            SettingsField::CantonTransactions => &mut self.canton_transactions,
             SettingsField::LogLevel => &mut self.log_level,
             SettingsField::LogDirectory => &mut self.log_directory,
         };
@@ -99,16 +105,14 @@ impl SettingsForm {
 
     /// The edited settings as a checked config.
     pub fn to_config(&self) -> Result<Config, String> {
-        let max_records_per_table = self
-            .max_records
-            .trim()
-            .parse()
-            .map_err(|_| "max records per table must be a whole number".to_string())?;
-        let max_result_records = self
-            .max_result_records
-            .trim()
-            .parse()
-            .map_err(|_| "max records in a query result must be a whole number".to_string())?;
+        fn whole<T: std::str::FromStr>(value: &str, name: &str) -> Result<T, String> {
+            value.trim().parse().map_err(|_| format!("{name} must be a whole number"))
+        }
+        let max_records_per_table = whole(&self.max_records, "max records per table")?;
+        let max_result_records = whole(&self.max_result_records, "max records in a query result")?;
+        let refresh_seconds = whole(&self.refresh_seconds, "the auto refresh interval")?;
+        let overview_above = whole(&self.overview_above, "the table overview threshold")?;
+        let canton_transactions = whole(&self.canton_transactions, "transactions loaded at a time")?;
         let config = Config {
             database: DatabaseConfig {
                 connection: self.connection,
@@ -124,9 +128,9 @@ impl SettingsForm {
                 max_result_records,
                 connect_results: self.connect_results,
                 auto_refresh: self.auto_refresh,
-                refresh_seconds: self.refresh_seconds,
-                overview_above: self.overview_above,
-                canton_transactions: self.canton_transactions,
+                refresh_seconds,
+                overview_above,
+                canton_transactions,
                 fit_on_filter: self.fit_on_filter,
                 visualization: self.visualization,
             },
@@ -200,7 +204,7 @@ impl SettingsForm {
         }
         col = col.push(field("Namespace", "", &self.namespace, SettingsField::Namespace));
         col = col.push(field("Database", "", &self.database, SettingsField::Database));
-        col = col.push(heading("Graph"));
+        col = col.push(heading("Graph: all views"));
         col = col.push(field(
             "Max records per table",
             "For the whole-database view. Applies on save (the graph reloads).",
@@ -212,6 +216,26 @@ impl SettingsForm {
             "A query's result replaces the graph; at most this many records are drawn.",
             &self.max_result_records,
             SettingsField::MaxResultRecords,
+        ));
+        col = col.push(field(
+            "Table overview above",
+            "A database with more records than this opens on an overview of its tables.",
+            &self.overview_above,
+            SettingsField::OverviewAbove,
+        ));
+        col = col.push(field(
+            "Auto refresh every (seconds)",
+            "How often auto refresh checks the database. Turn it on in the sidebar.",
+            &self.refresh_seconds,
+            SettingsField::RefreshSeconds,
+        ));
+
+        col = col.push(heading("Canton event graph view"));
+        col = col.push(field(
+            "Transactions loaded at a time",
+            "The window the Older / Newer / Latest buttons page through. The view's filters are in the sidebar.",
+            &self.canton_transactions,
+            SettingsField::CantonTransactions,
         ));
 
         col = col.push(heading("Logging"));

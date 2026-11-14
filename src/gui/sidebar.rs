@@ -75,6 +75,9 @@ impl App {
             );
         }
 
+        // The view picker, then the options every view shares, then a box with
+        // the options of the chosen view only, so switching views changes the
+        // box and nothing else.
         let visualization = self.config.graph.visualization;
         col = col.push(heading("View"));
         col = col.push(
@@ -99,14 +102,53 @@ impl App {
                 .spacing(6),
             );
         }
-        if visualization == Visualization::Canton {
-            col = col.push(self.canton_filters_view());
-        } else {
-            col = col.push(self.tables_legend());
+
+        col = col.push(self.general_options());
+
+        let view_options = match visualization {
+            Visualization::Canton => self.canton_filters_view(),
+            Visualization::Standard => self.tables_legend(),
+        };
+        let title = match visualization {
+            Visualization::Standard => "Standard view",
+            Visualization::Canton => "Canton event graph",
+        };
+        col = col.push(view_box(title, view_options));
+
+        col = col.push(heading("Selected"));
+        col = col.push(self.details());
+
+        scrollable(col).height(Fill).into()
+    }
+
+    /// Options that apply whichever view is chosen: reloading, the table
+    /// overview, auto refresh and hidden records.
+    fn general_options(&self) -> Element<'_, Message> {
+        let g = &self.graph;
+        let mut col = Column::new().spacing(6);
+        col = col.push(heading("All views"));
+        col = col.push(
+            row![
+                button(text("Reload").size(13)).on_press(Message::Reload),
+                button(text("Tables").size(13))
+                    .style(button::secondary)
+                    .on_press_maybe((!self.overview && self.db.is_some()).then_some(Message::ShowOverview)),
+                checkbox(self.config.graph.auto_refresh)
+                    .label("Auto refresh")
+                    .on_toggle(Message::ToggleAutoRefresh)
+                    .text_size(12),
+            ]
+            .spacing(10)
+            .align_y(iced::Alignment::Center),
+        );
+        if self.config.graph.auto_refresh && self.result_view.is_some() {
+            col = col.push(
+                text("Auto refresh is paused while a query result is shown. Reload to go back to the whole database.")
+                    .size(12)
+                    .color(MUTED),
+            );
         }
-
         let hidden = g.hidden_count();
-
         if hidden > 0 {
             col = col.push(
                 row![
@@ -132,27 +174,6 @@ impl App {
                     .on_press(Message::LoadEverything),
             );
         }
-        col = col.push(
-            row![
-                button(text("Reload").size(13)).on_press(Message::Reload),
-                button(text("Tables").size(13))
-                    .style(button::secondary)
-                    .on_press_maybe((!self.overview && self.db.is_some()).then_some(Message::ShowOverview)),
-                checkbox(self.config.graph.auto_refresh)
-                    .label("Auto refresh")
-                    .on_toggle(Message::ToggleAutoRefresh)
-                    .text_size(12),
-            ]
-            .spacing(10)
-            .align_y(iced::Alignment::Center),
-        );
-        if self.config.graph.auto_refresh && self.result_view.is_some() {
-            col = col.push(
-                text("Auto refresh is paused while a query result is shown. Reload to go back to the whole database.")
-                    .size(12)
-                    .color(MUTED),
-            );
-        }
         if let Some(notice) = &self.notice {
             col = col.push(text(notice).size(12).color(MUTED));
         }
@@ -161,11 +182,7 @@ impl App {
                 .size(12)
                 .color(MUTED),
         );
-
-        col = col.push(heading("Selected"));
-        col = col.push(self.details());
-
-        scrollable(col).height(Fill).into()
+        col.into()
     }
 
     /// A table's records: drawn ones, or in the overview all of them.
@@ -180,7 +197,7 @@ impl App {
     fn tables_legend(&self) -> Element<'_, Message> {
         let g = &self.graph;
         let mut col = Column::new().spacing(6);
-        col = col.push(heading("Tables"));
+        col = col.push(text("Tables").size(13).font(bold()));
         if g.tables.is_empty() {
             col = col.push(text("No tables with records.").size(12).color(MUTED));
         }
@@ -259,6 +276,20 @@ pub(super) fn heading(label: &str) -> Element<'_, Message> {
     container(text(label.to_uppercase()).size(12).color(Color::from_rgb(0.33, 0.33, 0.33)))
         .padding(iced::Padding { top: 10.0, ..iced::Padding::ZERO })
         .into()
+}
+
+/// The chosen view's own options, in a framed box under its name.
+fn view_box<'a>(title: &'a str, content: Element<'a, Message>) -> Element<'a, Message> {
+    column![
+        heading(title),
+        container(content).padding(10).width(Fill).style(|_| container::Style {
+            background: Some(Color::from_rgb(0.97, 0.97, 0.98).into()),
+            border: iced::Border { color: Color::from_rgb(0.85, 0.85, 0.88), width: 1.0, radius: 6.0.into() },
+            ..container::Style::default()
+        }),
+    ]
+    .spacing(6)
+    .into()
 }
 
 fn list(items: Vec<String>) -> Element<'static, Message> {
