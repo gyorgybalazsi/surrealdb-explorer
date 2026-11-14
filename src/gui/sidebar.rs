@@ -111,7 +111,7 @@ impl App {
         };
         let title = match visualization {
             Visualization::Standard => "Standard view",
-            Visualization::Canton => "Canton event graph",
+            Visualization::Canton => "Canton event graph view",
         };
         col = col.push(view_box(title, view_options));
 
@@ -419,21 +419,50 @@ impl App {
             .spacing(2),
         );
 
-        col = col.push(heading("Offset"));
+        // Which transactions are read from the database: the latest n, a
+        // page older or newer than the loaded ones, or an exact offset range.
+        col = col.push(heading("Transactions"));
+        let n = self.canton_n();
+        let latest = Message::CantonPage(graph::CantonWindow::Latest(n));
+        col = col.push(
+            row![
+                text("Latest").size(13),
+                text_input("50", &self.canton_count)
+                    .on_input(Message::CantonCount)
+                    .on_submit(latest.clone())
+                    .width(64)
+                    .size(13),
+                button(text("Show").size(12)).style(button::secondary).on_press(latest),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center),
+        );
+        let (lo, hi) = self.canton_offsets.unwrap_or((0, 0));
+        let page = |label: String, window: Option<graph::CantonWindow>| {
+            button(text(label).size(12)).style(button::secondary).on_press_maybe(window.map(Message::CantonPage))
+        };
+        col = col.push(
+            row![
+                page(format!("◀ {n} older"), self.canton_offsets.map(|_| graph::CantonWindow::Before(lo, n))),
+                page(format!("{n} newer ▶"), self.canton_offsets.map(|_| graph::CantonWindow::After(hi, n))),
+            ]
+            .spacing(6),
+        );
+
         let from = f.offset_from.map(|o| o.to_string()).unwrap_or_default();
         let to = f.offset_to.map(|o| o.to_string()).unwrap_or_default();
         let range = Message::CantonPage(match (f.offset_from, f.offset_to) {
-            (None, None) => graph::CantonWindow::Latest(self.config.graph.canton_transactions),
+            (None, None) => graph::CantonWindow::Latest(n),
             (from, to) => graph::CantonWindow::Range(from.unwrap_or(i64::MIN), to.unwrap_or(i64::MAX)),
         });
         col = col.push(
             row![
-                text_input("from", &from)
+                text_input("from offset", &from)
                     .on_input(|t| Message::CantonFilter(F::OffsetFrom(t)))
                     .on_submit(range.clone())
                     .size(13),
                 text("–").size(13),
-                text_input("to", &to)
+                text_input("to offset", &to)
                     .on_input(|t| Message::CantonFilter(F::OffsetTo(t)))
                     .on_submit(range)
                     .size(13),
@@ -441,25 +470,13 @@ impl App {
             .spacing(6)
             .align_y(iced::Alignment::Center),
         );
-        // Paging through the history: the database is read a window at a time.
-        let n = self.config.graph.canton_transactions;
         let loaded = match self.canton_offsets {
-            Some((lo, hi)) => format!("Loaded transactions at offsets {lo}–{hi}. Press Enter in a field to load that range."),
+            Some((lo, hi)) => format!(
+                "Loaded offsets {lo}–{hi}. Press Enter in an offset box to load exactly that range (an empty box means no limit on that side)."
+            ),
             None => "No transactions loaded.".to_string(),
         };
         col = col.push(text(loaded).size(12).color(MUTED));
-        let (lo, hi) = self.canton_offsets.unwrap_or((0, 0));
-        let page = |label: &'static str, window: Option<graph::CantonWindow>| {
-            button(text(label).size(12)).style(button::secondary).on_press_maybe(window.map(Message::CantonPage))
-        };
-        col = col.push(
-            row![
-                page("◀ Older", self.canton_offsets.map(|_| graph::CantonWindow::Before(lo, n))),
-                page("Newer ▶", self.canton_offsets.map(|_| graph::CantonWindow::After(hi, n))),
-                page("Latest", Some(graph::CantonWindow::Latest(n))),
-            ]
-            .spacing(6),
-        );
 
         col = col.push(heading("Search"));
         col = col.push(
