@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use iced::widget::{button, canvas, column, container, pin, row, rule, stack, text, text_editor};
 use iced::{Color, Element, Fill, Font, Point, Subscription, Task, Theme, Vector, window};
 use surrealdb_explorer::canton::{self, Filters, NodeKind, StatusFilter};
-use surrealdb_explorer::config::{Config, Connection, Visualization};
+use surrealdb_explorer::config::{Config, Connection, UserLevel, Visualization};
 use surrealdb_explorer::db::{self, Database};
 use surrealdb_explorer::graph::{self, GraphData, ResultGraph};
 use surrealdb_explorer::config::DatabaseConfig;
@@ -121,6 +121,7 @@ pub enum Message {
     CloseSettings,
     SettingChanged(SettingsField, String),
     ConnectionChanged(Connection),
+    UserLevelChanged(UserLevel),
     SaveSettings,
 
     // Query panel
@@ -538,6 +539,12 @@ impl App {
             Message::ConnectionChanged(connection) => {
                 if let Some(form) = &mut self.settings {
                     form.connection = connection;
+                    form.message = None;
+                }
+            }
+            Message::UserLevelChanged(level) => {
+                if let Some(form) = &mut self.settings {
+                    form.user_level = level;
                     form.message = None;
                 }
             }

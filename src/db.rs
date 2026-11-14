@@ -3,10 +3,10 @@
 
 use surrealdb::Surreal;
 use surrealdb::engine::any::{self, Any};
-use surrealdb::opt::auth::Root;
+use surrealdb::opt::auth::{Database as DatabaseUser, Namespace as NamespaceUser, Root};
 
 use crate::Error;
-use crate::config::{Connection, DatabaseConfig};
+use crate::config::{Connection, DatabaseConfig, UserLevel};
 use crate::secret;
 
 /// The database handle used throughout the program, for either connection.
@@ -42,9 +42,30 @@ async fn connect_to_server(config: &DatabaseConfig) -> Result<Database, Error> {
         config.password.clone()
     };
     let db = any::connect(config.server.trim()).await?;
-    db.signin(Root { username: config.username.trim().to_string(), password })
-        .await
-        .map_err(|e| format!("could not sign in to {} as {}: {e}", config.server, config.username))?;
+    let username = config.username.trim().to_string();
+    let signed_in = match config.user_level {
+        UserLevel::Root => db.signin(Root { username, password }).await,
+        UserLevel::Namespace => {
+            db.signin(NamespaceUser { namespace: config.namespace.clone(), username, password }).await
+        }
+        UserLevel::Database => {
+            db.signin(DatabaseUser {
+                namespace: config.namespace.clone(),
+                database: config.database.clone(),
+                username,
+                password,
+            })
+            .await
+        }
+    };
+    signed_in.map_err(|e| {
+        format!(
+            "could not sign in to {} as {} ({}): {e}",
+            config.server,
+            config.username,
+            config.user_level.to_string().to_lowercase()
+        )
+    })?;
     Ok(db)
 }
 

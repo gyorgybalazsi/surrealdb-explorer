@@ -3,7 +3,7 @@
 use iced::widget::{Column, button, column, pick_list, row, scrollable, text, text_input};
 use iced::{Element, Fill};
 use surrealdb_explorer::config::{
-    CONFIG_FILE, Config, Connection, DatabaseConfig, GraphConfig,
+    CONFIG_FILE, Config, Connection, DatabaseConfig, GraphConfig, UserLevel,
     LOG_LEVELS, LoggingConfig, McpConfig, Visualization,
 };
 
@@ -31,6 +31,7 @@ pub struct SettingsForm {
     pub database_path: String,
     pub server: String,
     pub username: String,
+    pub user_level: UserLevel,
     /// The password or a 1Password reference; shown hidden.
     pub password: String,
     pub namespace: String,
@@ -61,6 +62,7 @@ impl SettingsForm {
             database_path: c.database.path.clone(),
             server: c.database.server.clone(),
             username: c.database.username.clone(),
+            user_level: c.database.user_level,
             password: c.database.password.clone(),
             namespace: c.database.namespace.clone(),
             database: c.database.database.clone(),
@@ -115,6 +117,7 @@ impl SettingsForm {
                 path: self.database_path.trim().into(),
                 server: self.server.trim().into(),
                 username: self.username.trim().into(),
+                user_level: self.user_level,
                 password: self.password.clone(),
                 namespace: self.namespace.trim().into(),
                 database: self.database.trim().into(),
@@ -184,7 +187,16 @@ impl SettingsForm {
             }
             Connection::Server => {
                 col = col.push(field("Server", "For example ws://127.0.0.1:8000", &self.server, SettingsField::Server));
-                col = col.push(field("Username", "A root user of the server.", &self.username, SettingsField::Username));
+                col = col.push(field("Username", "", &self.username, SettingsField::Username));
+                col = col.push(
+                    column![
+                        pick_list(UserLevel::ALL, Some(self.user_level), Message::UserLevelChanged).text_size(13),
+                        text("Where the user is defined. A namespace or database user signs in to the namespace and database below.")
+                            .size(11)
+                            .color(MUTED),
+                    ]
+                    .spacing(3),
+                );
                 col = col.push(
                     column![
                         text("Password").size(13),
