@@ -3,12 +3,16 @@
 //! - Records in relation tables (or with `in` and `out` fields) become edges.
 //! - All other records become nodes.
 
+mod canton_window;
+mod explore;
 mod model;
 mod records;
 mod result;
 pub(crate) mod tables;
 
 pub use model::{GraphData, GraphEdge, GraphNode};
+pub use canton_window::{Loaded as CantonWindowLoaded, Window as CantonWindow, load_window as load_canton_window};
+pub use explore::{TABLE_NODE, neighbours, overview, record_count, table_records};
 pub use result::{ResultGraph, load_result};
 
 use surrealdb::types::Value;

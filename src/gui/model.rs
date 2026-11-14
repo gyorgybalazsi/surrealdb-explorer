@@ -7,16 +7,16 @@ use surrealdb_explorer::canton::{self, Filters, Model, ModelEdge, ModelNode, Nod
 use surrealdb_explorer::graph::GraphData;
 
 const PALETTE: [Color; 10] = [
-    rgb(0x4a, 0x90, 0xd9),
-    rgb(0xe6, 0x7e, 0x22),
-    rgb(0x27, 0xae, 0x60),
-    rgb(0x8e, 0x44, 0xad),
-    rgb(0xc0, 0x39, 0x2b),
-    rgb(0x16, 0xa0, 0x85),
-    rgb(0xd4, 0xa0, 0x17),
-    rgb(0x7f, 0x8c, 0x8d),
-    rgb(0xe8, 0x43, 0x93),
-    rgb(0x2c, 0x3e, 0x50),
+    rgb(0x3b, 0x82, 0xf6),
+    rgb(0xf9, 0x73, 0x16),
+    rgb(0x10, 0xb9, 0x81),
+    rgb(0xec, 0x48, 0x99),
+    rgb(0xa8, 0x55, 0xf7),
+    rgb(0xea, 0xb3, 0x08),
+    rgb(0x14, 0xb8, 0xa6),
+    rgb(0xef, 0x44, 0x44),
+    rgb(0x64, 0x74, 0x8b),
+    rgb(0x84, 0xcc, 0x16),
 ];
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color {
@@ -80,6 +80,29 @@ pub struct Graph {
 }
 
 impl Graph {
+    /// The graph's records and relations as plain graph data again, to add
+    /// more to them.
+    pub fn to_data(&self) -> GraphData {
+        let mut data = GraphData { truncated: self.truncated.clone(), ..GraphData::default() };
+        data.nodes = self
+            .nodes
+            .iter()
+            .map(|n| surrealdb_explorer::graph::GraphNode { id: n.id.clone(), table: n.table.clone(), data: n.data.clone() })
+            .collect();
+        data.edges = self
+            .edges
+            .iter()
+            .map(|e| surrealdb_explorer::graph::GraphEdge {
+                id: e.id.clone(),
+                from: self.nodes[e.from].id.clone(),
+                to: self.nodes[e.to].id.clone(),
+                label: e.label.clone(),
+                data: e.data.clone(),
+            })
+            .collect();
+        data
+    }
+
     /// Builds the GUI graph. Records that were already on screen (in `previous`)
     /// keep their position, so reloading doesn't scramble the layout.
     pub fn new(data: GraphData, previous: Option<&Graph>) -> Graph {

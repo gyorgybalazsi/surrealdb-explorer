@@ -9,14 +9,19 @@ use iced::Vector;
 
 use crate::gui::model::Graph;
 
-const REPULSION: f32 = 6000.0;
+const REPULSION: f32 = 9000.0;
 const SPRING: f32 = 0.04;
-const SPRING_LENGTH: f32 = 110.0;
+const SPRING_LENGTH: f32 = 130.0;
 const GRAVITY: f32 = 0.012;
 const DAMPING: f32 = 0.6;
 const MAX_STEP: f32 = 40.0;
 const ALPHA_DECAY: f32 = 0.985;
 const ALPHA_MIN: f32 = 0.005;
+/// From how many visible records repulsion is approximated.
+const BARNES_HUT_FROM: usize = 250;
+/// How coarse the approximation is: a group is treated as one point when
+/// its size is less than THETA times its distance.
+const THETA: f32 = 0.9;
 
 pub struct Layout {
     alpha: f32,
@@ -58,7 +63,34 @@ impl Layout {
         let n = graph.nodes.len();
         let mut force = vec![Vector::ZERO; n];
 
-        // Every pair of visible records repels.
+        // Every pair of visible records repels. Past a few hundred records,
+        // far-away groups are approximated by their centre (Barnes–Hut), so a
+        // step costs about n·log n instead of n².
+        if graph.nodes.iter().filter(|n| !n.hidden).count() > BARNES_HUT_FROM {
+            let points: Vec<(usize, Vector)> =
+                graph.nodes.iter().enumerate().filter(|(_, n)| !n.hidden).map(|(i, n)| (i, n.pos)).collect();
+            let tree = QuadTree::build(&points);
+            for &(i, p) in &points {
+                force[i] = force[i] + tree.repulsion(i, p);
+            }
+        } else {
+            self.exact_repulsion(graph, &mut force);
+        }
+
+        self.springs_and_move(graph, pinned, force);
+    }
+
+    /// Runs the simulation for up to `budget` without drawing, so a big
+    /// graph appears (nearly) settled instead of slowly untangling on screen.
+    pub fn settle(&mut self, graph: &mut Graph, budget: std::time::Duration) {
+        let started = std::time::Instant::now();
+        while self.is_active() && started.elapsed() < budget {
+            self.step(graph, None);
+        }
+    }
+
+    fn exact_repulsion(&self, graph: &Graph, force: &mut [Vector]) {
+        let n = graph.nodes.len();
         for i in 0..n {
             if graph.nodes[i].hidden {
                 continue;
@@ -79,7 +111,9 @@ impl Layout {
                 force[j] = force[j] - push;
             }
         }
+    }
 
+    fn springs_and_move(&mut self, graph: &mut Graph, pinned: Option<usize>, mut force: Vec<Vector>) {
         // Relations act as springs.
         for e in &graph.edges {
             if !graph.edge_visible(e) || e.from == e.to {
@@ -107,5 +141,111 @@ impl Layout {
         }
 
         self.alpha *= ALPHA_DECAY;
+    }
+}
+
+/// A quadtree of record positions for Barnes–Hut: each cell knows how many
+/// records it holds and their centre of mass.
+struct QuadTree {
+    cells: Vec<Cell>,
+}
+
+struct Cell {
+    center: Vector,
+    half: f32,
+    mass: f32,
+    com: Vector,
+    /// The one record in a leaf, with its position.
+    body: Option<(usize, Vector)>,
+    children: Option<[usize; 4]>,
+}
+
+impl Cell {
+    fn new(center: Vector, half: f32) -> Cell {
+        Cell { center, half, mass: 0.0, com: Vector::ZERO, body: None, children: None }
+    }
+}
+
+impl QuadTree {
+    fn build(points: &[(usize, Vector)]) -> QuadTree {
+        let (mut lo, mut hi) = (Vector::new(f32::MAX, f32::MAX), Vector::new(f32::MIN, f32::MIN));
+        for &(_, p) in points {
+            lo = Vector::new(lo.x.min(p.x), lo.y.min(p.y));
+            hi = Vector::new(hi.x.max(p.x), hi.y.max(p.y));
+        }
+        let center = (lo + hi) * 0.5;
+        let half = ((hi.x - lo.x).max(hi.y - lo.y) / 2.0).max(1.0) + 1.0;
+        let mut tree = QuadTree { cells: vec![Cell::new(center, half)] };
+        for &(i, p) in points {
+            tree.insert(0, i, p, 0);
+        }
+        tree
+    }
+
+    fn insert(&mut self, c: usize, i: usize, p: Vector, depth: u32) {
+        let cell = &mut self.cells[c];
+        let m = cell.mass;
+        cell.com = (cell.com * m + p) * (1.0 / (m + 1.0));
+        cell.mass = m + 1.0;
+        if m == 0.0 && cell.children.is_none() {
+            cell.body = Some((i, p));
+            return;
+        }
+        if depth > 24 {
+            // Records (almost) on the same spot: keep them as one heavier point.
+            cell.body = None;
+            return;
+        }
+        if cell.children.is_none() {
+            let (center, half, old) = (cell.center, cell.half, cell.body.take());
+            let base = self.cells.len();
+            for k in 0..4 {
+                let dx = if k & 1 == 1 { half / 2.0 } else { -half / 2.0 };
+                let dy = if k & 2 == 2 { half / 2.0 } else { -half / 2.0 };
+                self.cells.push(Cell::new(center + Vector::new(dx, dy), half / 2.0));
+            }
+            self.cells[c].children = Some([base, base + 1, base + 2, base + 3]);
+            if let Some((o, op)) = old {
+                let child = self.child_for(c, op);
+                self.insert(child, o, op, depth + 1);
+            }
+        }
+        let child = self.child_for(c, p);
+        self.insert(child, i, p, depth + 1);
+    }
+
+    fn child_for(&self, c: usize, p: Vector) -> usize {
+        let cell = &self.cells[c];
+        let k = usize::from(p.x >= cell.center.x) | (usize::from(p.y >= cell.center.y) << 1);
+        cell.children.expect("subdivided")[k]
+    }
+
+    /// The push on record `i` at `p` from all the others.
+    fn repulsion(&self, i: usize, p: Vector) -> Vector {
+        let mut f = Vector::ZERO;
+        let mut stack = vec![0];
+        while let Some(c) = stack.pop() {
+            let cell = &self.cells[c];
+            if cell.mass == 0.0 {
+                continue;
+            }
+            if cell.children.is_none() && cell.body.is_some_and(|(b, _)| b == i) {
+                continue;
+            }
+            let d = p - cell.com;
+            let dist2 = d.x * d.x + d.y * d.y;
+            let size = cell.half * 2.0;
+            match cell.children {
+                Some(children) if size * size >= THETA * THETA * dist2 => stack.extend(children),
+                _ => {
+                    if dist2 < 0.01 {
+                        continue;
+                    }
+                    let dist2 = dist2.max(1.0);
+                    f = f + d * (cell.mass * REPULSION / (dist2 * dist2.sqrt()));
+                }
+            }
+        }
+        f
     }
 }
