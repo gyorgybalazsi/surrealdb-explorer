@@ -49,6 +49,7 @@ pub struct SettingsForm {
     pub refresh_seconds: u64,
     pub overview_above: usize,
     pub canton_transactions: usize,
+    pub fit_on_filter: bool,
     /// Result of the last save: a confirmation or an error.
     pub message: Option<Result<String, String>>,
 }
@@ -74,6 +75,7 @@ impl SettingsForm {
             refresh_seconds: c.graph.refresh_seconds,
             overview_above: c.graph.overview_above,
             canton_transactions: c.graph.canton_transactions,
+            fit_on_filter: c.graph.fit_on_filter,
             message: None,
         }
     }
@@ -125,6 +127,7 @@ impl SettingsForm {
                 refresh_seconds: self.refresh_seconds,
                 overview_above: self.overview_above,
                 canton_transactions: self.canton_transactions,
+                fit_on_filter: self.fit_on_filter,
                 visualization: self.visualization,
             },
             logging: LoggingConfig {

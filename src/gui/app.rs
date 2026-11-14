@@ -91,6 +91,8 @@ pub enum Message {
     ShowOverview,
     /// Loads another window of transactions in the Canton view.
     CantonPage(graph::CantonWindow),
+    /// Turns zooming to fit after each filter change on or off (and remembers it).
+    ToggleFitOnFilter(bool),
     /// Draws the whole database even though it's bigger than `overview_above`.
     LoadEverything,
     /// From an overview table's menu: draws that table's records.
@@ -342,7 +344,7 @@ impl App {
             }
             Message::Zoom { factor, anchor, from_centre } => {
                 self.following = false;
-                let scale = (self.camera.scale * factor).clamp(0.1, 5.0);
+                let scale = (self.camera.scale * factor).clamp(0.03, 5.0);
                 self.camera.offset = from_centre - anchor * scale;
                 self.camera.scale = scale;
             }
@@ -468,6 +470,15 @@ impl App {
                     self.relayout_canton();
                 }
             }
+            Message::ToggleFitOnFilter(on) => {
+                self.config.graph.fit_on_filter = on;
+                if let Err(e) = self.config.save() {
+                    warn!(error = %e, "could not save the setting");
+                }
+                if on && self.canton() {
+                    self.fit_view();
+                }
+            }
             Message::CantonPage(window) => {
                 self.canton_window = window;
                 self.load_everything();
@@ -499,9 +510,14 @@ impl App {
                     CantonFilterChange::OffsetTo(text) => f.offset_to = parse_offset(&text, f.offset_to),
                     CantonFilterChange::Reset => *f = Filters::default(),
                 }
-                // Filtering keeps the view where it is, as in the explorer.
+                // Filtering re-wraps the records that are left; it then zooms
+                // so they fill the view, unless that's turned off (then the
+                // view stays where it is, as in the explorer).
                 if self.canton() {
                     self.canton_layout_fitted();
+                    if self.config.graph.fit_on_filter {
+                        self.fit_view();
+                    }
                     if self.selection.is_some_and(|s| matches!(s, Selection::Node(n) if !self.graph.nodes[n].card.shown)) {
                         self.selection = None;
                     }
@@ -897,8 +913,12 @@ impl App {
                     Vector::new(m.x.max(far.x), m.y.max(far.y))
                 });
             let (lw, lh) = (extent.x, extent.y + 56.0);
-            let k = ((w - 40.0) / lw).min((h - 20.0) / lh).clamp(0.15, 1.3);
-            self.camera = Camera { offset: Vector::new(20.0 - w / 2.0, 10.0 - h / 2.0), scale: k };
+            let k = ((w - 40.0) / lw).min((h - 20.0) / lh).clamp(0.04, 1.3);
+            // A graph narrower or shorter than the canvas sits in its middle;
+            // a bigger one starts at the top left, where the history begins.
+            let left = ((w - lw * k) / 2.0).max(20.0);
+            let top = ((h - lh * k) / 2.0).max(10.0);
+            self.camera = Camera { offset: Vector::new(left - w / 2.0, top - h / 2.0), scale: k };
             return;
         }
         self.camera = self.standard_fit();

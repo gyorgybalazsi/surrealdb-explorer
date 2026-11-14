@@ -123,6 +123,9 @@ pub struct GraphConfig {
     pub overview_above: usize,
     /// How many transactions the Canton view loads at a time.
     pub canton_transactions: usize,
+    /// In the Canton view, zoom so the filtered records fill the view
+    /// whenever a filter changes.
+    pub fit_on_filter: bool,
     /// How the graph is drawn.
     pub visualization: Visualization,
 }
@@ -197,6 +200,7 @@ impl Default for GraphConfig {
             refresh_seconds: 2,
             overview_above: 2000,
             canton_transactions: 50,
+            fit_on_filter: true,
             visualization: Visualization::Standard,
         }
     }

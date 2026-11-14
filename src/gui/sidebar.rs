@@ -437,6 +437,12 @@ impl App {
                 .size(13),
         );
         col = col.push(
+            checkbox(self.config.graph.fit_on_filter)
+                .label("Zoom to fit when filtering")
+                .on_toggle(Message::ToggleFitOnFilter)
+                .text_size(12),
+        );
+        col = col.push(
             button(text("Reset filters").size(13).width(Fill).align_x(iced::Alignment::Center))
                 .width(Fill)
                 .style(button::secondary)
