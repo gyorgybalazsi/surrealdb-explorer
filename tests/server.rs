@@ -6,7 +6,7 @@ mod common;
 
 use std::process::{Child, Command, Stdio};
 
-use surrealdb_explorer::config::{Connection, DatabaseConfig};
+use surrealdb_explorer::config::{Connection, DatabaseConfig, UserLevel};
 use surrealdb_explorer::{data, db, graph, query};
 
 struct Server(Child);
@@ -76,5 +76,78 @@ fn two_clients_share_a_server() {
 
         db::close(writer).await.unwrap();
         db::close(reader).await.unwrap();
+    });
+}
+
+/// Users defined on a namespace or a database, like the Canton syncer's
+/// (`DEFINE USER … ON DATABASE`), sign in to their own namespace or database.
+#[test]
+fn namespace_and_database_users_sign_in() {
+    let port = 18_766;
+    let Some(_server) = start_server(port) else {
+        eprintln!("skipped: the surreal program isn't installed");
+        return;
+    };
+    let root = DatabaseConfig {
+        connection: Connection::Server,
+        server: format!("ws://127.0.0.1:{port}"),
+        username: "root".into(),
+        password: "secret".into(),
+        namespace: "canton".into(),
+        database: "event_graph".into(),
+        ..DatabaseConfig::default()
+    };
+    let viewer = DatabaseConfig {
+        username: "viewer".into(),
+        password: "viewer-pass".into(),
+        user_level: UserLevel::Database,
+        ..root.clone()
+    };
+    let ns_admin = DatabaseConfig {
+        username: "ns_admin".into(),
+        password: "ns-pass".into(),
+        user_level: UserLevel::Namespace,
+        ..root.clone()
+    };
+
+    common::run(async move {
+        let admin = db::connect(&root).await.unwrap();
+        admin
+            .query(
+                "DEFINE NAMESPACE IF NOT EXISTS canton; USE NS canton; \
+                 DEFINE USER ns_admin ON NAMESPACE PASSWORD 'ns-pass' ROLES OWNER; \
+                 DEFINE DATABASE IF NOT EXISTS event_graph; USE DB event_graph; \
+                 DEFINE USER viewer ON DATABASE PASSWORD 'viewer-pass' ROLES VIEWER;",
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        data::load_sample_data(&admin).await.unwrap();
+
+        // A database user reads its own database, but can't write with VIEWER.
+        let reader = db::connect(&viewer).await.unwrap();
+        let graph = graph::load(&reader, 1000).await.unwrap();
+        assert_eq!(graph.nodes.len(), 6);
+        // SurrealDB refuses it either with an error or by creating nothing.
+        query::run(&reader, "CREATE person:eve SET name = 'Eve';".into()).await;
+        let mut res = admin.query("SELECT VALUE id FROM person:eve").await.unwrap();
+        let created: Vec<surrealdb::types::Value> = res.take(0).unwrap();
+        assert!(created.is_empty(), "a VIEWER can't create records");
+
+        // Signed in as a root user, the same name and password are refused.
+        let as_root = DatabaseConfig { user_level: UserLevel::Root, ..viewer.clone() };
+        assert!(db::connect(&as_root).await.is_err());
+        // A database user can't sign in to another database.
+        let elsewhere = DatabaseConfig { database: "other".into(), ..viewer.clone() };
+        assert!(db::connect(&elsewhere).await.is_err());
+
+        // A namespace user reaches every database in its namespace.
+        let ns = db::connect(&ns_admin).await.unwrap();
+        assert_eq!(graph::load(&ns, 1000).await.unwrap().nodes.len(), 6);
+
+        for c in [admin, reader, ns] {
+            db::close(c).await.unwrap();
+        }
     });
 }

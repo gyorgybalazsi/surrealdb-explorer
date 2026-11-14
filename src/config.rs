@@ -50,8 +50,11 @@ pub struct DatabaseConfig {
     pub path: String,
     /// Address of the SurrealDB server, e.g. `ws://127.0.0.1:8000` (server connection).
     pub server: String,
-    /// Root user to sign in to the server with.
+    /// User to sign in to the server with.
     pub username: String,
+    /// Where that user is defined: on the server (root), on the namespace,
+    /// or on the database.
+    pub user_level: UserLevel,
     /// The password, or a 1Password reference to it (`op://…`).
     pub password: String,
     pub namespace: String,
@@ -66,6 +69,31 @@ pub enum Connection {
     /// The app is one client of a SurrealDB server, which other programs
     /// (Studio, an import job, …) can use at the same time.
     Server,
+}
+
+/// Where a server user is defined (`DEFINE USER … ON ROOT | NAMESPACE | DATABASE`).
+/// A namespace or database user can only use its own namespace or database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UserLevel {
+    #[default]
+    Root,
+    Namespace,
+    Database,
+}
+
+impl UserLevel {
+    pub const ALL: [UserLevel; 3] = [UserLevel::Root, UserLevel::Namespace, UserLevel::Database];
+}
+
+impl std::fmt::Display for UserLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            UserLevel::Root => "Root user",
+            UserLevel::Namespace => "Namespace user",
+            UserLevel::Database => "Database user",
+        })
+    }
 }
 
 impl Connection {
@@ -89,7 +117,17 @@ impl DatabaseConfig {
             && match self.connection {
                 Connection::Folder => self.path == other.path,
                 Connection::Server => {
-                    self.server == other.server && self.username == other.username && self.password == other.password
+                    self.server == other.server
+                        && self.username == other.username
+                        && self.password == other.password
+                        && self.user_level == other.user_level
+                        // A namespace or database user signs in to its own
+                        // namespace or database, so another one needs a new sign-in.
+                        && match self.user_level {
+                            UserLevel::Root => true,
+                            UserLevel::Namespace => self.namespace == other.namespace,
+                            UserLevel::Database => self.namespace == other.namespace && self.database == other.database,
+                        }
                 }
             }
     }
@@ -183,6 +221,7 @@ impl Default for DatabaseConfig {
             path: "data".into(),
             server: "ws://127.0.0.1:8000".into(),
             username: "root".into(),
+            user_level: UserLevel::Root,
             password: String::new(),
             namespace: "main".into(),
             database: "main".into(),

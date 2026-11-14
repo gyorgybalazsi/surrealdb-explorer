@@ -4,7 +4,7 @@
 mod common;
 
 use common::temp_dir;
-use surrealdb_explorer::config::{Config, DatabaseConfig};
+use surrealdb_explorer::config::{Config, Connection, DatabaseConfig, UserLevel};
 use surrealdb_explorer::{db, graph, query};
 
 #[test]
@@ -43,6 +43,12 @@ fn missing_fields_take_defaults_and_bad_values_are_refused() {
     assert_eq!(config.mcp.port, 9000);
     assert!(config.mcp.enabled);
     assert!(!config.graph.connect_results);
+
+    // Server user levels are read by name; files without one sign in as root.
+    std::fs::write(&path, "[database]\nconnection = \"server\"\nuser_level = \"database\"\n").unwrap();
+    let (config, _) = Config::load_or_create_at(&path).unwrap();
+    assert_eq!(config.database.user_level, UserLevel::Database);
+    assert_eq!(DatabaseConfig::default().user_level, UserLevel::Root);
 
     std::fs::write(&path, "[logging]\nlevel = \"loud\"\n").unwrap();
     assert!(Config::load_or_create_at(&path).is_err());
@@ -92,4 +98,23 @@ fn queries_report_each_statement_and_the_graph_sees_the_changes() {
         assert_eq!(limited.nodes.len(), 1);
         assert_eq!(limited.truncated, vec!["person".to_string()]);
     });
+}
+
+#[test]
+fn a_namespace_or_database_user_reconnects_for_another_namespace_or_database() {
+    let root = DatabaseConfig { connection: Connection::Server, ..DatabaseConfig::default() };
+    let other_db = DatabaseConfig { database: "other".into(), ..root.clone() };
+    let other_ns = DatabaseConfig { namespace: "other".into(), ..root.clone() };
+    // A root user switches namespace and database on the same connection.
+    assert!(root.same_place(&other_db));
+    assert!(root.same_place(&other_ns));
+
+    let ns_user = DatabaseConfig { user_level: UserLevel::Namespace, ..root.clone() };
+    assert!(ns_user.same_place(&DatabaseConfig { database: "other".into(), ..ns_user.clone() }));
+    assert!(!ns_user.same_place(&DatabaseConfig { namespace: "other".into(), ..ns_user.clone() }));
+
+    let db_user = DatabaseConfig { user_level: UserLevel::Database, ..root.clone() };
+    assert!(!db_user.same_place(&DatabaseConfig { database: "other".into(), ..db_user.clone() }));
+    // Changing the user level needs a new sign-in too.
+    assert!(!root.same_place(&db_user));
 }
