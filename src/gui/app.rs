@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use iced::widget::{button, canvas, column, container, pin, row, rule, stack, text, text_editor};
 use iced::{Color, Element, Fill, Font, Point, Subscription, Task, Theme, Vector, window};
+use surrealdb_explorer::canton::{self, Filters, NodeKind, StatusFilter};
 use surrealdb_explorer::config::{Config, Connection, Visualization};
 use surrealdb_explorer::db::{self, Database};
 use surrealdb_explorer::graph::{self, GraphData, ResultGraph};
@@ -49,6 +50,22 @@ pub enum DataAction {
     EraseDatabase,
 }
 
+/// One change to the Canton view's filters.
+#[derive(Debug, Clone)]
+pub enum CantonFilterChange {
+    Kind(NodeKind, bool),
+    /// Show exactly these kinds.
+    Kinds(Vec<NodeKind>),
+    Party(Option<String>),
+    Template(Option<String>),
+    Status(StatusFilter),
+    Search(String),
+    /// The text typed in the "from" or "to" offset box.
+    OffsetFrom(String),
+    OffsetTo(String),
+    Reset,
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     /// An animation frame while the layout is moving.
@@ -73,6 +90,10 @@ pub enum Message {
     SetVisualization(Visualization),
     /// Fits the whole graph in view.
     FitView,
+    /// The canvas has a new size (the Canton layout wraps to its width).
+    CanvasResized(iced::Size),
+    /// A change to the Canton view's filters.
+    CantonFilter(CantonFilterChange),
 
     // Settings
     OpenSettings,
@@ -157,6 +178,11 @@ pub struct App {
     pub(super) pending_data_action: Option<DataAction>,
     /// A data action is running.
     pub(super) data_busy: bool,
+
+    /// The size of the graph canvas, as last drawn.
+    pub(super) canvas_size: iced::Size,
+    /// What the Canton view shows.
+    pub(super) canton_filters: Filters,
 }
 
 impl App {
@@ -213,6 +239,8 @@ impl App {
             tab: Tab::Graph,
             pending_data_action: None,
             data_busy: false,
+            canvas_size: iced::Size::new(880.0, 760.0),
+            canton_filters: Filters::default(),
         };
         app.apply_visualization();
         app
@@ -310,6 +338,41 @@ impl App {
                 }
             }
             Message::FitView => self.fit_view(),
+            Message::CanvasResized(size) => {
+                let wrap_before = self.canton_wrap();
+                self.canvas_size = size;
+                if self.canton() && self.canton_wrap() != wrap_before {
+                    self.relayout_canton();
+                }
+            }
+            Message::CantonFilter(change) => {
+                let f = &mut self.canton_filters;
+                match change {
+                    CantonFilterChange::Kind(kind, on) => {
+                        if on {
+                            f.kinds.insert(kind);
+                        } else {
+                            f.kinds.remove(&kind);
+                        }
+                    }
+                    CantonFilterChange::Kinds(kinds) => f.kinds = kinds.into_iter().chain([NodeKind::Other]).collect(),
+                    CantonFilterChange::Party(p) => f.party = p,
+                    CantonFilterChange::Template(t) => f.template = t,
+                    CantonFilterChange::Status(st) => f.status = st,
+                    CantonFilterChange::Search(text) => f.search = text,
+                    CantonFilterChange::OffsetFrom(text) => f.offset_from = parse_offset(&text, f.offset_from),
+                    CantonFilterChange::OffsetTo(text) => f.offset_to = parse_offset(&text, f.offset_to),
+                    CantonFilterChange::Reset => *f = Filters::default(),
+                }
+                // Filtering keeps the view where it is, as in the explorer.
+                if self.canton() {
+                    self.graph.canton_layout(&self.canton_filters, self.canton_wrap());
+                    if self.selection.is_some_and(|s| matches!(s, Selection::Node(n) if !self.graph.nodes[n].card.shown)) {
+                        self.selection = None;
+                    }
+                    self.hover = None;
+                }
+            }
 
             Message::OpenSettings => {
                 self.settings = Some(SettingsForm::from_config(&self.config));
@@ -452,7 +515,7 @@ impl App {
                 self.graph = Graph::new(data, Some(&self.graph));
                 self.result_view = None;
                 if self.canton() {
-                    self.graph.canton_layout();
+                    self.graph.canton_layout(&self.canton_filters, self.canton_wrap());
                 }
                 self.error = None;
                 self.notice = Some("Reloaded".into());
@@ -474,40 +537,59 @@ impl App {
     }
 
     /// Lays the graph out for the current visualization: the Canton event
-    /// graph is placed like the Canton toolbox does and stays put; the
+    /// graph is placed as alt-canton's ledger explorer does and stays put; the
     /// standard view starts the force-directed layout.
     fn apply_visualization(&mut self) {
         let canton = self.canton();
         self.layout.set_enabled(!canton);
         if canton {
-            self.graph.canton_layout();
+            self.graph.canton_layout(&self.canton_filters, self.canton_wrap());
+        } else {
+            self.graph.clear_canton();
         }
         self.fit_view();
     }
 
-    /// In the Canton view, places the visible records again (after records
-    /// were shown or hidden in bulk) and fits them in view.
+    /// In the Canton view, places the shown records again (after records
+    /// were shown or hidden in bulk, or the canvas changed width) and fits them in view.
     fn relayout_canton(&mut self) {
         if self.canton() {
-            self.graph.canton_layout();
+            self.graph.canton_layout(&self.canton_filters, self.canton_wrap());
             self.fit_view();
         }
     }
 
-    /// Zooms and pans so every visible record is in view. The standard view
-    /// just recentres, since its layout is still spreading out.
+    /// The width the Canton view's columns wrap at, in layout units, as the explorer picks it.
+    fn canton_wrap(&self) -> f32 {
+        (self.canvas_size.width * 1.35).max(1000.0).round()
+    }
+
+    /// Zooms and pans so every shown record is in view. The Canton view puts
+    /// the layout's top-left corner at the canvas's, never zoomed past 1; the
+    /// standard view just recentres, since its layout is still spreading out.
     fn fit_view(&mut self) {
-        // Roughly the canvas: the window less the sidebar and the query bar.
-        const AREA: Vector = Vector::new(840.0, 640.0);
-        const MARGIN: f32 = 90.0;
+        let (w, h) = (self.canvas_size.width, self.canvas_size.height);
+        if self.canton() {
+            let corner = Vector::new(canton::NODE_W, canton::NODE_H) * 0.5;
+            let extent = self
+                .graph
+                .nodes
+                .iter()
+                .filter(|n| n.card.shown)
+                .fold(Vector::new(canton::NODE_W, canton::NODE_H), |m, n| {
+                    let far = n.pos + corner;
+                    Vector::new(m.x.max(far.x), m.y.max(far.y))
+                });
+            let (lw, lh) = (extent.x, extent.y + 56.0);
+            let k = ((w - 40.0) / lw).min((h - 20.0) / lh).clamp(0.15, 1.0);
+            self.camera = Camera { offset: Vector::new(20.0 - w / 2.0, 10.0 - h / 2.0), scale: k };
+            return;
+        }
         let Some((min, max)) = self.graph.bounds() else {
             self.camera = Camera::default();
             return;
         };
-        let size = max - min + Vector::new(2.0 * MARGIN, 2.0 * MARGIN);
-        let scale = if self.canton() { (AREA.x / size.x).min(AREA.y / size.y).clamp(0.1, 1.5) } else { 1.0 };
-        let centre = (min + max) * 0.5;
-        self.camera = Camera { offset: centre * -scale, scale };
+        self.camera = Camera { offset: (min + max) * -0.5, scale: 1.0 };
     }
 
     /// Runs a data action in the background, on our runtime (see `runtime`).
@@ -750,6 +832,7 @@ impl App {
             hover: self.hover,
             selection: self.selection,
             visualization: self.config.graph.visualization,
+            known_size: self.canvas_size,
         })
         .width(Fill)
         .height(Fill);
@@ -891,4 +974,15 @@ fn write_banner(query: &str) -> Element<'_, Message> {
     .width(Fill)
     .style(|theme| container::bordered_box(theme).background(Color::from_rgb(1.0, 0.95, 0.88)))
     .into()
+}
+
+/// An offset box's value: empty clears it, digits set it, and anything else
+/// keeps what was there, so a stray key does not drop the filter.
+fn parse_offset(text: &str, old: Option<i64>) -> Option<i64> {
+    let text = text.trim();
+    if text.is_empty() {
+        None
+    } else {
+        text.parse().ok().or(old)
+    }
 }

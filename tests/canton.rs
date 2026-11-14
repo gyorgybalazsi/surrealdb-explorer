@@ -1,11 +1,12 @@
 //! The Canton event graph: the sample loads into SurrealDB in the toolbox's
-//! shape, and the layout places it the way the toolbox does.
+//! shape, and the model, filters and layout treat it as alt-canton's ledger
+//! explorer does.
 
 mod common;
 
 use std::collections::HashMap;
 
-use surrealdb_explorer::canton::{self, H_SPACING, LayoutEdge, LayoutNode, NodeKind, RelKind, V_SPACING};
+use surrealdb_explorer::canton::{self, Filters, Model, ModelEdge, ModelNode, NODE_H, NODE_W, NodeKind, Status, StatusFilter};
 use surrealdb_explorer::graph::GraphData;
 use surrealdb_explorer::{data, db, graph};
 
@@ -21,18 +22,25 @@ fn load_sample(name: &str, times: usize) -> GraphData {
     })
 }
 
-/// Positions by record id, laid out as the Canton view does.
-fn lay_out(g: &GraphData) -> HashMap<String, (f32, f32)> {
-    let nodes: Vec<LayoutNode> =
-        g.nodes.iter().map(|n| LayoutNode { kind: NodeKind::from_table(&n.table), data: &n.data }).collect();
+/// The sample's model, with record ids by index.
+fn model_of(g: &GraphData) -> (Model, Vec<String>) {
+    let nodes: Vec<ModelNode> = g
+        .nodes
+        .iter()
+        .map(|n| ModelNode { kind: NodeKind::from_table(&n.table), data: &n.data, name: &n.id })
+        .collect();
     let index: HashMap<&str, usize> = g.nodes.iter().enumerate().map(|(i, n)| (n.id.as_str(), i)).collect();
-    let edges: Vec<LayoutEdge> = g
+    let edges = g
         .edges
         .iter()
-        .map(|e| LayoutEdge { from: index[e.from.as_str()], to: index[e.to.as_str()], kind: RelKind::from_table(&e.label) })
+        .map(|e| ModelEdge {
+            from: index[e.from.as_str()],
+            to: index[e.to.as_str()],
+            kind: e.label.to_ascii_uppercase(),
+            index: e.data.get("index").and_then(|v| v.as_i64()),
+        })
         .collect();
-    let positions = canton::layout(&nodes, &edges);
-    g.nodes.iter().map(|n| n.id.clone()).zip(positions).collect()
+    (Model::new(&nodes, edges), g.nodes.iter().map(|n| n.id.clone()).collect())
 }
 
 fn count<T: PartialEq>(items: impl Iterator<Item = T>, of: T) -> usize {
@@ -50,14 +58,13 @@ fn sample_loads_as_an_event_graph_and_repeatably() {
         assert_eq!(count(kinds(), NodeKind::Exercised), 4);
         assert_eq!(count(kinds(), NodeKind::Other), 0);
 
-        let rels = || g.edges.iter().map(|e| RelKind::from_table(&e.label));
-        assert_eq!(count(rels(), RelKind::Requested), 5);
-        assert_eq!(count(rels(), RelKind::Action), 5);
-        assert_eq!(count(rels(), RelKind::Consequence), 4);
-        assert_eq!(count(rels(), RelKind::Target), 4);
-        assert_eq!(count(rels(), RelKind::Consumes), 3);
+        let rels = || g.edges.iter().map(|e| e.label.as_str());
+        assert_eq!(count(rels(), "requested"), 5);
+        assert_eq!(count(rels(), "action"), 5);
+        assert_eq!(count(rels(), "consequence"), 4);
+        assert_eq!(count(rels(), "target"), 4);
+        assert_eq!(count(rels(), "consumes"), 3);
 
-        // Every relation connects two loaded records.
         let ids: std::collections::HashSet<&str> = g.nodes.iter().map(|n| n.id.as_str()).collect();
         assert!(g.edges.iter().all(|e| ids.contains(e.from.as_str()) && ids.contains(e.to.as_str())));
         assert!(canton::looks_like_event_graph(g.nodes.iter().map(|n| n.table.as_str())));
@@ -65,61 +72,130 @@ fn sample_loads_as_an_event_graph_and_repeatably() {
 }
 
 #[test]
-fn layout_matches_the_toolbox() {
+fn facts_match_the_explorer() {
+    let g = load_sample("canton-facts", 1);
+    let (m, ids) = model_of(&g);
+    let at = |id: &str| ids.iter().position(|i| i == id).unwrap_or_else(|| panic!("{id} not in {ids:?}"));
+    let f = |id: &str| &m.facts[at(id)];
+
+    assert_eq!((f("transaction:3").title.as_str(), f("transaction:3").subtitle.as_str()), ("Tx 3", "by Bob"));
+    assert_eq!(f("created:00c1a5b2").title, "Cash");
+    assert_eq!(f("created:00c1a5b2").template.as_deref(), Some("Main:Cash"));
+    assert_eq!(f("exercised:[3, 1]").subtitle, "Main:Cash");
+    // Consumed contracts are archived; the rest are active.
+    assert_eq!(f("created:00c1a5b2").status, Some(Status::Archived));
+    assert_eq!(f("created:00c3c7d4").status, Some(Status::Active));
+    // The tree: the accept at depth 1, then the transfer (node 1) before the ticket (node 3).
+    let tx3 = at("transaction:3");
+    assert_eq!((f("exercised:[3, 0]").root, f("exercised:[3, 0]").depth), (Some(tx3), 1));
+    assert_eq!((f("exercised:[3, 1]").depth, f("exercised:[3, 1]").order), (2, 2));
+    assert_eq!((f("created:00c3c7d4").depth, f("created:00c3c7d4").order), (3, 3));
+    assert_eq!((f("created:00c4d8e5").depth, f("created:00c4d8e5").order), (2, 4));
+    // Events inherit the transaction's domain, and the transaction collects its tree's parties.
+    assert_eq!(f("created:00c4d8e5").domain.as_deref(), Some("global-domain::1220ab"));
+    assert!(f("transaction:3").parties.contains("Venue::1220b7e4a0f5"));
+    assert_eq!(m.templates().into_iter().collect::<Vec<_>>(), ["Main:Cash", "Main:Ticket", "Main:TicketOffer"]);
+}
+
+#[test]
+fn layout_matches_the_explorer() {
     let g = load_sample("canton-layout", 1);
-    let pos = lay_out(&g);
-    let at = |id: &str| *pos.get(id).unwrap_or_else(|| panic!("{id} not in {:?}", pos.keys()));
+    let (m, ids) = model_of(&g);
+    let at = |id: &str| ids.iter().position(|i| i == id).unwrap();
 
-    // Transactions in a row, in offset order, one column each.
-    let txs: Vec<(f32, f32)> = (1..=5).map(|o| at(&format!("transaction:{o}"))).collect();
-    assert!(txs.iter().all(|&(_, y)| y == V_SPACING));
-    assert!(txs.windows(2).all(|w| w[1].0 - w[0].0 >= H_SPACING));
+    // Parties start hidden, so the columns start at the left edge.
+    let keep = canton::visible(&m, &Filters::default());
+    assert!(ids.iter().enumerate().all(|(i, id)| keep[i] != id.starts_with("party:")));
+    let l = canton::layout(&m, &keep, 1000.0);
+    let pos = |id: &str| l.pos[at(id)].unwrap_or_else(|| panic!("{id} not placed"));
+    assert_eq!(pos("transaction:1"), (0.0, 40.0));
+    // One column per transaction, in offset order, each as wide as its indented tree, plus a gap.
+    assert_eq!(pos("transaction:2").0 - pos("transaction:1").0, 22.0 + NODE_W + 40.0);
+    // The tree goes down its column, each level indented further.
+    let tx3 = pos("transaction:3");
+    assert_eq!(pos("exercised:[3, 0]"), (tx3.0 + 22.0, tx3.1 + 56.0));
+    assert_eq!(pos("exercised:[3, 1]"), (tx3.0 + 44.0, tx3.1 + 112.0));
+    assert_eq!(pos("created:00c3c7d4"), (tx3.0 + 66.0, tx3.1 + 168.0));
+    assert_eq!(pos("created:00c4d8e5"), (tx3.0 + 44.0, tx3.1 + 224.0));
+    // Columns wrap like text: the fifth starts a new line under the deepest column.
+    let tx5 = pos("transaction:5");
+    assert_eq!(tx5.0, 0.0);
+    assert!(tx5.1 > pos("created:00c4d8e5").1 + NODE_H);
+    // The band header names the domain.
+    assert_eq!(l.bands[0].0, "domain global-domain::1220ab");
 
-    // Parties above, events below their transaction, consequences deeper.
-    for n in &g.nodes {
-        if NodeKind::from_table(&n.table) == NodeKind::Party {
-            assert_eq!(at(&n.id).1, 0.0, "{}", n.id);
-        }
-    }
-    let accept = at("exercised:[3, 0]");
-    let transfer = at("exercised:[3, 1]");
-    let paid = at("created:00c3c7d4");
-    assert_eq!(accept, (txs[2].0, 2.0 * V_SPACING));
-    assert_eq!(transfer.1, 3.0 * V_SPACING);
-    assert_eq!(at("created:00c4d8e5").1, 3.0 * V_SPACING);
-    assert_eq!(paid.1, 4.0 * V_SPACING);
-    // The third transaction's tree is two wide, centred under it.
-    assert!((transfer.0 - txs[2].0).abs() == H_SPACING / 2.0);
-
-    // Bob requested transactions 3 and 4, so sits between them.
-    let bob = at("party:`Bob::12209c5d1e8a`");
-    assert_eq!(bob.0, (txs[2].0 + txs[3].0) / 2.0);
+    // Turning parties on puts them in a column of their own on the left.
+    let mut with_parties = Filters::default();
+    with_parties.kinds.insert(NodeKind::Party);
+    let keep = canton::visible(&m, &with_parties);
+    let l = canton::layout(&m, &keep, 1000.0);
+    assert_eq!(l.pos[at("party:`Bank::1220f3a9c1d2`")].unwrap().0, 0.0);
+    assert_eq!(l.pos[at("transaction:1")].unwrap().0, NODE_W + 70.0);
 }
 
 #[test]
-fn records_outside_the_event_graph_go_in_a_row_underneath() {
+fn filters_keep_a_match_with_its_transaction() {
+    let g = load_sample("canton-filters", 1);
+    let (m, ids) = model_of(&g);
+    let shown = |f: &Filters| -> Vec<String> {
+        let keep = canton::visible(&m, f);
+        let mut v: Vec<String> = ids.iter().zip(keep).filter(|(_, k)| *k).map(|(i, _)| i.clone()).collect();
+        v.sort();
+        v
+    };
+
+    let active = Filters { status: StatusFilter::Active, ..Filters::default() };
+    assert_eq!(shown(&active), ["created:00c3c7d4", "created:00c5e9f6", "transaction:3", "transaction:4"]);
+
+    let search = Filters { search: "ticket_show".into(), ..Filters::default() };
+    assert_eq!(shown(&search), ["exercised:[5, 0]", "transaction:5"]);
+
+    let template = Filters { template: Some("Main:Cash".into()), ..Filters::default() };
+    assert_eq!(
+        shown(&template),
+        ["created:00c1a5b2", "created:00c3c7d4", "exercised:[3, 1]", "transaction:1", "transaction:3"]
+    );
+
+    // An offset range keeps whole transactions, trees included; with no end it is open.
+    let range = Filters { offset_from: Some(3), offset_to: Some(4), ..Filters::default() };
+    assert_eq!(
+        shown(&range),
+        [
+            "created:00c3c7d4",
+            "created:00c4d8e5",
+            "created:00c5e9f6",
+            "exercised:[3, 0]",
+            "exercised:[3, 1]",
+            "exercised:[4, 0]",
+            "transaction:3",
+            "transaction:4"
+        ]
+    );
+    let from_five = Filters { offset_from: Some(5), ..Filters::default() };
+    assert_eq!(shown(&from_five), ["exercised:[5, 0]", "transaction:5"]);
+    // Parties carry no offset, so the range leaves them alone.
+    let mut parties = Filters { offset_from: Some(5), ..Filters::default() };
+    parties.kinds.insert(NodeKind::Party);
+    assert!(shown(&parties).contains(&"party:`Bank::1220f3a9c1d2`".to_string()));
+
+    let carol = Filters { party: Some("Carol::1220d2a6b3c7".into()), ..Filters::default() };
+    assert!(shown(&carol).contains(&"exercised:[5, 0]".to_string()));
+    assert!(!shown(&carol).contains(&"transaction:1".to_string()));
+}
+
+#[test]
+fn records_outside_the_event_graph_go_in_a_band_underneath() {
     let data = [serde_json::json!({ "offset": 1 }), serde_json::json!({}), serde_json::json!({})];
-    let nodes = vec![
-        LayoutNode { kind: NodeKind::Transaction, data: &data[0] },
-        LayoutNode { kind: NodeKind::Other, data: &data[1] },
-        LayoutNode { kind: NodeKind::Other, data: &data[2] },
+    let nodes = [
+        ModelNode { kind: NodeKind::Transaction, data: &data[0], name: "transaction:1" },
+        ModelNode { kind: NodeKind::Other, data: &data[1], name: "Alice" },
+        ModelNode { kind: NodeKind::Other, data: &data[2], name: "Bob" },
     ];
-    let pos = canton::layout(&nodes, &[]);
-    assert_eq!(pos[0].1, V_SPACING);
-    assert!(pos[1].1 > V_SPACING && pos[1].1 == pos[2].1);
-    assert_eq!(pos[2].0 - pos[1].0, H_SPACING);
-}
-
-#[test]
-fn names_are_the_toolbox_ones() {
-    use serde_json::json;
-    let name = |kind, data| canton::display_name(kind, &data).unwrap();
-    assert_eq!(name(NodeKind::Transaction, json!({ "update_id": "1220a03e7081a2b3c4d5" })), "T:1220a03e7081");
-    assert_eq!(name(NodeKind::Created, json!({ "template_name": "Main.TicketOffer" })), "TicketOffer");
-    assert_eq!(name(NodeKind::Exercised, json!({ "choice_name": "Cash_Transfer" })), "Cash_Transfer");
-    assert_eq!(name(NodeKind::Party, json!({ "party_id": "Carol::1220d2a6b3c7aaaa" })), "Carol::1220d2a6b3c7a");
-    assert_eq!(name(NodeKind::Exercised, json!({})), "Exercised");
-    assert_eq!(canton::display_name(NodeKind::Other, &json!({ "name": "x" })), None);
-    assert_eq!(NodeKind::from_table("Transaction"), NodeKind::Transaction);
-    assert_eq!(RelKind::from_table("CONSUMES"), RelKind::Consumes);
+    let m = Model::new(&nodes, Vec::new());
+    assert_eq!(m.facts[1].title, "Alice");
+    let l = canton::layout(&m, &[true, true, true], 1000.0);
+    let (a, b) = (l.pos[1].unwrap(), l.pos[2].unwrap());
+    assert!(a.1 > l.pos[0].unwrap().1 && a.1 == b.1);
+    assert_eq!(b.0 - a.0, NODE_W + 40.0);
+    assert_eq!(l.bands.last().unwrap().0, "other records");
 }
