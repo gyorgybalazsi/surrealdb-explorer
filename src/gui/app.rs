@@ -1,18 +1,19 @@
 //! Window state and message handling. The views are in `sidebar.rs`,
 //! `settings.rs` and `query_panel.rs`.
 
-use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use iced::widget::{button, canvas, column, container, pin, row, rule, stack, text, text_editor};
 use iced::{Color, Element, Fill, Font, Point, Subscription, Task, Theme, Vector, window};
-use surrealdb_explorer::assistant::history::{self, Exchange};
-use surrealdb_explorer::assistant::{self, Assistant, Attachment, Request, Suggestion};
-use surrealdb_explorer::config::{AssistantMode, Config};
+use surrealdb_explorer::canton::{self, Filters, NodeKind, StatusFilter};
+use surrealdb_explorer::config::{Config, Connection, Visualization};
 use surrealdb_explorer::db::{self, Database};
 use surrealdb_explorer::graph::{self, GraphData, ResultGraph};
 use surrealdb_explorer::config::DatabaseConfig;
 use surrealdb_explorer::data;
 use surrealdb_explorer::logging::LogControl;
+use surrealdb_explorer::mcp::{self, WindowCommand};
+use tokio::sync::{mpsc, oneshot};
 use surrealdb_explorer::query::{self, QueryOutcome};
 use tracing::{debug, error, info, warn};
 
@@ -21,16 +22,16 @@ use crate::gui::layout::Layout;
 use crate::gui::model::Graph;
 use crate::gui::settings::{SettingsField, SettingsForm};
 
-/// A query's result shown as the graph: the records that answer it, and
-/// the relations that show how they connect.
-#[derive(Debug, Clone, Default)]
-pub struct ResultView {
-    pub answer: HashSet<String>,
-    pub context_edges: HashSet<String>,
-    /// Records and relations the queries returned.
-    pub found: usize,
-    /// How many weren't drawn because of the limit.
-    pub left_out: usize,
+/// A query's result is shown as the graph (instead of the overview).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ResultView;
+
+/// What the main area shows: the graph, or the last result as a table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tab {
+    #[default]
+    Graph,
+    Table,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -44,7 +45,25 @@ pub enum Selection {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DataAction {
     LoadSampleData,
+    /// A sample Canton event graph, shown with the Canton visualization.
+    LoadCantonSample,
     EraseDatabase,
+}
+
+/// One change to the Canton view's filters.
+#[derive(Debug, Clone)]
+pub enum CantonFilterChange {
+    Kind(NodeKind, bool),
+    /// Show exactly these kinds.
+    Kinds(Vec<NodeKind>),
+    Party(Option<String>),
+    Template(Option<String>),
+    Status(StatusFilter),
+    Search(String),
+    /// The text typed in the "from" or "to" offset box.
+    OffsetFrom(String),
+    OffsetTo(String),
+    Reset,
 }
 
 #[derive(Debug, Clone)]
@@ -67,48 +86,46 @@ pub enum Message {
     MenuCopy,
     ShowAll,
     Reload,
+    /// Turns auto refresh on or off (and remembers it).
+    ToggleAutoRefresh(bool),
+    /// Time for auto refresh to look for changes in the database.
+    CheckForChanges,
+    /// How many records each table has now.
+    Counted(Result<Vec<(String, i64)>, String>),
+    /// Switches how the graph is drawn (and remembers it).
+    SetVisualization(Visualization),
+    /// Fits the whole graph in view.
+    FitView,
+    /// The canvas has a new size (the Canton layout wraps to its width).
+    CanvasResized(iced::Size),
+    /// A change to the Canton view's filters.
+    CantonFilter(CantonFilterChange),
 
     // Settings
     OpenSettings,
     CloseSettings,
     SettingChanged(SettingsField, String),
-    AssistantModeChanged(AssistantMode),
+    ConnectionChanged(Connection),
     SaveSettings,
 
     // Query panel
     ToggleQuery,
     QueryEdited(text_editor::Action),
     RunQuery,
-    /// The query's outcome, the outcome of its context query if one ran, and
-    /// whether the query may have changed data.
-    QueryDone(QueryOutcome, Option<QueryOutcome>, bool),
+    /// The query's outcome, and whether the query may have changed data.
+    QueryDone(QueryOutcome, bool),
+    ShowTab(Tab),
     /// The last query's result, read from the database as a graph.
     ResultLoaded(Result<ResultGraph, String>),
     /// Turns drawing every relation between a result's records on or off.
     ToggleConnectResults(bool),
-    /// Turns running the context query with a suggested query on or off.
-    ToggleConnections(bool),
-    ShowQueryInGraph,
-    /// Switches path results between path rows and JSON.
-    ToggleJson,
 
-    // Plain-English questions
-    QuestionEdited(String),
-    Ask,
-    RetryWithOpus,
-    /// The assistant to keep (it holds the API key), the question, the
-    /// names of the files attached to it, and the answer.
-    AskDone(Option<Assistant>, String, Vec<String>, Result<Suggestion, String>),
-    /// Opens the file picker to attach files to the next question.
-    AttachFiles,
-    /// The files picked, read, or why one couldn't be.
-    FilesPicked(Vec<Result<Attachment, String>>),
-    RemoveAttachment(usize),
-    /// Puts the query of a chat entry back in the editor.
-    UseAnswer(usize),
-    /// Puts the context query of a chat entry in the editor, as a query of its own.
-    UseContext(usize),
-    ClearChat,
+    // Claude Code, through the MCP server
+    /// A command from the MCP server (taken out of the cell once handled).
+    FromMcp(Arc<Mutex<Option<WindowCommand>>>),
+    /// The user's answer to a write Claude Code asked for.
+    AnswerWrite(bool),
+    ShowQueryInGraph,
 
     // Data actions
     /// Shows the confirmation for an action.
@@ -151,32 +168,32 @@ pub struct App {
     pub(super) query_text: text_editor::Content,
     pub(super) query_running: bool,
     pub(super) query_outcome: Option<QueryOutcome>,
-    /// What the suggested context query returned for the last run.
-    pub(super) query_context: Option<QueryOutcome>,
-    /// The last query result, shown in the graph.
+    /// The last query result, shown as the graph.
     pub(super) result_view: Option<ResultView>,
-    /// Show path results as JSON instead of path rows.
-    pub(super) show_json: bool,
+    pub(super) tab: Tab,
 
-    pub(super) question: String,
-    pub(super) asking: bool,
-    /// Attached files: Claude sees them with every question, and queries
-    /// read their data as parameters (`movies.csv` is `$movies`).
-    pub(super) attachments: Vec<Attachment>,
-    /// Why picked files couldn't be attached.
-    pub(super) attach_problems: Vec<String>,
-    pub(super) picking_files: bool,
-    /// The suggested query that is in the editor (Run uses its context query).
-    pub(super) suggestion: Option<Suggestion>,
-    /// Every question asked and its answer, oldest first.
-    pub(super) chat: Vec<Exchange>,
-    /// Kept after the first question, so the API key is read only once.
-    pub(super) assistant: Option<Assistant>,
+    /// Shared with the MCP server; `None` if it's turned off.
+    pub(super) mcp: Option<mcp::Shared>,
+    /// A query Claude Code wants to run that changes data, waiting for the
+    /// user, and where to send the answer.
+    pub(super) pending_write: Option<(String, Arc<Mutex<Option<oneshot::Sender<bool>>>>)>,
+    /// The selection last reported to the MCP server.
+    synced_selection: Option<String>,
 
     /// A data action waiting for confirmation.
     pub(super) pending_data_action: Option<DataAction>,
     /// A data action is running.
     pub(super) data_busy: bool,
+
+    /// The size of the graph canvas, as last drawn.
+    pub(super) canvas_size: iced::Size,
+    /// What the Canton view shows.
+    pub(super) canton_filters: Filters,
+    /// How many records each table had when the graph was last loaded, for
+    /// auto refresh; `None` until the first check after a load.
+    record_counts: Option<Vec<(String, i64)>>,
+    /// Auto refresh is counting records.
+    counting: bool,
 }
 
 impl App {
@@ -201,7 +218,16 @@ impl App {
             Err(e) => (None, GraphData::default(), Some(format!("Could not open the database: {e}"))),
         };
 
-        App {
+        let mcp = config.mcp.enabled.then(|| start_mcp(&runtime, config.mcp.port));
+        if let Some(shared) = &mcp {
+            *shared.db.lock().unwrap() = db.clone();
+            *shared.limits.lock().unwrap() = (config.graph.max_result_records, config.graph.connect_results);
+        }
+
+        let mut app = App {
+            mcp,
+            pending_write: None,
+            synced_selection: None,
             runtime,
             db,
             config,
@@ -220,20 +246,17 @@ impl App {
             query_text: text_editor::Content::with_text("SELECT * FROM person;"),
             query_running: false,
             query_outcome: None,
-            query_context: None,
             result_view: None,
-            show_json: false,
-            question: String::new(),
-            asking: false,
-            attachments: Vec::new(),
-            attach_problems: Vec::new(),
-            picking_files: false,
-            suggestion: None,
-            chat: history::load(&history::path()),
-            assistant: None,
+            tab: Tab::Graph,
             pending_data_action: None,
             data_busy: false,
-        }
+            canvas_size: iced::Size::new(880.0, 760.0),
+            canton_filters: Filters::default(),
+            record_counts: None,
+            counting: false,
+        };
+        app.apply_visualization();
+        app
     }
 
     pub fn theme(&self) -> Theme {
@@ -241,14 +264,27 @@ impl App {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        if self.layout.is_active() || self.dragging.is_some() {
+        let frames = if self.layout.is_active() || self.dragging.is_some() {
             window::frames().map(|_| Message::Tick)
         } else {
             Subscription::none()
-        }
+        };
+        let refresh = if self.auto_refresh_running() {
+            iced::time::every(std::time::Duration::from_secs(self.config.graph.refresh_seconds))
+                .map(|_| Message::CheckForChanges)
+        } else {
+            Subscription::none()
+        };
+        Subscription::batch([frames, refresh, Subscription::run(mcp_commands)])
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.handle(message);
+        self.sync_mcp();
+        task
+    }
+
+    fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tick => self.layout.step(&mut self.graph, self.dragging),
             Message::Hover(hover) => self.hover = hover,
@@ -307,8 +343,82 @@ impl App {
                     self.notice = None;
                     self.layout.reheat(0.3);
                 }
+                self.relayout_canton();
             }
             Message::Reload => self.reload(),
+            Message::ToggleAutoRefresh(on) => {
+                info!(on, "auto refresh changed");
+                self.config.graph.auto_refresh = on;
+                self.record_counts = None;
+                if let Err(e) = self.config.save() {
+                    warn!(error = %e, "could not save the setting");
+                }
+            }
+            Message::CheckForChanges => return self.count_records(),
+            Message::Counted(result) => {
+                self.counting = false;
+                match result {
+                    // Only act on the answer if auto refresh is still wanted:
+                    // a query result may have been drawn meanwhile.
+                    Ok(counts) if self.auto_refresh_running() => match &self.record_counts {
+                        Some(previous) if *previous != counts => {
+                            debug!("the database changed; refreshing the graph");
+                            self.refresh();
+                            self.record_counts = Some(counts);
+                        }
+                        Some(_) => {}
+                        None => self.record_counts = Some(counts),
+                    },
+                    Ok(_) => {}
+                    Err(e) => debug!(error = %e, "auto refresh could not count the records"),
+                }
+            }
+            Message::SetVisualization(v) => {
+                if v != self.config.graph.visualization {
+                    info!(visualization = %v, "visualization changed");
+                    self.config.graph.visualization = v;
+                    if let Err(e) = self.config.save() {
+                        warn!(error = %e, "could not save the setting");
+                    }
+                    self.apply_visualization();
+                }
+            }
+            Message::FitView => self.fit_view(),
+            Message::CanvasResized(size) => {
+                let wrap_before = self.canton_wrap();
+                self.canvas_size = size;
+                if self.canton() && self.canton_wrap() != wrap_before {
+                    self.relayout_canton();
+                }
+            }
+            Message::CantonFilter(change) => {
+                let f = &mut self.canton_filters;
+                match change {
+                    CantonFilterChange::Kind(kind, on) => {
+                        if on {
+                            f.kinds.insert(kind);
+                        } else {
+                            f.kinds.remove(&kind);
+                        }
+                    }
+                    CantonFilterChange::Kinds(kinds) => f.kinds = kinds.into_iter().chain([NodeKind::Other]).collect(),
+                    CantonFilterChange::Party(p) => f.party = p,
+                    CantonFilterChange::Template(t) => f.template = t,
+                    CantonFilterChange::Status(st) => f.status = st,
+                    CantonFilterChange::Search(text) => f.search = text,
+                    CantonFilterChange::OffsetFrom(text) => f.offset_from = parse_offset(&text, f.offset_from),
+                    CantonFilterChange::OffsetTo(text) => f.offset_to = parse_offset(&text, f.offset_to),
+                    CantonFilterChange::Reset => *f = Filters::default(),
+                }
+                // Filtering keeps the view where it is, as in the explorer.
+                if self.canton() {
+                    self.graph.canton_layout(&self.canton_filters, self.canton_wrap());
+                    if self.selection.is_some_and(|s| matches!(s, Selection::Node(n) if !self.graph.nodes[n].card.shown)) {
+                        self.selection = None;
+                    }
+                    self.hover = None;
+                }
+            }
 
             Message::OpenSettings => {
                 self.settings = Some(SettingsForm::from_config(&self.config));
@@ -320,9 +430,9 @@ impl App {
                     form.set(field, value);
                 }
             }
-            Message::AssistantModeChanged(mode) => {
+            Message::ConnectionChanged(connection) => {
                 if let Some(form) = &mut self.settings {
-                    form.assistant_mode = mode;
+                    form.connection = connection;
                     form.message = None;
                 }
             }
@@ -331,11 +441,11 @@ impl App {
             Message::ToggleQuery => self.query_open = !self.query_open,
             Message::QueryEdited(action) => self.query_text.perform(action),
             Message::RunQuery => return self.run_query(),
-            Message::QueryDone(outcome, context, changes_data) => {
+            Message::ShowTab(tab) => self.tab = tab,
+            Message::QueryDone(outcome, changes_data) => {
                 self.query_running = false;
                 let has_records = !query::record_ids(&outcome).is_empty();
                 self.query_outcome = Some(outcome);
-                self.query_context = context;
                 // A result with records becomes the graph. Otherwise, a query
                 // that changed data shows the current state of the database.
                 if has_records {
@@ -346,37 +456,40 @@ impl App {
                 }
             }
             Message::ShowQueryInGraph => return self.load_result(),
-            Message::ToggleJson => self.show_json = !self.show_json,
-            Message::ResultLoaded(Ok(result)) => {
-                if result.data.nodes.is_empty() {
-                    self.notice = Some("None of the returned records could be drawn.".into());
-                    return Task::none();
-                }
-                let limit = self.config.graph.max_result_records;
-                self.graph = Graph::new(result.data, None);
-                self.notice = (result.left_out > 0).then(|| {
-                    format!(
-                        "Drew the first {limit} of {} records. Raise the limit in Settings to see more.",
-                        result.found
-                    )
-                });
-                self.result_view = Some(ResultView {
-                    answer: result.answer,
-                    context_edges: result.context_edges,
-                    found: result.found,
-                    left_out: result.left_out,
-                });
-                self.camera = Camera::default();
-                self.hover = None;
-                self.selection = None;
-                self.menu = None;
-                self.dragging = None;
-                self.layout.reheat(1.0);
-            }
+            Message::ResultLoaded(Ok(result)) => self.apply_result(result),
             Message::ResultLoaded(Err(e)) => {
                 error!(error = %e, "could not draw the query result");
                 self.error = Some(format!("Could not draw the result: {e}"));
             }
+            Message::FromMcp(cell) => {
+                let Some(command) = cell.lock().ok().and_then(|mut c| c.take()) else { return Task::none() };
+                match command {
+                    WindowCommand::Show { query, outcome, graph } => {
+                        info!("showing a result from Claude Code");
+                        self.query_open = true;
+                        self.query_text = text_editor::Content::with_text(&query);
+                        self.query_outcome = Some(outcome);
+                        self.apply_result(graph);
+                    }
+                    WindowCommand::Overview => {
+                        self.reload();
+                        self.notice = None;
+                    }
+                    WindowCommand::DataChanged => {
+                        if self.result_view.is_none() {
+                            self.reload();
+                        } else {
+                            self.notice = Some("Claude Code changed data. Show the whole graph to see it.".into());
+                        }
+                    }
+                    WindowCommand::ApproveWrite { query, reply } => {
+                        // A newer request replaces an unanswered one, which counts as declined.
+                        self.answer_write(false);
+                        self.pending_write = Some((query, Arc::new(Mutex::new(Some(reply)))));
+                    }
+                }
+            }
+            Message::AnswerWrite(allow) => self.answer_write(allow),
             Message::ToggleConnectResults(on) => {
                 self.config.graph.connect_results = on;
                 if let Err(e) = self.config.save() {
@@ -385,83 +498,6 @@ impl App {
                 if self.result_view.is_some() {
                     return self.load_result();
                 }
-            }
-
-            Message::QuestionEdited(question) => self.question = question,
-            Message::Ask => return self.ask(false),
-            Message::RetryWithOpus => return self.ask(true),
-            Message::AttachFiles => {
-                if self.picking_files {
-                    return Task::none();
-                }
-                self.picking_files = true;
-                return Task::perform(pick_files(), Message::FilesPicked);
-            }
-            Message::FilesPicked(picked) => {
-                self.picking_files = false;
-                self.attach_problems = assistant::attachment::add(&mut self.attachments, picked);
-                for problem in &self.attach_problems {
-                    warn!(%problem, "could not attach a file");
-                }
-            }
-            Message::RemoveAttachment(i) => {
-                if i < self.attachments.len() {
-                    self.attachments.remove(i);
-                }
-                self.attach_problems.clear();
-            }
-            Message::AskDone(assistant, question, attached, result) => {
-                self.asking = false;
-                if assistant.is_some() {
-                    self.assistant = assistant;
-                }
-                match &result {
-                    Ok(suggestion) => {
-                        self.query_text = text_editor::Content::with_text(&suggestion.query);
-                        self.query_outcome = None;
-                        self.suggestion = Some(suggestion.clone());
-                        // Attached files stay: the query reads them as parameters.
-                        if self.question.trim() == question {
-                            self.question.clear();
-                        }
-                    }
-                    Err(e) => {
-                        // The question stays in the box, to ask again.
-                        warn!(error = %e, "question failed");
-                        // A rejected key is read again next time.
-                        if e.contains("rejected the API key") {
-                            self.assistant = None;
-                        }
-                    }
-                }
-                self.chat.push(Exchange { question, attachments: attached, answer: result });
-                self.save_chat();
-            }
-            Message::UseAnswer(i) => {
-                if let Some(Exchange { answer: Ok(suggestion), .. }) = self.chat.get(i) {
-                    self.query_text = text_editor::Content::with_text(&suggestion.query);
-                    self.query_outcome = None;
-                    self.suggestion = Some(suggestion.clone());
-                }
-            }
-            Message::UseContext(i) => {
-                if let Some(Exchange { answer: Ok(s), .. }) = self.chat.get(i)
-                    && let Some(context) = &s.context_query
-                {
-                    self.query_text = text_editor::Content::with_text(context);
-                    self.query_outcome = None;
-                    self.suggestion = None;
-                }
-            }
-            Message::ToggleConnections(on) => {
-                self.config.assistant.show_connections = on;
-                if let Err(e) = self.config.save() {
-                    warn!(error = %e, "could not save the setting");
-                }
-            }
-            Message::ClearChat => {
-                self.chat.clear();
-                self.save_chat();
             }
 
             Message::AskDataAction(action) => self.pending_data_action = Some(action),
@@ -477,8 +513,16 @@ impl App {
                 match result {
                     Ok(()) => {
                         self.reload();
+                        if action == DataAction::LoadCantonSample {
+                            self.config.graph.visualization = Visualization::Canton;
+                            if let Err(e) = self.config.save() {
+                                warn!(error = %e, "could not save the setting");
+                            }
+                            self.apply_visualization();
+                        }
                         self.notice = Some(match action {
                             DataAction::LoadSampleData => "Sample data loaded.".into(),
+                            DataAction::LoadCantonSample => "Canton sample loaded.".into(),
                             DataAction::EraseDatabase => "Database erased.".into(),
                         });
                     }
@@ -512,10 +556,14 @@ impl App {
     fn reload(&mut self) {
         let Some(db) = &self.db else { return };
         let limit = self.config.graph.max_records_per_table;
+        self.record_counts = None;
         match self.runtime.block_on(graph::load(db, limit)) {
             Ok(data) => {
                 self.graph = Graph::new(data, Some(&self.graph));
                 self.result_view = None;
+                if self.canton() {
+                    self.graph.canton_layout(&self.canton_filters, self.canton_wrap());
+                }
                 self.error = None;
                 self.notice = Some("Reloaded".into());
             }
@@ -531,6 +579,134 @@ impl App {
         self.layout.reheat(0.5);
     }
 
+    /// Whether auto refresh is checking the database: it's on, and the whole
+    /// database is shown (not a query result, which it would replace).
+    pub(super) fn auto_refresh_running(&self) -> bool {
+        self.config.graph.auto_refresh && self.db.is_some() && self.result_view.is_none()
+    }
+
+    /// Counts the records in the background, for auto refresh.
+    fn count_records(&mut self) -> Task<Message> {
+        let Some(db) = self.db.clone() else { return Task::none() };
+        // Skip a check while the user is moving things or one is still running.
+        if self.counting || self.dragging.is_some() || self.menu.is_some() || self.data_busy {
+            return Task::none();
+        }
+        self.counting = true;
+        let handle = self.runtime.spawn(async move {
+            graph::record_counts(&db).await.map_err(|e| e.to_string())
+        });
+        Task::perform(
+            async move { handle.await.unwrap_or_else(|e| Err(format!("the task failed: {e}"))) },
+            Message::Counted,
+        )
+    }
+
+    /// Loads the database again after auto refresh saw a change. Unlike
+    /// Reload, it keeps the view as it is: the camera, the selected record
+    /// and the records the user hid.
+    fn refresh(&mut self) {
+        let Some(db) = &self.db else { return };
+        let limit = self.config.graph.max_records_per_table;
+        let data = match self.runtime.block_on(graph::load(db, limit)) {
+            Ok(data) => data,
+            Err(e) => {
+                warn!(error = %e, "auto refresh could not load the graph");
+                return;
+            }
+        };
+        let id_of = |g: &Graph, i: usize| g.nodes.get(i).map(|n| n.id.clone());
+        let selected = match self.selection {
+            Some(Selection::Node(i)) => id_of(&self.graph, i),
+            _ => None,
+        };
+        let hidden: std::collections::HashSet<String> =
+            self.graph.nodes.iter().filter(|n| n.hidden).map(|n| n.id.clone()).collect();
+        let before = self.graph.nodes.len();
+
+        self.graph = Graph::new(data, Some(&self.graph));
+        for n in &mut self.graph.nodes {
+            if hidden.contains(&n.id) {
+                n.hidden = true;
+            }
+        }
+        self.selection = selected
+            .and_then(|id| self.graph.nodes.iter().position(|n| n.id == id))
+            .map(Selection::Node);
+        self.hover = None;
+        if self.canton() {
+            self.graph.canton_layout(&self.canton_filters, self.canton_wrap());
+        } else {
+            self.layout.reheat(0.3);
+        }
+        let added = self.graph.nodes.len() as i64 - before as i64;
+        self.notice = Some(match added {
+            0 => "Updated".into(),
+            n if n > 0 => format!("Updated: {} new", plural(n as usize, "record")),
+            n => format!("Updated: {} removed", plural((-n) as usize, "record")),
+        });
+    }
+
+    fn canton(&self) -> bool {
+        self.config.graph.visualization == Visualization::Canton
+    }
+
+    /// Lays the graph out for the current visualization: the Canton event
+    /// graph is placed as alt-canton's ledger explorer does and stays put; the
+    /// standard view starts the force-directed layout.
+    fn apply_visualization(&mut self) {
+        let canton = self.canton();
+        self.layout.set_enabled(!canton);
+        if canton {
+            self.graph.canton_layout(&self.canton_filters, self.canton_wrap());
+        } else {
+            self.graph.clear_canton();
+        }
+        self.fit_view();
+    }
+
+    /// In the Canton view, places the shown records again (after records
+    /// were shown or hidden in bulk, or the canvas changed width) and fits them in view.
+    fn relayout_canton(&mut self) {
+        if self.canton() {
+            self.graph.canton_layout(&self.canton_filters, self.canton_wrap());
+            self.fit_view();
+        }
+    }
+
+    /// The width the Canton view's columns wrap at, in layout units, as the explorer picks it.
+    fn canton_wrap(&self) -> f32 {
+        (self.canvas_size.width * 1.35).max(1000.0).round()
+    }
+
+    /// Zooms and pans so every shown record is in view. The Canton view puts
+    /// the layout's top-left corner at the canvas's, never zoomed past 1; the
+    /// standard view just recentres, since its layout is still spreading out.
+    fn fit_view(&mut self) {
+        let (w, h) = (self.canvas_size.width, self.canvas_size.height);
+        if self.canton() {
+            let corner = Vector::new(canton::NODE_W, canton::NODE_H) * 0.5;
+            let extent = self
+                .graph
+                .nodes
+                .iter()
+                .filter(|n| n.card.shown)
+                .fold(Vector::new(canton::NODE_W, canton::NODE_H), |m, n| {
+                    let far = n.pos + corner;
+                    Vector::new(m.x.max(far.x), m.y.max(far.y))
+                });
+            let (lw, lh) = (extent.x, extent.y + 56.0);
+            let k = ((w - 40.0) / lw).min((h - 20.0) / lh).clamp(0.15, 1.0);
+            self.camera = Camera { offset: Vector::new(20.0 - w / 2.0, 10.0 - h / 2.0), scale: k };
+            return;
+        }
+        let Some((min, max)) = self.graph.bounds() else {
+            self.camera = Camera::default();
+            return;
+        };
+        self.camera = Camera { offset: (min + max) * -0.5, scale: 1.0 };
+    }
+
     /// Runs a data action in the background, on our runtime (see `runtime`).
     fn run_data_action(&mut self, action: DataAction) -> Task<Message> {
         let Some(db) = self.db.clone() else { return Task::none() };
@@ -543,6 +719,7 @@ impl App {
         let handle = self.runtime.spawn(async move {
             match action {
                 DataAction::LoadSampleData => data::load_sample_data(&db).await,
+                DataAction::LoadCantonSample => data::load_canton_sample(&db).await,
                 DataAction::EraseDatabase => data::erase(&db, &config).await,
             }
             .map_err(|e| e.to_string())
@@ -596,11 +773,6 @@ impl App {
             notes.push("The new log folder is used after a restart.");
         }
 
-        if new.assistant.api_key != old.assistant.api_key {
-            // Read the key again from the new place on the next question.
-            self.assistant = None;
-        }
-        self.config.assistant = new.assistant.clone();
 
         let graph_changed = new.graph != old.graph;
         self.config.graph = new.graph.clone();
@@ -624,14 +796,15 @@ impl App {
     }
 
     /// Opens the database `config` describes in place of the current one.
-    /// The same folder keeps its connection and only switches namespace and
-    /// database. A different folder is opened first, and the old one is
-    /// closed only if that succeeds, which releases its lock so it can be
-    /// opened again later.
+    /// A different folder or server is opened first, and the old connection
+    /// is closed only if that succeeds (closing a folder releases its lock,
+    /// so it can be opened again later).
     fn switch_database(&mut self, config: &DatabaseConfig) -> Result<(), String> {
-        let same_folder = config.path == self.config.database.path;
+        // The same folder or server keeps its connection and only switches
+        // namespace and database.
+        let same_place = config.same_place(&self.config.database);
         match &self.db {
-            Some(db) if same_folder => {
+            Some(db) if same_place => {
                 self.runtime
                     .block_on(async { db.use_ns(&config.namespace).use_db(&config.database).await })
                     .map_err(|e| e.to_string())?;
@@ -648,9 +821,7 @@ impl App {
         }
         // The query results and pending actions belong to the previous database.
         self.query_outcome = None;
-        self.query_context = None;
         self.result_view = None;
-        self.suggestion = None;
         self.pending_data_action = None;
         Ok(())
     }
@@ -662,129 +833,111 @@ impl App {
             return Task::none();
         }
         self.query_running = true;
-        // A query Claude suggested, run unchanged, brings its context query
-        // (unless that's turned off).
-        let changes_data = !assistant::is_read_only(&sql);
-        let context = self
-            .suggestion_in_editor()
-            .filter(|_| self.config.assistant.show_connections)
-            .and_then(|s| s.context_query.clone());
-        // Attached files are parameters the query can read, e.g. `$movies`.
-        let params = assistant::attachment::params(&self.attachments);
+        let changes_data = !query::is_read_only(&sql);
         // Run on our runtime (big thread stacks, see `runtime`), and only
         // wait for the result on iced's side, so the window stays responsive.
-        let handle = self.runtime.spawn(async move {
-            let outcome = query::run_with(&db, sql, &params).await;
-            let context = match context {
-                Some(context) if outcome.statements.is_ok() => Some(query::run_with(&db, context, &params).await),
-                _ => None,
-            };
-            (outcome, context)
-        });
+        let handle = self.runtime.spawn(async move { query::run(&db, sql).await });
         Task::perform(
             async move {
-                handle.await.unwrap_or_else(|e| {
-                    let failed = QueryOutcome {
-                        statements: Err(format!("the query task failed: {e}")),
-                        elapsed: Default::default(),
-                    };
-                    (failed, None)
+                handle.await.unwrap_or_else(|e| QueryOutcome {
+                    statements: Err(format!("the query task failed: {e}")),
+                    elapsed: Default::default(),
                 })
             },
-            move |(outcome, context)| Message::QueryDone(outcome, context, changes_data),
+            move |outcome| Message::QueryDone(outcome, changes_data),
         )
     }
 
-    /// The suggestion whose query is in the editor, unchanged.
-    pub(super) fn suggestion_in_editor(&self) -> Option<&Suggestion> {
-        self.suggestion.as_ref().filter(|s| s.query.trim() == self.query_text.text().trim())
-    }
-
-    fn save_chat(&self) {
-        if let Err(e) = history::save(&history::path(), &self.chat) {
-            warn!(error = %e, "could not save the chat history");
+    /// Draws a query result as the graph.
+    fn apply_result(&mut self, result: ResultGraph) {
+        if result.data.nodes.is_empty() {
+            self.notice = Some("None of the returned records could be drawn.".into());
+            return;
         }
-    }
-
-    /// Asks Claude for a query, in the background on our runtime. The first
-    /// time, the API key is read from 1Password, which may ask for approval.
-    /// `retry_with_opus` redoes the last answer with Opus.
-    fn ask(&mut self, retry_with_opus: bool) -> Task<Message> {
-        let Some(db) = self.db.clone() else { return Task::none() };
-        let previous = self.suggestion.clone();
-        let question = self.question.trim().to_string();
-        if self.asking || (retry_with_opus && previous.is_none()) || (!retry_with_opus && question.is_empty()) {
-            return Task::none();
-        }
-        self.asking = true;
-        let (asked, attached) = match (&previous, retry_with_opus) {
-            (Some(previous), true) => {
-                (previous.question.clone(), previous.attachments.iter().map(|a| a.name.clone()).collect())
-            }
-            _ => (question.clone(), self.attachments.iter().map(|a| a.name.clone()).collect::<Vec<_>>()),
-        };
-        // Claude sees the query in the editor, so the question can ask to change it.
-        let editor_query = Some(self.query_text.text()).filter(|q| !q.trim().is_empty());
-        let request = Request { question: question.clone(), editor_query, attachments: self.attachments.clone() };
-        let mode = self.config.assistant.mode;
-        let reference = self.config.assistant.api_key.clone();
-        let cached = self.assistant.clone();
-
-        let handle = self.runtime.spawn(async move {
-            let assistant = match cached {
-                Some(assistant) => assistant,
-                None => match tokio::task::spawn_blocking(move || assistant::key::fetch(&reference)).await {
-                    Ok(Ok(key)) => Assistant::new(key),
-                    Ok(Err(e)) => return (None, Err(e.to_string())),
-                    Err(e) => return (None, Err(format!("reading the API key failed: {e}"))),
-                },
-            };
-            let result = match (retry_with_opus, previous) {
-                (true, Some(previous)) => assistant.retry_with_opus(&db, &previous).await,
-                _ => assistant.ask(&db, &request, mode).await,
-            };
-            (Some(assistant), result.map_err(|e| e.to_string()))
+        let limit = self.config.graph.max_result_records;
+        self.graph = Graph::new(result.data, None);
+        self.notice = (result.left_out > 0).then(|| {
+            format!("Drew the first {limit} of {} records. Raise the limit in Settings to see more.", result.found)
         });
-        Task::perform(
-            async move { handle.await.unwrap_or_else(|e| (None, Err(format!("the task failed: {e}")))) },
-            move |(assistant, result)| Message::AskDone(assistant, asked.clone(), attached.clone(), result),
-        )
+        self.result_view = Some(ResultView);
+        self.camera = Camera::default();
+        self.hover = None;
+        self.selection = None;
+        self.menu = None;
+        self.dragging = None;
+        self.layout.reheat(1.0);
+        self.relayout_canton();
+    }
+
+    fn answer_write(&mut self, allow: bool) {
+        if let Some((query, reply)) = self.pending_write.take() {
+            info!(allow, %query, "answered a write from Claude Code");
+            if let Some(reply) = reply.lock().ok().and_then(|mut r| r.take()) {
+                let _ = reply.send(allow);
+            }
+        }
+    }
+
+    /// Keeps the MCP server's view of the app current: the open database,
+    /// the result limits and the selection.
+    fn sync_mcp(&mut self) {
+        let Some(shared) = &self.mcp else { return };
+        if let Ok(mut db) = shared.db.lock() {
+            // A cheap handle copy; keeps up with database switches in Settings.
+            *db = self.db.clone();
+        }
+        if let Ok(mut limits) = shared.limits.lock() {
+            *limits = (self.config.graph.max_result_records, self.config.graph.connect_results);
+        }
+        let key = self.selection.map(|s| match s {
+            Selection::Node(i) => self.graph.nodes.get(i).map(|n| n.id.clone()).unwrap_or_default(),
+            Selection::Edge(i) => self.graph.edges.get(i).map(|e| e.id.clone()).unwrap_or_default(),
+        });
+        if key != self.synced_selection {
+            let json = self.selection.map(|s| self.selection_json(s));
+            if let Ok(mut window) = shared.window.lock() {
+                window.selection = json;
+            }
+            self.synced_selection = key;
+        }
+    }
+
+    /// The selected record or relation, with its fields and connections.
+    fn selection_json(&self, selection: Selection) -> serde_json::Value {
+        let g = &self.graph;
+        match selection {
+            Selection::Node(i) => {
+                let n = &g.nodes[i];
+                let outgoing: Vec<_> = g.edges.iter().filter(|e| e.from == i)
+                    .map(|e| serde_json::json!({"relation": e.id, "table": e.label, "to": g.nodes[e.to].id})).collect();
+                let incoming: Vec<_> = g.edges.iter().filter(|e| e.to == i)
+                    .map(|e| serde_json::json!({"relation": e.id, "table": e.label, "from": g.nodes[e.from].id})).collect();
+                serde_json::json!({"record": n.id, "table": n.table, "fields": n.data,
+                    "outgoing_in_view": outgoing, "incoming_in_view": incoming})
+            }
+            Selection::Edge(i) => {
+                let e = &g.edges[i];
+                serde_json::json!({"relation": e.id, "table": e.label, "from": g.nodes[e.from].id,
+                    "to": g.nodes[e.to].id, "fields": e.data})
+            }
+        }
     }
 
     /// Draws the last query's result as the graph, in the background: the
-    /// records and relations it (and its context query) returned, read from
-    /// the database by id.
+    /// records and relations it returned, read from the database by id.
     fn load_result(&mut self) -> Task<Message> {
         let (Some(db), Some(outcome)) = (self.db.clone(), &self.query_outcome) else { return Task::none() };
         let answer = query::record_ids(outcome);
-        let context: Vec<String> = self.query_context.iter().flat_map(query::record_ids).collect();
         let limit = self.config.graph.max_result_records;
         let connect = self.config.graph.connect_results;
         self.notice = Some("Drawing the result…".into());
         let handle = self.runtime.spawn(async move {
-            graph::load_result(&db, &answer, &context, limit, connect).await.map_err(|e| e.to_string())
+            graph::load_result(&db, &answer, &[], limit, connect).await.map_err(|e| e.to_string())
         });
         Task::perform(
             async move { handle.await.unwrap_or_else(|e| Err(format!("the task failed: {e}"))) },
             Message::ResultLoaded,
         )
-    }
-
-    /// The result view as record and relation indices into the current graph.
-    pub(super) fn result_indices(&self) -> Option<(HashSet<usize>, HashSet<usize>)> {
-        let view = self.result_view.as_ref()?;
-        let nodes: HashMap<&str, usize> =
-            self.graph.nodes.iter().enumerate().map(|(i, n)| (n.id.as_str(), i)).collect();
-        let answer = view.answer.iter().filter_map(|id| nodes.get(id.as_str()).copied()).collect();
-        let edges = self
-            .graph
-            .edges
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| view.context_edges.contains(&e.id))
-            .map(|(i, _)| i)
-            .collect();
-        Some((answer, edges))
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -793,7 +946,8 @@ impl App {
             camera: self.camera,
             hover: self.hover,
             selection: self.selection,
-            result: self.result_indices(),
+            visualization: self.config.graph.visualization,
+            known_size: self.canvas_size,
         })
         .width(Fill)
         .height(Fill);
@@ -802,18 +956,45 @@ impl App {
         if let Some((node, at)) = self.menu {
             layers = layers.push(pin(self.record_menu(node)).x(at.x).y(at.y));
         }
+        if let Some((query, _)) = &self.pending_write {
+            layers = layers.push(write_banner(query));
+        }
 
         let side = match &self.settings {
             Some(form) => form.view(self.pending_data_action, self.data_busy, self.db.is_some()),
             None => self.sidebar(),
         };
 
+        let main: Element<'_, Message> = match self.tab {
+            Tab::Graph => layers.into(),
+            Tab::Table => self.table_view(),
+        };
+        // A pending write must be answered whichever tab is open.
+        let main: Element<'_, Message> = match (&self.pending_write, self.tab) {
+            (Some((query, _)), Tab::Table) => column![write_banner(query), main].into(),
+            _ => main,
+        };
+
         row![
-            column![layers, rule::horizontal(1), self.query_panel()].width(Fill),
+            column![self.tab_bar(), main, rule::horizontal(1), self.query_panel()].width(Fill),
             rule::vertical(1),
             side
         ]
         .into()
+    }
+
+    /// Switches the main area between the graph and the result table.
+    fn tab_bar(&self) -> Element<'_, Message> {
+        let tab = |label: &'static str, which: Tab| {
+            button(text(label).size(13))
+                .style(if self.tab == which { button::primary } else { button::text })
+                .padding([3, 12])
+                .on_press(Message::ShowTab(which))
+        };
+        container(row![tab("Graph", Tab::Graph), tab("Table", Tab::Table)].spacing(4))
+            .padding([4, 8])
+            .width(Fill)
+            .into()
     }
 
     fn record_menu(&self, node: usize) -> Element<'_, Message> {
@@ -844,25 +1025,79 @@ pub(super) fn plural(n: usize, word: &str) -> String {
     format!("{n} {word}{}", if n == 1 { "" } else { "s" })
 }
 
-/// Asks which files to attach, and reads them.
-async fn pick_files() -> Vec<Result<Attachment, String>> {
-    let Some(files) = rfd::AsyncFileDialog::new()
-        .set_title("Attach files to the question")
-        .pick_files()
-        .await
-    else {
-        return Vec::new();
-    };
-    let mut picked = Vec::new();
-    for file in files {
-        let name = file.file_name();
-        // Check the size first, so a huge file isn't read for nothing.
-        let size = std::fs::metadata(file.path()).map(|m| m.len()).unwrap_or(0);
-        if size > assistant::attachment::MAX_BYTES as u64 {
-            picked.push(Err(assistant::attachment::too_large(&name, size)));
-            continue;
+/// Where the MCP server's commands wait for the window's subscription.
+static MCP_COMMANDS: OnceLock<Mutex<Option<mpsc::UnboundedReceiver<WindowCommand>>>> = OnceLock::new();
+
+/// Starts the MCP server on our runtime and returns what it shares with the window.
+fn start_mcp(runtime: &tokio::runtime::Runtime, port: u16) -> mcp::Shared {
+    let (to_window, commands) = mpsc::unbounded_channel();
+    let _ = MCP_COMMANDS.set(Mutex::new(Some(commands)));
+    let shared = mcp::Shared::new(to_window);
+    let server = shared.clone();
+    runtime.spawn(async move {
+        if let Err(e) = mcp::serve(server.clone(), port).await {
+            error!(error = %e, "the MCP server stopped");
+            let hint = if e.to_string().contains("in use") {
+                " Is another copy of SurrealDB Explorer open? Close it and restart this one."
+            } else {
+                ""
+            };
+            if let Ok(mut window) = server.window.lock() {
+                window.server_error = Some(format!("Claude Code's tools aren't available: {e}.{hint}"));
+            }
         }
-        picked.push(Attachment::from_bytes(&name, file.read().await));
+    });
+    shared
+}
+
+/// The MCP server's commands, as messages for the window.
+fn mcp_commands() -> impl iced::futures::Stream<Item = Message> {
+    let commands = MCP_COMMANDS.get().and_then(|cell| cell.lock().ok()?.take());
+    iced::futures::stream::unfold(commands, |commands| async move {
+        let mut commands = commands?;
+        let command = commands.recv().await?;
+        Some((Message::FromMcp(Arc::new(Mutex::new(Some(command)))), Some(commands)))
+    })
+}
+
+/// Asks the user to allow a query from Claude Code that changes data.
+fn write_banner(query: &str) -> Element<'_, Message> {
+    let shown: String = {
+        let lines: Vec<&str> = query.lines().take(15).collect();
+        let more = query.lines().count().saturating_sub(15);
+        if more > 0 { format!("{}\n… {more} more lines", lines.join("\n")) } else { lines.join("\n") }
+    };
+    container(
+        column![
+            text("Claude Code wants to run a query that changes data:").size(14).font(Font {
+                weight: iced::font::Weight::Bold,
+                ..Font::default()
+            }),
+            container(text(shown).size(12).font(Font::MONOSPACE))
+                .padding(6)
+                .width(Fill)
+                .style(|_| container::background(Color::from_rgb(0.95, 0.95, 0.95))),
+            row![
+                button(text("Allow").size(13)).style(button::danger).on_press(Message::AnswerWrite(true)),
+                button(text("Don't allow").size(13)).style(button::secondary).on_press(Message::AnswerWrite(false)),
+            ]
+            .spacing(8),
+        ]
+        .spacing(8),
+    )
+    .padding(12)
+    .width(Fill)
+    .style(|theme| container::bordered_box(theme).background(Color::from_rgb(1.0, 0.95, 0.88)))
+    .into()
+}
+
+/// An offset box's value: empty clears it, digits set it, and anything else
+/// keeps what was there, so a stray key does not drop the filter.
+fn parse_offset(text: &str, old: Option<i64>) -> Option<i64> {
+    let text = text.trim();
+    if text.is_empty() {
+        None
+    } else {
+        text.parse().ok().or(old)
     }
-    picked
 }

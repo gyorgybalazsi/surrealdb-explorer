@@ -1,7 +1,5 @@
-//! Getting the Claude API key: from the `ANTHROPIC_API_KEY` environment
-//! variable if set, otherwise from 1Password with the `op` command-line tool.
-//!
-//! The key is never written to disk or to the log.
+//! Reading secrets from 1Password with its `op` command-line tool.
+//! Secrets are never written to disk or to the log.
 
 use std::io::ErrorKind;
 use std::process::Command;
@@ -12,22 +10,15 @@ use crate::Error;
 /// shell's PATH, so the usual Homebrew folders are tried too.
 const OP_CANDIDATES: [&str; 3] = ["op", "/opt/homebrew/bin/op", "/usr/local/bin/op"];
 
-/// Blocks while 1Password asks for approval, so call it off the UI thread.
-pub fn fetch(reference: &str) -> Result<String, Error> {
-    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY")
-        && !key.trim().is_empty()
-    {
-        tracing::info!("using the API key from ANTHROPIC_API_KEY");
-        return Ok(key.trim().to_string());
-    }
+/// Whether `value` is a 1Password reference rather than the secret itself.
+pub fn is_1password_reference(value: &str) -> bool {
+    value.trim().starts_with("op://")
+}
 
+/// Reads the secret at `reference` (`op://vault/item/field`). Blocks while
+/// 1Password asks for approval, so call it off the UI thread.
+pub fn read_1password(reference: &str) -> Result<String, Error> {
     let reference = reference.trim();
-    if reference.is_empty() {
-        return Err("No API key is set up. In Settings → Assistant, enter the 1Password \
-                    reference to your Claude API key (op://…)."
-            .into());
-    }
-
     for op in OP_CANDIDATES {
         let output = match Command::new(op).args(["read", reference]).output() {
             Ok(output) => output,
@@ -50,7 +41,6 @@ pub fn fetch(reference: &str) -> Result<String, Error> {
         if key.is_empty() {
             return Err(format!("{reference} is empty in 1Password").into());
         }
-        tracing::info!(%reference, "read the API key from 1Password");
         return Ok(key);
     }
     Err("The 1Password command-line tool (op) isn't installed. Install it with \

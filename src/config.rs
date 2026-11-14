@@ -21,16 +21,86 @@ pub struct Config {
     pub database: DatabaseConfig,
     pub graph: GraphConfig,
     pub logging: LoggingConfig,
-    pub assistant: AssistantConfig,
+    pub mcp: McpConfig,
+}
+
+/// The app's MCP server, through which Claude Code reads the database and
+/// draws in the window.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpConfig {
+    pub enabled: bool,
+    /// Served at `http://127.0.0.1:<port>/mcp`. Changes apply at the next start.
+    pub port: u16,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        McpConfig { enabled: true, port: 8765 }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DatabaseConfig {
-    /// Folder of the SurrealKV database, relative to the folder the app runs from.
+    /// Open a database folder directly, or connect to a SurrealDB server.
+    pub connection: Connection,
+    /// Folder of the SurrealKV database, relative to the folder the app runs
+    /// from (folder connection).
     pub path: String,
+    /// Address of the SurrealDB server, e.g. `ws://127.0.0.1:8000` (server connection).
+    pub server: String,
+    /// Root user to sign in to the server with.
+    pub username: String,
+    /// The password, or a 1Password reference to it (`op://…`).
+    pub password: String,
     pub namespace: String,
     pub database: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Connection {
+    /// The app opens the folder itself; nothing else can use it meanwhile.
+    Folder,
+    /// The app is one client of a SurrealDB server, which other programs
+    /// (Studio, an import job, …) can use at the same time.
+    Server,
+}
+
+impl Connection {
+    pub const ALL: [Connection; 2] = [Connection::Folder, Connection::Server];
+}
+
+impl std::fmt::Display for Connection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Connection::Folder => "Database folder",
+            Connection::Server => "SurrealDB server",
+        })
+    }
+}
+
+impl DatabaseConfig {
+    /// Whether `other` reaches the same folder or server (it may still use
+    /// another namespace or database).
+    pub fn same_place(&self, other: &DatabaseConfig) -> bool {
+        self.connection == other.connection
+            && match self.connection {
+                Connection::Folder => self.path == other.path,
+                Connection::Server => {
+                    self.server == other.server && self.username == other.username && self.password == other.password
+                }
+            }
+    }
+
+    /// Where the database is, for messages and the log (never the password).
+    pub fn location(&self) -> String {
+        match self.connection {
+            Connection::Folder => format!("folder {}", self.path),
+            Connection::Server => format!("server {}", self.server),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -43,6 +113,39 @@ pub struct GraphConfig {
     /// Also draw every relation between the records of a query's result,
     /// not only the relations the query returned.
     pub connect_results: bool,
+    /// Redraw the graph by itself when another program adds or removes
+    /// records, such as an indexer streaming into the server.
+    pub auto_refresh: bool,
+    /// How often auto refresh checks the database, in seconds.
+    pub refresh_seconds: u64,
+    /// How the graph is drawn.
+    pub visualization: Visualization,
+}
+
+/// How the graph is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Visualization {
+    /// Any database: records as dots, spread out by a force-directed layout.
+    #[default]
+    Standard,
+    /// A Canton ledger's event graph, drawn like rust-canton-toolbox's
+    /// event-graph-ui: transactions in columns, their events as trees under
+    /// them, and parties above. See `canton`.
+    Canton,
+}
+
+impl Visualization {
+    pub const ALL: [Visualization; 2] = [Visualization::Standard, Visualization::Canton];
+}
+
+impl std::fmt::Display for Visualization {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Visualization::Standard => "Standard",
+            Visualization::Canton => "Canton event graph",
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -54,65 +157,25 @@ pub struct LoggingConfig {
     pub directory: String,
 }
 
-/// Asking questions in plain English, answered by Claude with SurrealQL.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct AssistantConfig {
-    /// Which Claude model writes the queries.
-    pub mode: AssistantMode,
-    /// 1Password reference to the Claude API key, read with the `op` tool,
-    /// e.g. `op://Personal/my-key/credential`. The `ANTHROPIC_API_KEY`
-    /// environment variable, if set, is used instead.
-    pub api_key: String,
-    /// Running a suggested query also runs its context query, which shows
-    /// how the answer connects to the records the question is about.
-    pub show_connections: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AssistantMode {
-    /// Haiku first; Opus when Haiku is unsure or its query fails.
-    Auto,
-    Haiku,
-    Opus,
-}
-
-impl AssistantMode {
-    pub const ALL: [AssistantMode; 3] = [AssistantMode::Auto, AssistantMode::Haiku, AssistantMode::Opus];
-}
-
-impl std::fmt::Display for AssistantMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            AssistantMode::Auto => "Auto (Haiku, Opus when needed)",
-            AssistantMode::Haiku => "Always Haiku",
-            AssistantMode::Opus => "Always Opus",
-        })
-    }
-}
-
 impl Default for Config {
     fn default() -> Self {
         Config {
             database: DatabaseConfig::default(),
             graph: GraphConfig::default(),
             logging: LoggingConfig::default(),
-            assistant: AssistantConfig::default(),
+            mcp: McpConfig::default(),
         }
-    }
-}
-
-impl Default for AssistantConfig {
-    fn default() -> Self {
-        AssistantConfig { mode: AssistantMode::Auto, api_key: String::new(), show_connections: true }
     }
 }
 
 impl Default for DatabaseConfig {
     fn default() -> Self {
         DatabaseConfig {
+            connection: Connection::Folder,
             path: "data".into(),
+            server: "ws://127.0.0.1:8000".into(),
+            username: "root".into(),
+            password: String::new(),
             namespace: "main".into(),
             database: "main".into(),
         }
@@ -121,7 +184,14 @@ impl Default for DatabaseConfig {
 
 impl Default for GraphConfig {
     fn default() -> Self {
-        GraphConfig { max_records_per_table: 1000, max_result_records: 2000, connect_results: false }
+        GraphConfig {
+            max_records_per_table: 1000,
+            max_result_records: 2000,
+            connect_results: false,
+            auto_refresh: false,
+            refresh_seconds: 2,
+            visualization: Visualization::Standard,
+        }
     }
 }
 
@@ -173,20 +243,26 @@ impl Config {
     /// Checks values the app can't work with.
     pub fn validate(&self) -> Result<(), Error> {
         let d = &self.database;
-        if d.path.trim().is_empty() || d.namespace.trim().is_empty() || d.database.trim().is_empty() {
-            return Err("database path, namespace and database must not be empty".into());
+        if d.namespace.trim().is_empty() || d.database.trim().is_empty() {
+            return Err("namespace and database must not be empty".into());
+        }
+        match d.connection {
+            Connection::Folder if d.path.trim().is_empty() => {
+                return Err("the database folder must not be empty".into());
+            }
+            Connection::Server if d.server.trim().is_empty() || d.username.trim().is_empty() => {
+                return Err("the server address and username must not be empty".into());
+            }
+            _ => {}
         }
         if self.graph.max_records_per_table == 0 || self.graph.max_result_records == 0 {
             return Err("the record limits must be at least 1".into());
         }
+        if self.graph.refresh_seconds == 0 {
+            return Err("refresh_seconds must be at least 1".into());
+        }
         if !LOG_LEVELS.contains(&self.logging.level.as_str()) {
             return Err(format!("log level must be one of: {}", LOG_LEVELS.join(", ")).into());
-        }
-        let key = self.assistant.api_key.trim();
-        if !key.is_empty() && !key.starts_with("op://") {
-            return Err("the API key setting must be a 1Password reference starting with op:// \
-                        (never the key itself)"
-                .into());
         }
         Ok(())
     }

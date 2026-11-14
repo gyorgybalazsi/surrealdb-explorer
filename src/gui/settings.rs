@@ -3,8 +3,8 @@
 use iced::widget::{Column, button, column, pick_list, row, scrollable, text, text_input};
 use iced::{Element, Fill};
 use surrealdb_explorer::config::{
-    AssistantConfig, AssistantMode, CONFIG_FILE, Config, DatabaseConfig, GraphConfig, LOG_LEVELS,
-    LoggingConfig,
+    CONFIG_FILE, Config, Connection, DatabaseConfig, GraphConfig,
+    LOG_LEVELS, LoggingConfig, McpConfig, Visualization,
 };
 
 use crate::gui::app::{DataAction, Message};
@@ -14,18 +14,25 @@ use crate::gui::sidebar::{ERROR, MUTED, SIDEBAR_WIDTH, SUCCESS, heading};
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SettingsField {
     DatabasePath,
+    Server,
+    Username,
+    Password,
     Namespace,
     Database,
     MaxRecords,
     MaxResultRecords,
     LogLevel,
     LogDirectory,
-    ApiKey,
 }
 
 /// The settings as edited, kept as text until saved.
 pub struct SettingsForm {
+    pub connection: Connection,
     pub database_path: String,
+    pub server: String,
+    pub username: String,
+    /// The password or a 1Password reference; shown hidden.
+    pub password: String,
     pub namespace: String,
     pub database: String,
     pub max_records: String,
@@ -34,12 +41,12 @@ pub struct SettingsForm {
     pub connect_results: bool,
     pub log_level: String,
     pub log_directory: String,
-    pub assistant_mode: AssistantMode,
-    /// 1Password reference, not the key itself.
-    pub api_key: String,
-    /// Not edited here (the query panel has the checkbox); kept so saving
-    /// doesn't reset it.
-    pub show_connections: bool,
+    /// Not edited in the form; kept so saving doesn't reset it.
+    pub mcp: McpConfig,
+    /// Not edited here (the sidebar has the picker and the checkbox).
+    pub visualization: Visualization,
+    pub auto_refresh: bool,
+    pub refresh_seconds: u64,
     /// Result of the last save: a confirmation or an error.
     pub message: Option<Result<String, String>>,
 }
@@ -47,7 +54,11 @@ pub struct SettingsForm {
 impl SettingsForm {
     pub fn from_config(c: &Config) -> Self {
         SettingsForm {
+            connection: c.database.connection,
             database_path: c.database.path.clone(),
+            server: c.database.server.clone(),
+            username: c.database.username.clone(),
+            password: c.database.password.clone(),
             namespace: c.database.namespace.clone(),
             database: c.database.database.clone(),
             max_records: c.graph.max_records_per_table.to_string(),
@@ -55,9 +66,10 @@ impl SettingsForm {
             connect_results: c.graph.connect_results,
             log_level: c.logging.level.clone(),
             log_directory: c.logging.directory.clone(),
-            assistant_mode: c.assistant.mode,
-            api_key: c.assistant.api_key.clone(),
-            show_connections: c.assistant.show_connections,
+            mcp: c.mcp.clone(),
+            visualization: c.graph.visualization,
+            auto_refresh: c.graph.auto_refresh,
+            refresh_seconds: c.graph.refresh_seconds,
             message: None,
         }
     }
@@ -65,13 +77,15 @@ impl SettingsForm {
     pub fn set(&mut self, field: SettingsField, value: String) {
         let target = match field {
             SettingsField::DatabasePath => &mut self.database_path,
+            SettingsField::Server => &mut self.server,
+            SettingsField::Username => &mut self.username,
+            SettingsField::Password => &mut self.password,
             SettingsField::Namespace => &mut self.namespace,
             SettingsField::Database => &mut self.database,
             SettingsField::MaxRecords => &mut self.max_records,
             SettingsField::MaxResultRecords => &mut self.max_result_records,
             SettingsField::LogLevel => &mut self.log_level,
             SettingsField::LogDirectory => &mut self.log_directory,
-            SettingsField::ApiKey => &mut self.api_key,
         };
         *target = value;
         self.message = None;
@@ -91,20 +105,27 @@ impl SettingsForm {
             .map_err(|_| "max records in a query result must be a whole number".to_string())?;
         let config = Config {
             database: DatabaseConfig {
+                connection: self.connection,
                 path: self.database_path.trim().into(),
+                server: self.server.trim().into(),
+                username: self.username.trim().into(),
+                password: self.password.clone(),
                 namespace: self.namespace.trim().into(),
                 database: self.database.trim().into(),
             },
-            graph: GraphConfig { max_records_per_table, max_result_records, connect_results: self.connect_results },
+            graph: GraphConfig {
+                max_records_per_table,
+                max_result_records,
+                connect_results: self.connect_results,
+                auto_refresh: self.auto_refresh,
+                refresh_seconds: self.refresh_seconds,
+                visualization: self.visualization,
+            },
             logging: LoggingConfig {
                 level: self.log_level.clone(),
                 directory: self.log_directory.trim().into(),
             },
-            assistant: AssistantConfig {
-                mode: self.assistant_mode,
-                api_key: self.api_key.trim().into(),
-                show_connections: self.show_connections,
-            },
+            mcp: self.mcp.clone(),
         };
         config.validate().map_err(|e| e.to_string())?;
         Ok(config)
@@ -135,7 +156,39 @@ impl SettingsForm {
         col = col.push(text(format!("Saved in {CONFIG_FILE}.")).size(12).color(MUTED));
 
         col = col.push(heading("Database"));
-        col = col.push(field("Folder", "Relative to the folder the app runs from.", &self.database_path, SettingsField::DatabasePath));
+        col = col.push(
+            column![
+                text("Connection").size(13),
+                pick_list(Connection::ALL, Some(self.connection), Message::ConnectionChanged).text_size(13),
+                text(match self.connection {
+                    Connection::Folder => "The app opens the folder itself; nothing else can use it while the app runs.",
+                    Connection::Server => "The app connects to a running SurrealDB server, which other programs can use at the same time.",
+                })
+                .size(11)
+                .color(MUTED),
+            ]
+            .spacing(3),
+        );
+        match self.connection {
+            Connection::Folder => {
+                col = col.push(field("Folder", "Relative to the folder the app runs from.", &self.database_path, SettingsField::DatabasePath));
+            }
+            Connection::Server => {
+                col = col.push(field("Server", "For example ws://127.0.0.1:8000", &self.server, SettingsField::Server));
+                col = col.push(field("Username", "A root user of the server.", &self.username, SettingsField::Username));
+                col = col.push(
+                    column![
+                        text("Password").size(13),
+                        text_input("", &self.password)
+                            .on_input(|v| Message::SettingChanged(SettingsField::Password, v))
+                            .secure(!self.password.trim().starts_with("op://"))
+                            .size(13),
+                        text("The password, or a 1Password reference (op://…).").size(11).color(MUTED),
+                    ]
+                    .spacing(3),
+                );
+            }
+        }
         col = col.push(field("Namespace", "", &self.namespace, SettingsField::Namespace));
         col = col.push(field("Database", "", &self.database, SettingsField::Database));
         col = col.push(heading("Graph"));
@@ -166,24 +219,6 @@ impl SettingsForm {
         );
         col = col.push(field("Folder", "Daily log files are written here.", &self.log_directory, SettingsField::LogDirectory));
 
-        col = col.push(heading("Assistant"));
-        col = col.push(
-            column![
-                text("Model").size(13),
-                pick_list(AssistantMode::ALL, Some(self.assistant_mode), Message::AssistantModeChanged).text_size(13),
-                text("Auto asks Haiku first, and Opus when Haiku isn't sure or its query fails the check.")
-                    .size(11)
-                    .color(MUTED),
-            ]
-            .spacing(3),
-        );
-        col = col.push(field(
-            "API key in 1Password",
-            "A reference like op://Personal/item/credential, read with the op tool. Never the key itself.",
-            &self.api_key,
-            SettingsField::ApiKey,
-        ));
-
         col = col.push(
             text("Saving applies the changes straight away; only a new log folder waits for a restart.")
                 .size(11)
@@ -195,6 +230,26 @@ impl SettingsForm {
             Some(Err(e)) => col = col.push(text(e).size(12).color(ERROR)),
             None => {}
         }
+
+        col = col.push(heading("Claude Code"));
+        col = col.push(if self.mcp.enabled {
+            column![
+                text(format!("Tools for Claude Code at http://127.0.0.1:{}/mcp", self.mcp.port)).size(12),
+                text("Register them once, in a terminal:").size(11).color(MUTED),
+                text(format!(
+                    "claude mcp add --transport http --scope user surrealdb-explorer http://127.0.0.1:{}/mcp",
+                    self.mcp.port
+                ))
+                .size(11)
+                .font(iced::Font::MONOSPACE),
+                text("Turn off or change the port with [mcp] in config.toml (applies at the next start).")
+                    .size(11)
+                    .color(MUTED),
+            ]
+            .spacing(3)
+        } else {
+            column![text("Turned off ([mcp] enabled = false in config.toml).").size(12).color(MUTED)]
+        });
 
         col = col.push(heading("Data"));
         col = col.push(data_section(pending, busy, connected));
@@ -217,12 +272,15 @@ fn data_section(pending: Option<DataAction>, busy: bool, connected: bool) -> Ele
                 button(text("Load sample data").size(13))
                     .style(button::secondary)
                     .on_press(Message::AskDataAction(DataAction::LoadSampleData)),
-                button(text("Erase database").size(13))
-                    .style(button::danger)
-                    .on_press(Message::AskDataAction(DataAction::EraseDatabase)),
+                button(text("Load Canton sample").size(13))
+                    .style(button::secondary)
+                    .on_press(Message::AskDataAction(DataAction::LoadCantonSample)),
             ]
             .spacing(8),
-            text("Both ask for confirmation first.").size(11).color(MUTED),
+            button(text("Erase database").size(13))
+                .style(button::danger)
+                .on_press(Message::AskDataAction(DataAction::EraseDatabase)),
+            text("Each asks for confirmation first.").size(11).color(MUTED),
         ]
         .spacing(4)
         .into(),
@@ -232,6 +290,11 @@ fn data_section(pending: Option<DataAction>, busy: bool, connected: bool) -> Ele
                     DataAction::LoadSampleData => (
                         "Add the sample people and their relations? This deletes all existing `knows` relations; other data is kept.",
                         "Load sample data",
+                        button::primary,
+                    ),
+                    DataAction::LoadCantonSample => (
+                        "Add a small Canton event graph (parties, transactions, created and exercised events) and show it as a Canton event graph? Other data is kept.",
+                        "Load Canton sample",
                         button::primary,
                     ),
                     DataAction::EraseDatabase => (

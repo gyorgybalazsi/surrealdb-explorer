@@ -27,14 +27,8 @@ pub struct QueryOutcome {
 
 /// Runs `sql` and collects every statement's result.
 pub async fn run(db: &Database, sql: String) -> QueryOutcome {
-    run_with(db, sql, &serde_json::Value::Object(Default::default())).await
-}
-
-/// Runs `sql` with parameters: `params` is an object whose fields the
-/// query can read as `$field`.
-pub async fn run_with(db: &Database, sql: String, params: &serde_json::Value) -> QueryOutcome {
     let started = Instant::now();
-    let statements = match db.query(sql.as_str()).bind(params.clone()).with_stats().await {
+    let statements = match db.query(sql.as_str()).with_stats().await {
         Ok(mut response) => Ok((0..response.num_statements())
             .filter_map(|i| response.take::<Value>(i))
             .map(|(stats, result)| StatementResult {
@@ -84,4 +78,42 @@ pub fn record_ids(outcome: &QueryOutcome) -> Vec<String> {
         }
     }
     ids
+}
+
+/// Whether `query` only reads: it has none of the statements that change
+/// data or definitions. Cautious: a field named like a keyword also counts.
+pub fn is_read_only(query: &str) -> bool {
+    !has_word(
+        query,
+        &["CREATE", "UPDATE", "UPSERT", "DELETE", "RELATE", "INSERT", "DEFINE", "REMOVE", "ALTER", "REBUILD", "KILL", "LIVE"],
+    ) && !has_transaction_statements(query)
+}
+
+fn has_transaction_statements(query: &str) -> bool {
+    has_word(query, &["BEGIN", "COMMIT", "CANCEL"])
+}
+
+fn has_word(query: &str, words: &[&str]) -> bool {
+    query
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|word| words.contains(&word.to_ascii_uppercase().as_str()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{has_transaction_statements, is_read_only};
+
+    #[test]
+    fn spots_transaction_statements() {
+        assert!(has_transaction_statements("BEGIN; CREATE a; COMMIT;"));
+        assert!(has_transaction_statements("begin transaction; select * from a; cancel transaction"));
+        assert!(!has_transaction_statements("SELECT * FROM person WHERE name = 'Beginner'"));
+    }
+
+    #[test]
+    fn spots_queries_that_change_data() {
+        assert!(is_read_only("SELECT * FROM knows WHERE out = person:bob; SELECT updated_at FROM person"));
+        assert!(!is_read_only("SELECT * FROM person; DELETE person:bob"));
+        assert!(!is_read_only("relate person:a->knows->person:b"));
+    }
 }

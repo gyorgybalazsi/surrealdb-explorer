@@ -7,8 +7,10 @@ use iced::mouse::{self, Button, Cursor, ScrollDelta};
 use iced::widget::canvas::{self, Action, Event, Frame, Geometry, Path, Stroke, Text};
 use iced::widget::text::Alignment;
 use iced::{Color, Point, Rectangle, Renderer, Theme, Vector};
+use surrealdb_explorer::config::Visualization;
 
 use crate::gui::app::{Message, Selection};
+use crate::gui::canton_draw;
 use crate::gui::model::Graph;
 
 const NODE_RADIUS: f32 = 9.0;
@@ -23,10 +25,7 @@ const EDGE_LABEL: Color = Color::from_rgb(0.47, 0.47, 0.47);
 const NODE_LABEL: Color = Color::from_rgb(0.13, 0.13, 0.13);
 const FADED: Color = Color::from_rgb(0.89, 0.89, 0.89);
 const SELECTED_RING: Color = Color::from_rgb(0.13, 0.13, 0.13);
-/// Ring around records that answer a query.
-pub(super) const ANSWER_RING: Color = Color::from_rgb(0.95, 0.55, 0.05);
-/// Relations that show how a query's answer connects.
-const CONTEXT_EDGE: Color = Color::from_rgb(0.3, 0.3, 0.3);
+
 
 /// Maps graph space to the canvas: `screen = centre + offset + pos * scale`.
 #[derive(Clone, Copy)]
@@ -57,9 +56,9 @@ pub struct GraphView<'a> {
     pub camera: Camera,
     pub hover: Option<usize>,
     pub selection: Option<Selection>,
-    /// A query result shown in the graph: the answer records and the
-    /// relations that connect them.
-    pub result: Option<(HashSet<usize>, HashSet<usize>)>,
+    pub visualization: Visualization,
+    /// The canvas size the app last heard of, so a change can be reported.
+    pub known_size: iced::Size,
 }
 
 /// Mouse state kept by the canvas between events.
@@ -76,6 +75,11 @@ pub enum Interaction {
 impl GraphView<'_> {
     /// The visible record under `point`, topmost first.
     fn node_at(&self, bounds: Rectangle, point: Point) -> Option<usize> {
+        if self.visualization == Visualization::Canton {
+            return (0..self.graph.nodes.len())
+                .rev()
+                .find(|&i| self.graph.nodes[i].card.shown && canton_draw::on_card(self, bounds, i, point));
+        }
         let r = NODE_RADIUS * self.camera.scale.max(0.6) + 3.0;
         self.graph
             .nodes
@@ -93,8 +97,14 @@ impl GraphView<'_> {
             .edges
             .iter()
             .enumerate()
-            .filter(|(_, e)| self.graph.edge_visible(e))
+            .filter(|(_, e)| match self.visualization {
+                Visualization::Canton => canton_draw::edge_drawn(self, e),
+                Visualization::Standard => self.graph.edge_visible(e),
+            })
             .find(|(_, e)| {
+                if self.visualization == Visualization::Canton {
+                    return canton_draw::near_edge(self, bounds, e, point);
+                }
                 let a = self.camera.to_screen(bounds, self.graph.nodes[e.from].pos);
                 let b = self.camera.to_screen(bounds, self.graph.nodes[e.to].pos);
                 distance_to_segment(point, a, b) <= 5.0
@@ -103,8 +113,13 @@ impl GraphView<'_> {
     }
 
     /// Records (and their relations) to draw in full colour while hovering.
+    /// In the Canton view a selected record lights up its neighbours too, as in alt-canton's explorer.
     fn lit(&self) -> Option<HashSet<usize>> {
-        self.hover.map(|h| self.graph.neighbourhood(h))
+        let selected = match self.selection {
+            Some(Selection::Node(n)) if self.visualization == Visualization::Canton => Some(n),
+            _ => None,
+        };
+        self.hover.or(selected).map(|h| self.graph.neighbourhood(h))
     }
 }
 
@@ -118,6 +133,11 @@ impl canvas::Program<Message> for GraphView<'_> {
         bounds: Rectangle,
         cursor: Cursor,
     ) -> Option<Action<Message>> {
+        // Tell the app the canvas size, which the Canton layout wraps to.
+        let size = bounds.size();
+        if (size.width - self.known_size.width).abs() > 1.0 || (size.height - self.known_size.height).abs() > 1.0 {
+            return Some(Action::publish(Message::CanvasResized(size)));
+        }
         let Event::Mouse(event) = event else { return None };
 
         // Releases and drags are handled even if the cursor left the canvas.
@@ -209,29 +229,23 @@ impl canvas::Program<Message> for GraphView<'_> {
         frame.fill_rectangle(Point::ORIGIN, bounds.size(), BACKGROUND);
 
         let lit = self.lit();
+        if self.visualization == Visualization::Canton {
+            canton_draw::draw(self, &mut frame, bounds, lit.as_ref());
+            return vec![frame.into_geometry()];
+        }
         let is_lit = |i: usize| lit.as_ref().is_none_or(|set| set.contains(&i));
         let scale = self.camera.scale;
         let radius = NODE_RADIUS * scale.clamp(0.6, 2.0);
-
-        // With a query result shown, only the connecting relations are emphasised.
-        let context = self.result.as_ref().map(|(_, edges)| edges).filter(|edges| !edges.is_empty());
 
         // Relations first, so records are drawn on top.
         for (i, e) in self.graph.edges.iter().enumerate() {
             if !self.graph.edge_visible(e) {
                 continue;
             }
-            let in_context = context.is_some_and(|edges| edges.contains(&i));
-            let lit_edge = (lit.is_none() || self.hover.is_some_and(|h| e.from == h || e.to == h))
-                && (context.is_none() || in_context);
+            let lit_edge = lit.is_none() || self.hover.is_some_and(|h| e.from == h || e.to == h);
             let selected = self.selection == Some(Selection::Edge(i));
-            let color = match () {
-                _ if selected => SELECTED_RING,
-                _ if !lit_edge => FADED,
-                _ if in_context => CONTEXT_EDGE,
-                _ => EDGE_COLOR,
-            };
-            let width = if selected || in_context { 2.0 } else { 1.2 };
+            let color = if selected { SELECTED_RING } else if lit_edge { EDGE_COLOR } else { FADED };
+            let width = if selected { 2.0 } else { 1.2 };
             let a = self.camera.to_screen(bounds, self.graph.nodes[e.from].pos);
             let b = self.camera.to_screen(bounds, self.graph.nodes[e.to].pos);
             draw_arrow(&mut frame, a, b, radius, color, width);
@@ -254,12 +268,6 @@ impl canvas::Program<Message> for GraphView<'_> {
             }
             let p = self.camera.to_screen(bounds, n.pos);
             let lit_node = is_lit(i);
-            if self.result.as_ref().is_some_and(|(answer, _)| answer.contains(&i)) {
-                frame.stroke(
-                    &Path::circle(p, radius + 4.0),
-                    Stroke::default().with_color(ANSWER_RING).with_width(3.0),
-                );
-            }
             frame.fill(&Path::circle(p, radius), if lit_node { n.color } else { FADED });
             if self.selection == Some(Selection::Node(i)) {
                 frame.stroke(
@@ -319,7 +327,7 @@ fn draw_arrow(frame: &mut Frame, a: Point, b: Point, radius: f32, color: Color, 
     frame.fill(&head, color);
 }
 
-fn distance_to_segment(p: Point, a: Point, b: Point) -> f32 {
+pub(super) fn distance_to_segment(p: Point, a: Point, b: Point) -> f32 {
     let ab = b - a;
     let len2 = ab.x * ab.x + ab.y * ab.y;
     if len2 == 0.0 {

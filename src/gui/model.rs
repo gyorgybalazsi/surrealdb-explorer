@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use iced::{Color, Vector};
+use surrealdb_explorer::canton::{self, Filters, Model, ModelEdge, ModelNode, NodeKind, Status};
 use surrealdb_explorer::graph::GraphData;
 
 const PALETTE: [Color; 10] = [
@@ -31,6 +32,9 @@ pub struct Node {
     pub label: String,
     pub data: serde_json::Value,
     pub color: Color,
+    /// What it is in a Canton event graph, and its card there.
+    pub kind: NodeKind,
+    pub card: Card,
     /// Position in graph space (the camera maps it to the screen).
     pub pos: Vector,
     pub vel: Vector,
@@ -43,6 +47,18 @@ pub struct Edge {
     pub to: usize,
     pub label: String,
     pub data: serde_json::Value,
+    /// Its relationship type in a Canton event graph: the table name in upper case.
+    pub kind: String,
+}
+
+/// A record's card in the Canton view.
+#[derive(Clone, Default)]
+pub struct Card {
+    pub title: String,
+    pub subtitle: String,
+    pub status: Option<Status>,
+    /// Drawn: kept by the Canton filters and not hidden.
+    pub shown: bool,
 }
 
 pub struct Table {
@@ -59,6 +75,8 @@ pub struct Graph {
     pub truncated: Vec<String>,
     /// Relations pointing at records that weren't loaded.
     pub dangling_edges: usize,
+    /// The Canton view's band headers, in graph space.
+    pub bands: Vec<(String, Vector)>,
 }
 
 impl Graph {
@@ -87,8 +105,12 @@ impl Graph {
                 let angle = std::f32::consts::TAU * i as f32 / count;
                 let start = Vector::new(angle.cos(), angle.sin()) * (60.0 + 8.0 * count.sqrt());
                 let (pos, hidden) = old.get(n.id.as_str()).copied().unwrap_or((start, false));
+                let kind = NodeKind::from_table(&n.table);
+                let label = display_name(&n.id, &n.data);
                 Node {
-                    label: display_name(&n.id, &n.data),
+                    card: Card::default(),
+                    label,
+                    kind,
                     color: color_of(&n.table),
                     id: n.id,
                     table: n.table,
@@ -108,6 +130,7 @@ impl Graph {
             .into_iter()
             .filter_map(|e| {
                 Some(Edge {
+                    kind: e.label.to_ascii_uppercase(),
                     from: *index.get(e.from.as_str())?,
                     to: *index.get(e.to.as_str())?,
                     id: e.id,
@@ -132,6 +155,7 @@ impl Graph {
             edges,
             tables,
             truncated: data.truncated,
+            bands: Vec::new(),
         }
     }
 
@@ -152,6 +176,77 @@ impl Graph {
             }
         }
         set
+    }
+
+    /// The Canton event graph model of the records (all of them, hidden or not).
+    pub fn canton_model(&self) -> Model {
+        let nodes: Vec<ModelNode> = self
+            .nodes
+            .iter()
+            .map(|n| ModelNode { kind: n.kind, data: &n.data, name: &n.label })
+            .collect();
+        let edges = self
+            .edges
+            .iter()
+            .map(|e| ModelEdge {
+                from: e.from,
+                to: e.to,
+                kind: e.kind.clone(),
+                index: e.data.get("index").and_then(|v| v.as_i64()),
+            })
+            .collect();
+        Model::new(&nodes, edges)
+    }
+
+    /// Lays the records out as alt-canton's ledger explorer does (see
+    /// `canton::layout`): the records `filters` keeps and that aren't hidden,
+    /// with columns wrapping past `wrap` units. Positions are card centres.
+    pub fn canton_layout(&mut self, filters: &Filters, wrap: f32) {
+        let model = self.canton_model();
+        let mut keep = canton::visible(&model, filters);
+        for (k, n) in keep.iter_mut().zip(&self.nodes) {
+            *k &= !n.hidden;
+        }
+        let layout = canton::layout(&model, &keep, wrap);
+        let half = Vector::new(canton::NODE_W / 2.0, canton::NODE_H / 2.0);
+        for (i, n) in self.nodes.iter_mut().enumerate() {
+            let f = &model.facts[i];
+            n.card = Card {
+                title: f.title.clone(),
+                subtitle: f.subtitle.clone(),
+                status: f.status,
+                shown: layout.pos[i].is_some(),
+            };
+            if let Some((x, y)) = layout.pos[i] {
+                n.pos = Vector::new(x, y) + half;
+                n.vel = Vector::ZERO;
+            }
+        }
+        self.bands = layout.bands.into_iter().map(|(name, x, y)| (name, Vector::new(x, y))).collect();
+    }
+
+    /// Back to the standard view: every record not hidden is drawn.
+    pub fn clear_canton(&mut self) {
+        for n in &mut self.nodes {
+            n.card.shown = false;
+        }
+        self.bands.clear();
+    }
+
+    /// The smallest box around the visible records, as (min, max).
+    pub fn bounds(&self) -> Option<(Vector, Vector)> {
+        self.nodes.iter().filter(|n| !n.hidden).fold(None, |acc, n| {
+            let (lo, hi) = acc.unwrap_or((n.pos, n.pos));
+            Some((
+                Vector::new(lo.x.min(n.pos.x), lo.y.min(n.pos.y)),
+                Vector::new(hi.x.max(n.pos.x), hi.y.max(n.pos.y)),
+            ))
+        })
+    }
+
+    /// Whether the records include a Canton event graph.
+    pub fn looks_like_event_graph(&self) -> bool {
+        canton::looks_like_event_graph(self.tables.iter().map(|t| t.name.as_str()))
     }
 
     pub fn hidden_count(&self) -> usize {

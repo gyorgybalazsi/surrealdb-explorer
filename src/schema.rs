@@ -1,4 +1,4 @@
-//! A short description of the database for Claude: tables, their fields,
+//! A short description of the database for Claude Code: tables, their fields,
 //! an example record, and what each relation table connects.
 
 use std::collections::BTreeSet;

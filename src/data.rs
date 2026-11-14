@@ -15,6 +15,18 @@ pub async fn load_sample_data(db: &Database) -> Result<(), Error> {
     Ok(())
 }
 
+/// The sample Canton event graph, from `src/canton_sample.surql`.
+pub const CANTON_SAMPLE: &str = include_str!("canton_sample.surql");
+
+/// Adds a small Canton event graph: parties, transactions, created and
+/// exercised events and their relations, as the Canton toolbox indexes them.
+/// Recreates the relations that start at the sample's records; other data is kept.
+pub async fn load_canton_sample(db: &Database) -> Result<(), Error> {
+    db.query(CANTON_SAMPLE).await?.check()?;
+    tracing::info!("Canton sample loaded");
+    Ok(())
+}
+
 /// Removes everything in the configured database: all tables, records and
 /// definitions. The empty database is then defined again, so the app can
 /// keep using it.
