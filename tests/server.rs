@@ -114,9 +114,9 @@ fn namespace_and_database_users_sign_in() {
         let admin = db::connect(&root).await.unwrap();
         admin
             .query(
-                "DEFINE NAMESPACE canton; USE NS canton; \
+                "DEFINE NAMESPACE IF NOT EXISTS canton; USE NS canton; \
                  DEFINE USER ns_admin ON NAMESPACE PASSWORD 'ns-pass' ROLES OWNER; \
-                 DEFINE DATABASE event_graph; USE DB event_graph; \
+                 DEFINE DATABASE IF NOT EXISTS event_graph; USE DB event_graph; \
                  DEFINE USER viewer ON DATABASE PASSWORD 'viewer-pass' ROLES VIEWER;",
             )
             .await
@@ -129,12 +129,11 @@ fn namespace_and_database_users_sign_in() {
         let reader = db::connect(&viewer).await.unwrap();
         let graph = graph::load(&reader, 1000).await.unwrap();
         assert_eq!(graph.nodes.len(), 6);
-        let write = query::run(&reader, "CREATE person:eve SET name = 'Eve';".into()).await;
-        let refused = match &write.statements {
-            Ok(statements) => statements.iter().any(|s| s.result.is_err()),
-            Err(_) => true,
-        };
-        assert!(refused, "a VIEWER can't create records");
+        // SurrealDB refuses it either with an error or by creating nothing.
+        query::run(&reader, "CREATE person:eve SET name = 'Eve';".into()).await;
+        let mut res = admin.query("SELECT VALUE id FROM person:eve").await.unwrap();
+        let created: Vec<surrealdb::types::Value> = res.take(0).unwrap();
+        assert!(created.is_empty(), "a VIEWER can't create records");
 
         // Signed in as a root user, the same name and password are refused.
         let as_root = DatabaseConfig { user_level: UserLevel::Root, ..viewer.clone() };
