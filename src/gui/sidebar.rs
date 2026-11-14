@@ -113,7 +113,24 @@ impl App {
                 .spacing(8),
             );
         }
-        col = col.push(button(text("Reload").size(13)).on_press(Message::Reload));
+        col = col.push(
+            row![
+                button(text("Reload").size(13)).on_press(Message::Reload),
+                checkbox(self.config.graph.auto_refresh)
+                    .label("Auto refresh")
+                    .on_toggle(Message::ToggleAutoRefresh)
+                    .text_size(12),
+            ]
+            .spacing(10)
+            .align_y(iced::Alignment::Center),
+        );
+        if self.config.graph.auto_refresh && self.result_view.is_some() {
+            col = col.push(
+                text("Auto refresh is paused while a query result is shown. Reload to go back to the whole database.")
+                    .size(12)
+                    .color(MUTED),
+            );
+        }
         if let Some(notice) = &self.notice {
             col = col.push(text(notice).size(12).color(MUTED));
         }

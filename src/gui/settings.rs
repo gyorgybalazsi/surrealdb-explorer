@@ -43,8 +43,10 @@ pub struct SettingsForm {
     pub log_directory: String,
     /// Not edited in the form; kept so saving doesn't reset it.
     pub mcp: McpConfig,
-    /// Not edited here (the sidebar has the picker).
+    /// Not edited here (the sidebar has the picker and the checkbox).
     pub visualization: Visualization,
+    pub auto_refresh: bool,
+    pub refresh_seconds: u64,
     /// Result of the last save: a confirmation or an error.
     pub message: Option<Result<String, String>>,
 }
@@ -66,6 +68,8 @@ impl SettingsForm {
             log_directory: c.logging.directory.clone(),
             mcp: c.mcp.clone(),
             visualization: c.graph.visualization,
+            auto_refresh: c.graph.auto_refresh,
+            refresh_seconds: c.graph.refresh_seconds,
             message: None,
         }
     }
@@ -113,6 +117,8 @@ impl SettingsForm {
                 max_records_per_table,
                 max_result_records,
                 connect_results: self.connect_results,
+                auto_refresh: self.auto_refresh,
+                refresh_seconds: self.refresh_seconds,
                 visualization: self.visualization,
             },
             logging: LoggingConfig {

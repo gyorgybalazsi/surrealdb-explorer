@@ -15,6 +15,30 @@ use surrealdb::types::Value;
 
 use crate::db::Database;
 
+/// How many records each table has, in table order. A cheap check of
+/// whether the graph is out of date: it changes when records are added or
+/// removed, not when a record's fields change.
+pub async fn record_counts(db: &Database) -> surrealdb::Result<Vec<(String, i64)>> {
+    let tables = tables::list(db).await?;
+    if tables.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sql: String = (0..tables.len())
+        .map(|i| format!("SELECT VALUE count() FROM type::table($t{i}) GROUP ALL;"))
+        .collect();
+    let mut query = db.query(sql);
+    for (i, table) in tables.iter().enumerate() {
+        query = query.bind((format!("t{i}"), table.name.clone()));
+    }
+    let mut response = query.await?;
+    let mut counts = Vec::with_capacity(tables.len());
+    for (i, table) in tables.into_iter().enumerate() {
+        let n: Vec<i64> = response.take(i)?;
+        counts.push((table.name, n.first().copied().unwrap_or(0)));
+    }
+    Ok(counts)
+}
+
 /// Loads every table in the database as graph data, at most
 /// `max_per_table` records per table.
 pub async fn load(db: &Database, max_per_table: usize) -> surrealdb::Result<GraphData> {

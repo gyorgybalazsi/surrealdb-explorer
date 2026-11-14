@@ -113,6 +113,11 @@ pub struct GraphConfig {
     /// Also draw every relation between the records of a query's result,
     /// not only the relations the query returned.
     pub connect_results: bool,
+    /// Redraw the graph by itself when another program adds or removes
+    /// records, such as an indexer streaming into the server.
+    pub auto_refresh: bool,
+    /// How often auto refresh checks the database, in seconds.
+    pub refresh_seconds: u64,
     /// How the graph is drawn.
     pub visualization: Visualization,
 }
@@ -183,6 +188,8 @@ impl Default for GraphConfig {
             max_records_per_table: 1000,
             max_result_records: 2000,
             connect_results: false,
+            auto_refresh: false,
+            refresh_seconds: 2,
             visualization: Visualization::Standard,
         }
     }
@@ -250,6 +257,9 @@ impl Config {
         }
         if self.graph.max_records_per_table == 0 || self.graph.max_result_records == 0 {
             return Err("the record limits must be at least 1".into());
+        }
+        if self.graph.refresh_seconds == 0 {
+            return Err("refresh_seconds must be at least 1".into());
         }
         if !LOG_LEVELS.contains(&self.logging.level.as_str()) {
             return Err(format!("log level must be one of: {}", LOG_LEVELS.join(", ")).into());

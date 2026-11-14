@@ -86,6 +86,12 @@ pub enum Message {
     MenuCopy,
     ShowAll,
     Reload,
+    /// Turns auto refresh on or off (and remembers it).
+    ToggleAutoRefresh(bool),
+    /// Time for auto refresh to look for changes in the database.
+    CheckForChanges,
+    /// How many records each table has now.
+    Counted(Result<Vec<(String, i64)>, String>),
     /// Switches how the graph is drawn (and remembers it).
     SetVisualization(Visualization),
     /// Fits the whole graph in view.
@@ -183,6 +189,11 @@ pub struct App {
     pub(super) canvas_size: iced::Size,
     /// What the Canton view shows.
     pub(super) canton_filters: Filters,
+    /// How many records each table had when the graph was last loaded, for
+    /// auto refresh; `None` until the first check after a load.
+    record_counts: Option<Vec<(String, i64)>>,
+    /// Auto refresh is counting records.
+    counting: bool,
 }
 
 impl App {
@@ -241,6 +252,8 @@ impl App {
             data_busy: false,
             canvas_size: iced::Size::new(880.0, 760.0),
             canton_filters: Filters::default(),
+            record_counts: None,
+            counting: false,
         };
         app.apply_visualization();
         app
@@ -256,7 +269,13 @@ impl App {
         } else {
             Subscription::none()
         };
-        Subscription::batch([frames, Subscription::run(mcp_commands)])
+        let refresh = if self.auto_refresh_running() {
+            iced::time::every(std::time::Duration::from_secs(self.config.graph.refresh_seconds))
+                .map(|_| Message::CheckForChanges)
+        } else {
+            Subscription::none()
+        };
+        Subscription::batch([frames, refresh, Subscription::run(mcp_commands)])
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -327,6 +346,33 @@ impl App {
                 self.relayout_canton();
             }
             Message::Reload => self.reload(),
+            Message::ToggleAutoRefresh(on) => {
+                info!(on, "auto refresh changed");
+                self.config.graph.auto_refresh = on;
+                self.record_counts = None;
+                if let Err(e) = self.config.save() {
+                    warn!(error = %e, "could not save the setting");
+                }
+            }
+            Message::CheckForChanges => return self.count_records(),
+            Message::Counted(result) => {
+                self.counting = false;
+                match result {
+                    // Only act on the answer if auto refresh is still wanted:
+                    // a query result may have been drawn meanwhile.
+                    Ok(counts) if self.auto_refresh_running() => match &self.record_counts {
+                        Some(previous) if *previous != counts => {
+                            debug!("the database changed; refreshing the graph");
+                            self.refresh();
+                            self.record_counts = Some(counts);
+                        }
+                        Some(_) => {}
+                        None => self.record_counts = Some(counts),
+                    },
+                    Ok(_) => {}
+                    Err(e) => debug!(error = %e, "auto refresh could not count the records"),
+                }
+            }
             Message::SetVisualization(v) => {
                 if v != self.config.graph.visualization {
                     info!(visualization = %v, "visualization changed");
@@ -510,6 +556,7 @@ impl App {
     fn reload(&mut self) {
         let Some(db) = &self.db else { return };
         let limit = self.config.graph.max_records_per_table;
+        self.record_counts = None;
         match self.runtime.block_on(graph::load(db, limit)) {
             Ok(data) => {
                 self.graph = Graph::new(data, Some(&self.graph));
@@ -530,6 +577,74 @@ impl App {
         self.menu = None;
         self.dragging = None;
         self.layout.reheat(0.5);
+    }
+
+    /// Whether auto refresh is checking the database: it's on, and the whole
+    /// database is shown (not a query result, which it would replace).
+    pub(super) fn auto_refresh_running(&self) -> bool {
+        self.config.graph.auto_refresh && self.db.is_some() && self.result_view.is_none()
+    }
+
+    /// Counts the records in the background, for auto refresh.
+    fn count_records(&mut self) -> Task<Message> {
+        let Some(db) = self.db.clone() else { return Task::none() };
+        // Skip a check while the user is moving things or one is still running.
+        if self.counting || self.dragging.is_some() || self.menu.is_some() || self.data_busy {
+            return Task::none();
+        }
+        self.counting = true;
+        let handle = self.runtime.spawn(async move {
+            graph::record_counts(&db).await.map_err(|e| e.to_string())
+        });
+        Task::perform(
+            async move { handle.await.unwrap_or_else(|e| Err(format!("the task failed: {e}"))) },
+            Message::Counted,
+        )
+    }
+
+    /// Loads the database again after auto refresh saw a change. Unlike
+    /// Reload, it keeps the view as it is: the camera, the selected record
+    /// and the records the user hid.
+    fn refresh(&mut self) {
+        let Some(db) = &self.db else { return };
+        let limit = self.config.graph.max_records_per_table;
+        let data = match self.runtime.block_on(graph::load(db, limit)) {
+            Ok(data) => data,
+            Err(e) => {
+                warn!(error = %e, "auto refresh could not load the graph");
+                return;
+            }
+        };
+        let id_of = |g: &Graph, i: usize| g.nodes.get(i).map(|n| n.id.clone());
+        let selected = match self.selection {
+            Some(Selection::Node(i)) => id_of(&self.graph, i),
+            _ => None,
+        };
+        let hidden: std::collections::HashSet<String> =
+            self.graph.nodes.iter().filter(|n| n.hidden).map(|n| n.id.clone()).collect();
+        let before = self.graph.nodes.len();
+
+        self.graph = Graph::new(data, Some(&self.graph));
+        for n in &mut self.graph.nodes {
+            if hidden.contains(&n.id) {
+                n.hidden = true;
+            }
+        }
+        self.selection = selected
+            .and_then(|id| self.graph.nodes.iter().position(|n| n.id == id))
+            .map(Selection::Node);
+        self.hover = None;
+        if self.canton() {
+            self.graph.canton_layout(&self.canton_filters, self.canton_wrap());
+        } else {
+            self.layout.reheat(0.3);
+        }
+        let added = self.graph.nodes.len() as i64 - before as i64;
+        self.notice = Some(match added {
+            0 => "Updated".into(),
+            n if n > 0 => format!("Updated: {} new", plural(n as usize, "record")),
+            n => format!("Updated: {} removed", plural((-n) as usize, "record")),
+        });
     }
 
     fn canton(&self) -> bool {
