@@ -7,8 +7,10 @@ use iced::mouse::{self, Button, Cursor, ScrollDelta};
 use iced::widget::canvas::{self, Action, Event, Frame, Geometry, Path, Stroke, Text};
 use iced::widget::text::Alignment;
 use iced::{Color, Point, Rectangle, Renderer, Theme, Vector};
+use surrealdb_explorer::config::Visualization;
 
 use crate::gui::app::{Message, Selection};
+use crate::gui::canton_draw;
 use crate::gui::model::Graph;
 
 const NODE_RADIUS: f32 = 9.0;
@@ -54,6 +56,7 @@ pub struct GraphView<'a> {
     pub camera: Camera,
     pub hover: Option<usize>,
     pub selection: Option<Selection>,
+    pub visualization: Visualization,
 }
 
 /// Mouse state kept by the canvas between events.
@@ -70,6 +73,7 @@ pub enum Interaction {
 impl GraphView<'_> {
     /// The visible record under `point`, topmost first.
     fn node_at(&self, bounds: Rectangle, point: Point) -> Option<usize> {
+        let canton = self.visualization == Visualization::Canton;
         let r = NODE_RADIUS * self.camera.scale.max(0.6) + 3.0;
         self.graph
             .nodes
@@ -77,7 +81,10 @@ impl GraphView<'_> {
             .enumerate()
             .rev()
             .filter(|(_, n)| !n.hidden)
-            .find(|(_, n)| self.camera.to_screen(bounds, n.pos).distance(point) <= r)
+            .find(|(_, n)| {
+                let r = if canton { canton_draw::hit_radius(n.kind) * self.camera.scale + 2.0 } else { r };
+                self.camera.to_screen(bounds, n.pos).distance(point) <= r
+            })
             .map(|(i, _)| i)
     }
 
@@ -89,6 +96,9 @@ impl GraphView<'_> {
             .enumerate()
             .filter(|(_, e)| self.graph.edge_visible(e))
             .find(|(_, e)| {
+                if self.visualization == Visualization::Canton {
+                    return canton_draw::near_edge(self, bounds, e, point);
+                }
                 let a = self.camera.to_screen(bounds, self.graph.nodes[e.from].pos);
                 let b = self.camera.to_screen(bounds, self.graph.nodes[e.to].pos);
                 distance_to_segment(point, a, b) <= 5.0
@@ -203,6 +213,10 @@ impl canvas::Program<Message> for GraphView<'_> {
         frame.fill_rectangle(Point::ORIGIN, bounds.size(), BACKGROUND);
 
         let lit = self.lit();
+        if self.visualization == Visualization::Canton {
+            canton_draw::draw(self, &mut frame, bounds, lit.as_ref());
+            return vec![frame.into_geometry()];
+        }
         let is_lit = |i: usize| lit.as_ref().is_none_or(|set| set.contains(&i));
         let scale = self.camera.scale;
         let radius = NODE_RADIUS * scale.clamp(0.6, 2.0);
@@ -297,7 +311,7 @@ fn draw_arrow(frame: &mut Frame, a: Point, b: Point, radius: f32, color: Color, 
     frame.fill(&head, color);
 }
 
-fn distance_to_segment(p: Point, a: Point, b: Point) -> f32 {
+pub(super) fn distance_to_segment(p: Point, a: Point, b: Point) -> f32 {
     let ab = b - a;
     let len2 = ab.x * ab.x + ab.y * ab.y;
     if len2 == 0.0 {

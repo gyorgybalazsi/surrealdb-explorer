@@ -113,6 +113,34 @@ pub struct GraphConfig {
     /// Also draw every relation between the records of a query's result,
     /// not only the relations the query returned.
     pub connect_results: bool,
+    /// How the graph is drawn.
+    pub visualization: Visualization,
+}
+
+/// How the graph is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Visualization {
+    /// Any database: records as dots, spread out by a force-directed layout.
+    #[default]
+    Standard,
+    /// A Canton ledger's event graph, drawn like rust-canton-toolbox's
+    /// event-graph-ui: transactions in columns, their events as trees under
+    /// them, and parties above. See `canton`.
+    Canton,
+}
+
+impl Visualization {
+    pub const ALL: [Visualization; 2] = [Visualization::Standard, Visualization::Canton];
+}
+
+impl std::fmt::Display for Visualization {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Visualization::Standard => "Standard",
+            Visualization::Canton => "Canton event graph",
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -151,7 +179,12 @@ impl Default for DatabaseConfig {
 
 impl Default for GraphConfig {
     fn default() -> Self {
-        GraphConfig { max_records_per_table: 1000, max_result_records: 2000, connect_results: false }
+        GraphConfig {
+            max_records_per_table: 1000,
+            max_result_records: 2000,
+            connect_results: false,
+            visualization: Visualization::Standard,
+        }
     }
 }
 

@@ -1,6 +1,7 @@
 //! The iced desktop app: window, sidebar, settings, query panel, graph canvas and layout.
 
 mod app;
+mod canton_draw;
 mod canvas;
 mod layout;
 mod model;
