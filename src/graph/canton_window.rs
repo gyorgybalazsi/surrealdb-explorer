@@ -92,7 +92,16 @@ pub async fn load_window(db: &Database, window: Window, other_limit: usize, limi
 /// The lowest and highest offset of the transactions in `window`.
 async fn offset_range(db: &Database, window: Window) -> surrealdb::Result<Option<(i64, i64)>> {
     let (sql, a, n) = match window {
-        Window::Range(from, to) => return Ok(Some((from.min(to), from.max(to)))),
+        Window::Range(from, to) => {
+            // The offsets actually there, so an open end shows a real number.
+            let sql = "SELECT VALUE offset FROM transaction WHERE offset >= $a AND offset <= $b ORDER BY offset ASC LIMIT 1;
+                       SELECT VALUE offset FROM transaction WHERE offset >= $a AND offset <= $b ORDER BY offset DESC LIMIT 1;";
+            let mut res = db.query(sql).bind(("a", from.min(to))).bind(("b", from.max(to))).await?;
+            let first: Vec<Value> = res.take(0)?;
+            let last: Vec<Value> = res.take(1)?;
+            let get = |v: Vec<Value>| v.into_iter().next().and_then(|v| v.into_json_value().as_i64());
+            return Ok(get(first).zip(get(last)));
+        }
         Window::Latest(n) => ("SELECT VALUE offset FROM transaction ORDER BY offset DESC LIMIT $n", 0, n),
         Window::Before(o, n) => ("SELECT VALUE offset FROM transaction WHERE offset < $a ORDER BY offset DESC LIMIT $n", o, n),
         Window::After(o, n) => ("SELECT VALUE offset FROM transaction WHERE offset > $a ORDER BY offset ASC LIMIT $n", o, n),

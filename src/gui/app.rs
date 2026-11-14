@@ -91,6 +91,8 @@ pub enum Message {
     ShowOverview,
     /// Loads another window of transactions in the Canton view.
     CantonPage(graph::CantonWindow),
+    /// The text typed in the "latest n transactions" box.
+    CantonCount(String),
     /// Turns zooming to fit after each filter change on or off (and remembers it).
     ToggleFitOnFilter(bool),
     /// Draws the whole database even though it's bigger than `overview_above`.
@@ -216,9 +218,16 @@ pub struct App {
     /// Which transactions the Canton view loads, and the offsets it got.
     pub(super) canton_window: graph::CantonWindow,
     pub(super) canton_offsets: Option<(i64, i64)>,
+    /// The "latest n transactions" box as typed; also the step for Older / Newer.
+    pub(super) canton_count: String,
 }
 
 impl App {
+    /// How many transactions "Latest", "Older" and "Newer" load.
+    pub(super) fn canton_n(&self) -> usize {
+        self.canton_count.parse().unwrap_or(self.config.graph.canton_transactions)
+    }
+
     /// `startup_error` is a problem found before the window opened (such as
     /// an invalid config file), shown in the sidebar.
     pub fn boot(config: Config, startup_error: Option<String>, log: Option<LogControl>) -> App {
@@ -283,6 +292,7 @@ impl App {
             overview: false,
             canton_window: graph::CantonWindow::Latest(config_canton_transactions),
             canton_offsets: None,
+            canton_count: config_canton_transactions.to_string(),
         };
         app.apply_visualization();
         if app.canton() {
@@ -477,6 +487,11 @@ impl App {
                 }
                 if on && self.canton() {
                     self.fit_view();
+                }
+            }
+            Message::CantonCount(text) => {
+                if text.trim().is_empty() || text.trim().parse::<usize>().is_ok_and(|n| n > 0) {
+                    self.canton_count = text.trim().to_string();
                 }
             }
             Message::CantonPage(window) => {
@@ -1024,6 +1039,12 @@ impl App {
 
 
         let graph_changed = new.graph != old.graph;
+        if let graph::CantonWindow::Latest(_) = self.canton_window {
+            self.canton_window = graph::CantonWindow::Latest(new.graph.canton_transactions);
+        }
+        if new.graph.canton_transactions != old.graph.canton_transactions {
+            self.canton_count = new.graph.canton_transactions.to_string();
+        }
         self.config.graph = new.graph.clone();
         if database_changed || graph_changed {
             self.reload();
