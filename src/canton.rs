@@ -425,6 +425,10 @@ pub struct Filters {
     pub template: Option<String>,
     pub status: StatusFilter,
     pub search: String,
+    /// The offsets to show, both ends included. A record with no offset,
+    /// such as a party, is not filtered by it.
+    pub offset_from: Option<i64>,
+    pub offset_to: Option<i64>,
 }
 
 impl Default for Filters {
@@ -436,6 +440,8 @@ impl Default for Filters {
             template: None,
             status: StatusFilter::All,
             search: String::new(),
+            offset_from: None,
+            offset_to: None,
         }
     }
 }
@@ -516,6 +522,14 @@ pub fn visible(m: &Model, filters: &Filters) -> Vec<bool> {
             && filters.kinds.contains(&m.kinds[r])
         {
             keep[r] = true;
+        }
+    }
+    // An offset range drops whole trees: every event carries its root's offset.
+    for (i, k) in keep.iter_mut().enumerate() {
+        if let Some(o) = m.facts[i].offset
+            && (filters.offset_from.is_some_and(|from| o < from) || filters.offset_to.is_some_and(|to| o > to))
+        {
+            *k = false;
         }
     }
     keep

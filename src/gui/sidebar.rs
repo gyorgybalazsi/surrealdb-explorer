@@ -243,7 +243,7 @@ impl std::fmt::Display for Choice {
 
 impl App {
     /// The Canton view's filters, as alt-canton's explorer has them: node
-    /// kinds, party, template, contract status and a search.
+    /// kinds, party, template, contract status, an offset range and a search.
     fn canton_filters_view(&self) -> Element<'_, Message> {
         let f = &self.canton_filters;
         let model = self.graph.canton_model();
@@ -334,6 +334,19 @@ impl App {
                 status("archived", StatusFilter::Archived)
             ]
             .spacing(2),
+        );
+
+        col = col.push(heading("Offset"));
+        let from = f.offset_from.map(|o| o.to_string()).unwrap_or_default();
+        let to = f.offset_to.map(|o| o.to_string()).unwrap_or_default();
+        col = col.push(
+            row![
+                text_input("from", &from).on_input(|t| Message::CantonFilter(F::OffsetFrom(t))).size(13),
+                text("–").size(13),
+                text_input("to", &to).on_input(|t| Message::CantonFilter(F::OffsetTo(t))).size(13),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center),
         );
 
         col = col.push(heading("Search"));

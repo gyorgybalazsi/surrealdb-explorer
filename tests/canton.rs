@@ -156,6 +156,28 @@ fn filters_keep_a_match_with_its_transaction() {
         ["created:00c1a5b2", "created:00c3c7d4", "exercised:[3, 1]", "transaction:1", "transaction:3"]
     );
 
+    // An offset range keeps whole transactions, trees included; with no end it is open.
+    let range = Filters { offset_from: Some(3), offset_to: Some(4), ..Filters::default() };
+    assert_eq!(
+        shown(&range),
+        [
+            "created:00c3c7d4",
+            "created:00c4d8e5",
+            "created:00c5e9f6",
+            "exercised:[3, 0]",
+            "exercised:[3, 1]",
+            "exercised:[4, 0]",
+            "transaction:3",
+            "transaction:4"
+        ]
+    );
+    let from_five = Filters { offset_from: Some(5), ..Filters::default() };
+    assert_eq!(shown(&from_five), ["exercised:[5, 0]", "transaction:5"]);
+    // Parties carry no offset, so the range leaves them alone.
+    let mut parties = Filters { offset_from: Some(5), ..Filters::default() };
+    parties.kinds.insert(NodeKind::Party);
+    assert!(shown(&parties).contains(&"party:`Bank::1220f3a9c1d2`".to_string()));
+
     let carol = Filters { party: Some("Carol::1220d2a6b3c7".into()), ..Filters::default() };
     assert!(shown(&carol).contains(&"exercised:[5, 0]".to_string()));
     assert!(!shown(&carol).contains(&"transaction:1".to_string()));

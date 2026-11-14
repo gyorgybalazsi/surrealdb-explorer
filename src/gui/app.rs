@@ -57,6 +57,9 @@ pub enum CantonFilterChange {
     Template(Option<String>),
     Status(StatusFilter),
     Search(String),
+    /// The text typed in the "from" or "to" offset box.
+    OffsetFrom(String),
+    OffsetTo(String),
     Reset,
 }
 
@@ -359,6 +362,8 @@ impl App {
                     CantonFilterChange::Template(t) => f.template = t,
                     CantonFilterChange::Status(st) => f.status = st,
                     CantonFilterChange::Search(text) => f.search = text,
+                    CantonFilterChange::OffsetFrom(text) => f.offset_from = parse_offset(&text, f.offset_from),
+                    CantonFilterChange::OffsetTo(text) => f.offset_to = parse_offset(&text, f.offset_to),
                     CantonFilterChange::Reset => *f = Filters::default(),
                 }
                 // Filtering keeps the view where it is, as in the explorer.
@@ -990,4 +995,15 @@ async fn pick_files() -> Vec<Result<Attachment, String>> {
         picked.push(Attachment::from_bytes(&name, file.read().await));
     }
     picked
+}
+
+/// An offset box's value: empty clears it, digits set it, and anything else
+/// keeps what was there, so a stray key does not drop the filter.
+fn parse_offset(text: &str, old: Option<i64>) -> Option<i64> {
+    let text = text.trim();
+    if text.is_empty() {
+        None
+    } else {
+        text.parse().ok().or(old)
+    }
 }
