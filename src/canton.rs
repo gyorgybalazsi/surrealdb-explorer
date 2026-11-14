@@ -275,7 +275,9 @@ impl Model {
             kind: Some(kind),
             // The toolbox's indexer names the domain `synchronizer_id`.
             domain: self.str_prop(i, "domain").or_else(|| self.str_prop(i, "synchronizer_id")).map(str::to_string),
-            offset: int_of(data, "offset"),
+            // The syncer gives contracts from the active contract set offset
+            // -1: they have no place in the ledger's history.
+            offset: int_of(data, "offset").filter(|&o| o >= 0),
             parties,
             title: kind.name().to_string(),
             ..Facts::default()

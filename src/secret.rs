@@ -33,15 +33,15 @@ pub fn read_1password(reference: &str) -> Result<String, Error> {
                     .into());
             }
             if message.contains("authorization prompt dismissed") {
-                return Err("Reading the API key from 1Password was declined.".into());
+                return Err("Reading the secret from 1Password was declined.".into());
             }
             return Err(format!("1Password could not read {reference}: {message}").into());
         }
-        let key = String::from_utf8(output.stdout)?.trim().to_string();
-        if key.is_empty() {
+        let secret = String::from_utf8(output.stdout)?.trim().to_string();
+        if secret.is_empty() {
             return Err(format!("{reference} is empty in 1Password").into());
         }
-        return Ok(key);
+        return Ok(secret);
     }
     Err("The 1Password command-line tool (op) isn't installed. Install it with \
          `brew install --cask 1password-cli`."

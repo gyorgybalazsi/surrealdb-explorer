@@ -1,6 +1,6 @@
 //! The graph as the GUI keeps it: records with positions, colours and labels.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use iced::{Color, Vector};
 use surrealdb_explorer::canton::{self, Filters, Model, ModelEdge, ModelNode, NodeKind, Status};
@@ -77,6 +77,16 @@ pub struct Graph {
     pub dangling_edges: usize,
     /// The Canton view's band headers, in graph space.
     pub bands: Vec<(String, Vector)>,
+    /// What the Canton view's sidebar lists, as of the last Canton layout.
+    pub canton_summary: CantonSummary,
+}
+
+/// The kinds, parties and templates in the Canton event graph.
+#[derive(Default)]
+pub struct CantonSummary {
+    pub counts: BTreeMap<NodeKind, usize>,
+    pub parties: BTreeSet<String>,
+    pub templates: BTreeSet<String>,
 }
 
 impl Graph {
@@ -179,6 +189,7 @@ impl Graph {
             tables,
             truncated: data.truncated,
             bands: Vec::new(),
+            canton_summary: CantonSummary::default(),
         }
     }
 
@@ -222,15 +233,33 @@ impl Graph {
     }
 
     /// Lays the records out as alt-canton's ledger explorer does (see
-    /// `canton::layout`): the records `filters` keeps and that aren't hidden,
-    /// with columns wrapping past `wrap` units. Positions are card centres.
-    pub fn canton_layout(&mut self, filters: &Filters, wrap: f32) {
+    /// `canton::layout`): the records `filters` keeps and that aren't hidden.
+    /// They are first laid out on one line, and `wrap` picks, from that
+    /// line's width and height, the width the columns then wrap at.
+    /// Positions are card centres.
+    pub fn canton_layout(&mut self, filters: &Filters, wrap: impl FnOnce(f32, f32) -> f32) {
+        // The model reads every record, so it is built once per layout, and
+        // what the sidebar lists from it is kept rather than rebuilt per frame.
         let model = self.canton_model();
+        self.canton_summary = CantonSummary { counts: model.counts(), parties: model.parties(), templates: model.templates() };
         let mut keep = canton::visible(&model, filters);
         for (k, n) in keep.iter_mut().zip(&self.nodes) {
             *k &= !n.hidden;
         }
-        let layout = canton::layout(&model, &keep, wrap);
+        let one_line = canton::layout(&model, &keep, f32::MAX);
+        // Measured to a card's centre plus a whole card, as the wrap was tuned with.
+        let (width, height) = one_line
+            .pos
+            .iter()
+            .flatten()
+            .fold((0.0_f32, 0.0_f32), |(w, h), &(x, y)| {
+                (w.max(x + 1.5 * canton::NODE_W), h.max(y + 1.5 * canton::NODE_H))
+            });
+        let layout = if width > 0.0 && height > 0.0 {
+            canton::layout(&model, &keep, wrap(width, height))
+        } else {
+            one_line
+        };
         let half = Vector::new(canton::NODE_W / 2.0, canton::NODE_H / 2.0);
         for (i, n) in self.nodes.iter_mut().enumerate() {
             let f = &model.facts[i];

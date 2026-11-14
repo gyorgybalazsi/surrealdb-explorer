@@ -132,7 +132,12 @@ impl App {
                 button(text("Reload").size(13)).on_press(Message::Reload),
                 button(text("Tables").size(13))
                     .style(button::secondary)
-                    .on_press_maybe((!self.overview && self.db.is_some()).then_some(Message::ShowOverview)),
+                    // The Canton view draws transactions and events only; its
+                    // canvas would be empty with the tables in it.
+                    .on_press_maybe(
+                        (!self.overview && self.db.is_some() && visualization_is_standard(self))
+                            .then_some(Message::ShowOverview),
+                    ),
                 checkbox(self.config.graph.auto_refresh)
                     .label("Auto refresh")
                     .on_toggle(Message::ToggleAutoRefresh)
@@ -268,6 +273,10 @@ impl App {
     }
 }
 
+fn visualization_is_standard(app: &App) -> bool {
+    app.config.graph.visualization == Visualization::Standard
+}
+
 pub(super) fn bold() -> Font {
     Font { weight: iced::font::Weight::Bold, ..Font::default() }
 }
@@ -329,8 +338,8 @@ impl App {
     /// kinds, party, template, contract status, an offset range and a search.
     fn canton_filters_view(&self) -> Element<'_, Message> {
         let f = &self.canton_filters;
-        let model = self.graph.canton_model();
-        let counts = model.counts();
+        let summary = &self.graph.canton_summary;
+        let counts = &summary.counts;
         let mut col = Column::new().spacing(5);
 
         col = col.push(heading("Node kinds"));
@@ -387,14 +396,14 @@ impl App {
         };
         let parties = choices(
             "any party",
-            model.parties().into_iter().map(|p| (p.clone(), canton::ellipsize(&p, 34))).collect(),
+            summary.parties.iter().map(|p| (p.clone(), canton::ellipsize(p, 34))).collect(),
         );
         let party = parties.iter().find(|c| c.value == f.party).cloned();
         col = col.push(heading("Party"));
         col = col.push(
             pick_list(parties, party, |c: Choice| Message::CantonFilter(F::Party(c.value))).text_size(13).width(Fill),
         );
-        let templates = choices("any template", model.templates().into_iter().map(|t| (t.clone(), t)).collect());
+        let templates = choices("any template", summary.templates.iter().map(|t| (t.clone(), t.clone())).collect());
         let template = templates.iter().find(|c| c.value == f.template).cloned();
         col = col.push(heading("Template"));
         col = col.push(
@@ -477,6 +486,17 @@ impl App {
             None => "No transactions loaded.".to_string(),
         };
         col = col.push(text(loaded).size(12).color(MUTED));
+        if self.canton_left_out > 0 {
+            col = col.push(
+                text(format!(
+                    "{} of this window weren't drawn: it has more than {} (Settings → max records in a query result). Load fewer transactions, or raise the limit.",
+                    plural(self.canton_left_out, "record"),
+                    self.config.graph.max_result_records
+                ))
+                .size(12)
+                .color(WARNING),
+            );
+        }
 
         col = col.push(heading("Search"));
         col = col.push(

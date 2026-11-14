@@ -199,3 +199,21 @@ fn records_outside_the_event_graph_go_in_a_band_underneath() {
     assert_eq!(b.0 - a.0, NODE_W + 40.0);
     assert_eq!(l.bands.last().unwrap().0, "other records");
 }
+
+/// The syncer stores contracts from the active contract set with offset -1:
+/// they have no offset, so an offset range doesn't hide them.
+#[test]
+fn contracts_from_the_active_set_have_no_offset() {
+    let data = [
+        serde_json::json!({ "offset": 7 }),
+        serde_json::json!({ "offset": -1, "from_acs": true, "template_name": "Main.Cash" }),
+    ];
+    let nodes = [
+        ModelNode { kind: NodeKind::Transaction, data: &data[0], name: "transaction:7" },
+        ModelNode { kind: NodeKind::Created, data: &data[1], name: "created:acs" },
+    ];
+    let m = Model::new(&nodes, Vec::new());
+    assert_eq!(m.facts[1].offset, None);
+    let range = Filters { offset_from: Some(5), ..Filters::default() };
+    assert_eq!(canton::visible(&m, &range), [true, true]);
+}

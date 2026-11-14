@@ -137,13 +137,16 @@ impl Explorer {
         in the app.")]
     async fn query(&self, Parameters(QueryRequest { query }): Parameters<QueryRequest>) -> Result<CallToolResult, McpError> {
         refuse_use(&query)?;
-        let db = self.shared.database()?;
+        self.shared.database()?;
         let writes = !is_read_only(&query);
         if writes && !self.approved(&query).await {
             return Ok(CallToolResult::error(vec![ContentBlock::text(
                 "The user didn't allow this query to change data, so it didn't run.",
             )]));
         }
+        // Taken after the approval: the user may have switched databases while
+        // deciding, and the write goes where they were looking when they allowed it.
+        let db = self.shared.database()?;
         let outcome = query::run(&db, query).await;
         if writes {
             let _ = self.shared.to_window.send(WindowCommand::DataChanged);
