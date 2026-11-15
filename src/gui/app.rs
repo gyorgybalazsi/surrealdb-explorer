@@ -107,8 +107,8 @@ pub enum Message {
     ToggleAutoRefresh(bool),
     /// Time for auto refresh to look for changes in the database.
     CheckForChanges,
-    /// How many records each table has now.
-    Counted(Result<Vec<(String, i64)>, String>),
+    /// A fingerprint of what the view shows, to compare with the last one.
+    Checked(Result<serde_json::Value, String>),
     /// Switches how the graph is drawn (and remembers it).
     SetVisualization(Visualization),
     /// Fits the whole graph in view.
@@ -207,11 +207,11 @@ pub struct App {
     pub(super) canvas_size: iced::Size,
     /// What the Canton view shows.
     pub(super) canton_filters: Filters,
-    /// How many records each table had when the graph was last loaded, for
-    /// auto refresh; `None` until the first check after a load.
-    record_counts: Option<Vec<(String, i64)>>,
-    /// Auto refresh is counting records.
-    counting: bool,
+    /// The database's fingerprint when the graph was last loaded, for auto
+    /// refresh; `None` until the first check after a load.
+    change_marker: Option<serde_json::Value>,
+    /// Auto refresh is checking the database.
+    checking: bool,
     /// The camera follows the standard layout while it settles.
     following: bool,
     /// The graph shows the database's tables, not its records.
@@ -289,8 +289,8 @@ impl App {
             data_busy: false,
             canvas_size: iced::Size::new(880.0, 760.0),
             canton_filters: Filters::default(),
-            record_counts: None,
-            counting: false,
+            change_marker: None,
+            checking: false,
             following: true,
             overview: false,
             canton_window: graph::CantonWindow::Latest(config_canton_transactions),
@@ -453,28 +453,28 @@ impl App {
             Message::ToggleAutoRefresh(on) => {
                 info!(on, "auto refresh changed");
                 self.config.graph.auto_refresh = on;
-                self.record_counts = None;
+                self.change_marker = None;
                 if let Err(e) = self.config.save() {
                     warn!(error = %e, "could not save the setting");
                 }
             }
-            Message::CheckForChanges => return self.count_records(),
-            Message::Counted(result) => {
-                self.counting = false;
+            Message::CheckForChanges => return self.check_for_changes(),
+            Message::Checked(result) => {
+                self.checking = false;
                 match result {
                     // Only act on the answer if auto refresh is still wanted:
                     // a query result may have been drawn meanwhile.
-                    Ok(counts) if self.auto_refresh_running() => match &self.record_counts {
-                        Some(previous) if *previous != counts => {
+                    Ok(marker) if self.auto_refresh_running() => match &self.change_marker {
+                        Some(previous) if *previous != marker => {
                             debug!("the database changed; refreshing the graph");
                             self.refresh();
-                            self.record_counts = Some(counts);
+                            self.change_marker = Some(marker);
                         }
                         Some(_) => {}
-                        None => self.record_counts = Some(counts),
+                        None => self.change_marker = Some(marker),
                     },
                     Ok(_) => {}
-                    Err(e) => debug!(error = %e, "auto refresh could not count the records"),
+                    Err(e) => debug!(error = %e, "auto refresh could not check the database"),
                 }
             }
             Message::SetVisualization(v) => {
@@ -785,7 +785,7 @@ impl App {
         if self.db.is_none() {
             return;
         }
-        self.record_counts = None;
+        self.change_marker = None;
         match self.fetch_graph() {
             Ok(data) => {
                 self.graph = Graph::new(data, Some(&self.graph));
@@ -829,20 +829,26 @@ impl App {
         self.config.graph.auto_refresh && self.db.is_some() && self.result_view.is_none() && !self.overview
     }
 
-    /// Counts the records in the background, for auto refresh.
-    fn count_records(&mut self) -> Task<Message> {
+    /// Reads a fingerprint of what the view shows in the background, for
+    /// auto refresh (see `graph::change_marker`).
+    fn check_for_changes(&mut self) -> Task<Message> {
         let Some(db) = self.db.clone() else { return Task::none() };
         // Skip a check while the user is moving things or one is still running.
-        if self.counting || self.dragging.is_some() || self.menu.is_some() || self.data_busy {
+        if self.checking || self.dragging.is_some() || self.menu.is_some() || self.data_busy {
             return Task::none();
         }
-        self.counting = true;
+        self.checking = true;
+        let watch = if self.canton() {
+            graph::Watch::Canton
+        } else {
+            graph::Watch::Tables { per_table: self.config.graph.max_records_per_table }
+        };
         let handle = self.runtime.spawn(async move {
-            graph::record_counts(&db).await.map_err(|e| e.to_string())
+            graph::change_marker(&db, watch).await.map_err(|e| e.to_string())
         });
         Task::perform(
             async move { handle.await.unwrap_or_else(|e| Err(format!("the task failed: {e}"))) },
-            Message::Counted,
+            Message::Checked,
         )
     }
 

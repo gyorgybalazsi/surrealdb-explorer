@@ -151,3 +151,64 @@ fn namespace_and_database_users_sign_in() {
         }
     });
 }
+
+/// A database user can't remove its own database, so erasing removes what's
+/// in it instead, and keeps the user it signed in with.
+#[test]
+fn a_database_user_erases_its_database() {
+    let port = 18_767;
+    let Some(_server) = start_server(port) else {
+        eprintln!("skipped: the surreal program isn't installed");
+        return;
+    };
+    let root = DatabaseConfig {
+        connection: Connection::Server,
+        server: format!("ws://127.0.0.1:{port}"),
+        username: "root".into(),
+        password: "secret".into(),
+        namespace: "canton".into(),
+        database: "event_graph".into(),
+        ..DatabaseConfig::default()
+    };
+    let owner = DatabaseConfig {
+        username: "syncer".into(),
+        password: "syncer-pass".into(),
+        user_level: UserLevel::Database,
+        ..root.clone()
+    };
+
+    common::run(async move {
+        let admin = db::connect(&root).await.unwrap();
+        admin
+            .query(
+                "DEFINE NAMESPACE IF NOT EXISTS canton; USE NS canton; \
+                 DEFINE DATABASE IF NOT EXISTS event_graph; USE DB event_graph; \
+                 DEFINE USER syncer ON DATABASE PASSWORD 'syncer-pass' ROLES OWNER; \
+                 DEFINE FUNCTION fn::canton::latest() { RETURN 1 }; DEFINE PARAM $limit VALUE 5;",
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let syncer = db::connect(&owner).await.unwrap();
+        data::load_canton_sample(&syncer).await.unwrap();
+        assert!(!graph::load(&syncer, 1000).await.unwrap().nodes.is_empty());
+
+        data::erase(&syncer, &owner).await.unwrap();
+        let info = query::run(&syncer, "INFO FOR DB".into()).await.statements.unwrap().remove(0).result.unwrap();
+        for kind in ["tables", "functions", "params"] {
+            assert_eq!(info[kind], serde_json::json!({}), "{kind} left: {info}");
+        }
+        assert!(info["users"].get("syncer").is_some(), "the user signing in stays: {info}");
+
+        // It can still sign in and use the empty database.
+        db::close(syncer).await.unwrap();
+        let again = db::connect(&owner).await.unwrap();
+        assert!(graph::load(&again, 1000).await.unwrap().nodes.is_empty());
+
+        for c in [admin, again] {
+            db::close(c).await.unwrap();
+        }
+    });
+}
