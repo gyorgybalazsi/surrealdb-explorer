@@ -19,28 +19,56 @@ use surrealdb::types::Value;
 
 use crate::db::Database;
 
-/// How many records each table has, in table order. A cheap check of
-/// whether the graph is out of date: it changes when records are added or
-/// removed, not when a record's fields change.
-pub async fn record_counts(db: &Database) -> surrealdb::Result<Vec<(String, i64)>> {
+/// What auto refresh watches for changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Watch {
+    /// The records the whole-database view draws: the first `per_table`
+    /// (and one more, to see a table go over the limit) of each table.
+    Tables { per_table: usize },
+    /// A Canton ledger written by the syncer, or another indexer.
+    Canton,
+}
+
+/// A cheap fingerprint of what `watch` covers: it changes when records are
+/// added or removed, not when a record's fields change. Its cost doesn't grow
+/// with the size of the database:
+///
+/// - for tables, only the ids of the records the view draws are read;
+/// - for a Canton ledger, the syncer's `sync_state` (which it updates with
+///   every batch) is read, or else the newest transaction's offset.
+pub async fn change_marker(db: &Database, watch: Watch) -> surrealdb::Result<serde_json::Value> {
     let tables = tables::list(db).await?;
-    if tables.is_empty() {
-        return Ok(Vec::new());
-    }
-    let sql: String = (0..tables.len())
-        .map(|i| format!("SELECT VALUE count() FROM type::table($t{i}) GROUP ALL;"))
-        .collect();
-    let mut query = db.query(sql);
-    for (i, table) in tables.iter().enumerate() {
-        query = query.bind((format!("t{i}"), table.name.clone()));
-    }
-    let mut response = query.await?;
-    let mut counts = Vec::with_capacity(tables.len());
-    for (i, table) in tables.into_iter().enumerate() {
-        let n: Vec<i64> = response.take(i)?;
-        counts.push((table.name, n.first().copied().unwrap_or(0)));
-    }
-    Ok(counts)
+    let names: Vec<String> = tables.iter().map(|t| t.name.clone()).collect();
+    let has = |name: &str| names.iter().any(|t| t == name);
+    let marker: Value = match watch {
+        Watch::Canton if has("sync_state") => db.query("SELECT * FROM sync_state").await?.take(0)?,
+        Watch::Canton if has("transaction") => db
+            .query("SELECT VALUE offset FROM transaction ORDER BY offset DESC LIMIT 1")
+            .await?
+            .take(0)?,
+        Watch::Canton => Value::None,
+        Watch::Tables { per_table } => {
+            if tables.is_empty() {
+                Value::None
+            } else {
+                let sql: String = (0..tables.len())
+                    .map(|i| format!("RETURN crypto::sha256(<string> (SELECT VALUE id FROM type::table($t{i}) LIMIT $n));"))
+                    .collect();
+                let mut query = db.query(sql).bind(("n", per_table as i64 + 1));
+                for (i, table) in tables.iter().enumerate() {
+                    query = query.bind((format!("t{i}"), table.name.clone()));
+                }
+                let mut response = query.await?;
+                let mut hashes = Vec::with_capacity(tables.len());
+                for i in 0..tables.len() {
+                    hashes.push(response.take::<Value>(i)?.into_json_value());
+                }
+                return Ok(serde_json::json!({ "tables": names, "ids": hashes }));
+            }
+        }
+    };
+    // A table added or removed counts as a change too.
+    Ok(serde_json::json!({ "tables": names, "marker": marker.into_json_value() }))
 }
 
 /// Loads every table in the database as graph data, at most
