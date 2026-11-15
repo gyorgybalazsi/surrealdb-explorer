@@ -26,6 +26,6 @@ pub struct GraphEdge {
 pub struct GraphData {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
-    /// Tables that had more than `MAX_PER_TABLE` records.
+    /// Tables that had more records than the per-table limit.
     pub truncated: Vec<String>,
 }

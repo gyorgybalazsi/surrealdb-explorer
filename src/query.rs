@@ -81,12 +81,37 @@ pub fn record_ids(outcome: &QueryOutcome) -> Vec<String> {
 }
 
 /// Whether `query` only reads: it has none of the statements that change
-/// data or definitions. Cautious: a field named like a keyword also counts.
+/// data or definitions, and calls no custom function (`fn::…`), whose body
+/// may change data. Cautious: a field named like a keyword also counts.
 pub fn is_read_only(query: &str) -> bool {
     !has_word(
         query,
-        &["CREATE", "UPDATE", "UPSERT", "DELETE", "RELATE", "INSERT", "DEFINE", "REMOVE", "ALTER", "REBUILD", "KILL", "LIVE"],
+        &[
+            "CREATE", "UPDATE", "UPSERT", "DELETE", "RELATE", "INSERT", "DEFINE", "REMOVE", "ALTER", "REBUILD", "KILL",
+            "LIVE", "ACCESS",
+        ],
     ) && !has_transaction_statements(query)
+        && !calls_custom_function(query)
+}
+
+/// `fn::name(…)`, in any case and with spaces around the `::`.
+fn calls_custom_function(query: &str) -> bool {
+    // Drop the spaces next to colons, so `fn :: name` reads as `fn::name`.
+    let chars: Vec<char> = query.to_ascii_lowercase().chars().collect();
+    let mut squeezed = String::with_capacity(chars.len());
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_whitespace() {
+            let next = chars[i..].iter().find(|c| !c.is_whitespace());
+            if squeezed.ends_with(':') || next == Some(&':') {
+                continue;
+            }
+        }
+        squeezed.push(c);
+    }
+    let bytes = squeezed.as_bytes();
+    squeezed
+        .match_indices("fn::")
+        .any(|(i, _)| i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_'))
 }
 
 fn has_transaction_statements(query: &str) -> bool {
@@ -115,5 +140,15 @@ mod tests {
         assert!(is_read_only("SELECT * FROM knows WHERE out = person:bob; SELECT updated_at FROM person"));
         assert!(!is_read_only("SELECT * FROM person; DELETE person:bob"));
         assert!(!is_read_only("relate person:a->knows->person:b"));
+    }
+
+    #[test]
+    fn custom_functions_may_change_data() {
+        assert!(!is_read_only("RETURN fn::wipe()"));
+        assert!(!is_read_only("SELECT fn::wipe() FROM ONLY {}"));
+        assert!(!is_read_only("SELECT *, fn :: score(id) FROM person"));
+        assert!(!is_read_only("ACCESS account GRANT FOR USER tobie"));
+        assert!(is_read_only("SELECT string::len(name), array::len(->knows) FROM person"));
+        assert!(is_read_only("SELECT * FROM person WHERE myfn::x = 1"));
     }
 }

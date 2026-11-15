@@ -48,6 +48,13 @@ fn a_window_holds_its_transactions_and_their_events() {
         let before = load_canton_window(&db, CantonWindow::Before(lo, 1), 100, 5000).await.unwrap();
         assert_eq!(txs(&before), vec![every[every.len() - 3]]);
 
+        // Over the limit, the transactions are kept and their events, parties
+        // and other records are left out first.
+        let tight = load_canton_window(&db, CantonWindow::Latest(1000), 100, every.len()).await.unwrap();
+        assert_eq!(txs(&tight), every);
+        assert_eq!(tight.data.nodes.len(), every.len());
+        assert!(tight.left_out > 0);
+
         // A range.
         let range = load_canton_window(&db, CantonWindow::Range(every[0], every[1]), 100, 5000).await.unwrap();
         assert_eq!(txs(&range), every[..2].to_vec());

@@ -43,7 +43,11 @@ pub async fn load_window(db: &Database, window: Window, other_limit: usize, limi
 
     let offsets = if has("transaction") { offset_range(db, window).await? } else { None };
 
-    let mut ids: Vec<String> = Vec::new();
+    // Collected by kind, so when there are more than `limit` records the
+    // ones left out are the least important: the transactions and their
+    // events first, then the earlier contracts they act on, then parties and
+    // other tables.
+    let (mut roots, mut events, mut parties, mut others) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for t in tables.iter().filter(|t| !t.is_relation) {
         let kind = NodeKind::from_table(&t.name);
         let rows: Vec<Value> = match (kind, offsets) {
@@ -63,8 +67,16 @@ pub async fn load_window(db: &Database, window: Window, other_limit: usize, limi
                 .take(0)?,
             (_, None) => Vec::new(),
         };
-        ids.extend(strings(rows));
+        let bucket = match kind {
+            NodeKind::Transaction | NodeKind::Reassignment | NodeKind::Topology => &mut roots,
+            NodeKind::Party => &mut parties,
+            NodeKind::Other => &mut others,
+            _ => &mut events,
+        };
+        bucket.extend(strings(rows));
     }
+    let mut ids: Vec<String> = roots;
+    ids.append(&mut events);
 
     // Contracts created before the window (or loaded from the ACS) that its
     // events exercise or archive.
@@ -78,12 +90,14 @@ pub async fn load_window(db: &Database, window: Window, other_limit: usize, limi
             .bind(("ids", ids.clone()))
             .await?
             .take(1)?;
-        for id in strings(rows) {
-            if !ids.contains(&id) {
-                ids.push(id);
-            }
-        }
+        let have: std::collections::HashSet<String> = ids.iter().cloned().collect();
+        let mut earlier: Vec<String> = strings(rows).into_iter().filter(|id| !have.contains(id)).collect();
+        earlier.sort();
+        earlier.dedup();
+        ids.append(&mut earlier);
     }
+    ids.append(&mut parties);
+    ids.append(&mut others);
 
     let result = load_result(db, &ids, &[], limit, true).await?;
     Ok(Loaded { data: result.data, offsets, left_out: result.left_out })

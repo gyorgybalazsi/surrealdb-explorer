@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use iced::widget::{button, canvas, column, container, pin, row, rule, stack, text, text_editor};
+use iced::widget::{button, canvas, column, container, pin, row, rule, scrollable, stack, text, text_editor};
 use iced::{Color, Element, Fill, Font, Point, Subscription, Task, Theme, Vector, window};
 use surrealdb_explorer::canton::{self, Filters, NodeKind, StatusFilter};
 use surrealdb_explorer::config::{Config, Connection, UserLevel, Visualization};
@@ -219,6 +219,8 @@ pub struct App {
     /// Which transactions the Canton view loads, and the offsets it got.
     pub(super) canton_window: graph::CantonWindow,
     pub(super) canton_offsets: Option<(i64, i64)>,
+    /// Records of the loaded window left out because of `max_result_records`.
+    pub(super) canton_left_out: usize,
     /// The "latest n transactions" box as typed; also the step for Older / Newer.
     pub(super) canton_count: String,
 }
@@ -293,6 +295,7 @@ impl App {
             overview: false,
             canton_window: graph::CantonWindow::Latest(config_canton_transactions),
             canton_offsets: None,
+            canton_left_out: 0,
             canton_count: config_canton_transactions.to_string(),
         };
         app.apply_visualization();
@@ -339,13 +342,19 @@ impl App {
             }
             Message::Hover(hover) => self.hover = hover,
             Message::Select(selection) => {
-                self.selection = selection;
+                // The canvas may still point at a record of a graph that was
+                // replaced meanwhile (by auto refresh or Claude Code).
+                self.selection = selection.filter(|s| match *s {
+                    Selection::Node(n) => n < self.graph.nodes.len(),
+                    Selection::Edge(e) => e < self.graph.edges.len(),
+                });
                 self.menu = None;
             }
             Message::DragNode(node, pos) => {
+                let Some(n) = self.graph.nodes.get_mut(node) else { return Task::none() };
+                n.pos = pos;
                 self.following = false;
                 self.dragging = Some(node);
-                self.graph.nodes[node].pos = pos;
                 self.layout.reheat(0.3);
             }
             Message::DragEnd => self.dragging = None,
@@ -496,8 +505,20 @@ impl App {
                 }
             }
             Message::CantonPage(window) => {
-                self.canton_window = window;
+                let previous = std::mem::replace(&mut self.canton_window, window);
+                let loaded_before = self.canton_offsets.is_some();
                 self.load_everything();
+                // Paging past either end would leave an empty view with both
+                // paging buttons off: stay on the transactions shown instead.
+                let paging = matches!(window, graph::CantonWindow::Before(..) | graph::CantonWindow::After(..));
+                if paging && loaded_before && self.canton_offsets.is_none() && self.error.is_none() {
+                    self.canton_window = previous;
+                    self.load_everything();
+                    self.notice = Some(match window {
+                        graph::CantonWindow::Before(..) => "There are no older transactions.".into(),
+                        _ => "There are no newer transactions yet.".into(),
+                    });
+                }
                 self.relayout_canton();
             }
             Message::FitView => self.fit_view(),
@@ -639,14 +660,17 @@ impl App {
                 self.data_busy = false;
                 match result {
                     Ok(()) => {
-                        self.reload();
-                        if action == DataAction::LoadCantonSample {
+                        // Switch to the Canton view first, so the reload reads
+                        // a window of transactions rather than every table.
+                        if action == DataAction::LoadCantonSample && !self.canton() {
                             self.config.graph.visualization = Visualization::Canton;
                             if let Err(e) = self.config.save() {
                                 warn!(error = %e, "could not save the setting");
                             }
                             self.apply_visualization();
                         }
+                        self.reload();
+                        self.relayout_canton();
                         self.notice = Some(match action {
                             DataAction::LoadSampleData => "Sample data loaded.".into(),
                             DataAction::LoadCantonSample => "Canton sample loaded.".into(),
@@ -676,7 +700,12 @@ impl App {
             self.selection = None;
         }
         self.hover = None;
-        self.layout.reheat(0.2);
+        if self.canton() {
+            // The Canton view draws what its layout placed, so place the cards again.
+            self.canton_layout_fitted();
+        } else {
+            self.layout.reheat(0.2);
+        }
     }
 
     /// Reads the database again; records already on screen keep their place.
@@ -740,6 +769,7 @@ impl App {
                 .block_on(graph::load_canton_window(db, self.canton_window, per_table, self.config.graph.max_result_records))
                 .map_err(|e| e.to_string())?;
             self.canton_offsets = loaded.offsets;
+            self.canton_left_out = loaded.left_out;
             if loaded.left_out > 0 {
                 warn!(left_out = loaded.left_out, "the Canton window had more records than max_result_records");
             }
@@ -900,22 +930,13 @@ impl App {
     /// history fills the canvas instead of a narrow strip.
     fn canton_layout_fitted(&mut self) {
         let filters = self.canton_filters.clone();
-        self.graph.canton_layout(&filters, f32::MAX);
-        let corner = Vector::new(canton::NODE_W, canton::NODE_H);
-        let (width, height) = self
-            .graph
-            .nodes
-            .iter()
-            .filter(|n| n.card.shown)
-            .fold((0.0_f32, 0.0_f32), |(w, h), n| (w.max(n.pos.x + corner.x), h.max(n.pos.y + corner.y)));
         let aspect = (self.canvas_size.width - 40.0).max(100.0) / (self.canvas_size.height - 20.0).max(100.0);
-        if width <= 0.0 || height <= 0.0 {
-            return;
-        }
-        // Lines of width W/r stacked r high match the canvas when W / (r² · H) = aspect.
-        let lines = (width / (height * aspect)).sqrt().max(1.0);
-        let wrap = (width / lines + canton::NODE_W).max(self.canton_wrap().min(width + 1.0));
-        self.graph.canton_layout(&filters, wrap);
+        let min_wrap = self.canton_wrap();
+        self.graph.canton_layout(&filters, |width, height| {
+            // Lines of width W/r stacked r high match the canvas when W / (r² · H) = aspect.
+            let lines = (width / (height * aspect)).sqrt().max(1.0);
+            (width / lines + canton::NODE_W).max(min_wrap.min(width + 1.0))
+        });
     }
 
     /// Zooms and pans so every shown record is in view. The Canton view puts
@@ -1006,13 +1027,21 @@ impl App {
     /// folder waits for a restart.
     fn save_settings(&mut self) {
         let Some(form) = &mut self.settings else { return };
-        let new = match form.to_config() {
+        let mut new = match form.to_config() {
             Ok(config) => config,
             Err(e) => {
                 form.message = Some(Err(e));
                 return;
             }
         };
+        // Settings the form doesn't edit may have changed while it was open
+        // (the query panel's "Connect shown records" stays usable): keep them.
+        let live = &self.config;
+        new.graph.connect_results = live.graph.connect_results;
+        new.graph.auto_refresh = live.graph.auto_refresh;
+        new.graph.fit_on_filter = live.graph.fit_on_filter;
+        new.graph.visualization = live.graph.visualization;
+        new.mcp = live.mcp.clone();
         if let Err(e) = new.save() {
             warn!(error = %e, "could not save settings");
             form.message = Some(Err(e.to_string()));
@@ -1097,6 +1126,8 @@ impl App {
             }
         }
         // The query results and pending actions belong to the previous database.
+        // A write Claude Code asked for was meant for the previous database.
+        self.answer_write(false);
         self.query_outcome = None;
         self.result_view = None;
         self.pending_data_action = None;
@@ -1185,8 +1216,10 @@ impl App {
     fn answer_write(&mut self, allow: bool) {
         if let Some((query, reply)) = self.pending_write.take() {
             info!(allow, %query, "answered a write from Claude Code");
-            if let Some(reply) = reply.lock().ok().and_then(|mut r| r.take()) {
-                let _ = reply.send(allow);
+            let Some(reply) = reply.lock().ok().and_then(|mut r| r.take()) else { return };
+            // Claude Code stops waiting after a while; then the query didn't run.
+            if reply.send(allow).is_err() && allow {
+                self.notice = Some("Claude Code had stopped waiting, so the query didn't run. Ask it again.".into());
             }
         }
     }
@@ -1383,28 +1416,27 @@ fn mcp_commands() -> impl iced::futures::Stream<Item = Message> {
     })
 }
 
-/// Asks the user to allow a query from Claude Code that changes data.
+/// Asks the user to allow a query from Claude Code that changes data. The
+/// whole query is shown (scrolling when long): the user allows only what
+/// they can read.
 fn write_banner(query: &str) -> Element<'_, Message> {
-    let shown: String = {
-        let lines: Vec<&str> = query.lines().take(15).collect();
-        let more = query.lines().count().saturating_sub(15);
-        if more > 0 { format!("{}\n… {more} more lines", lines.join("\n")) } else { lines.join("\n") }
-    };
     container(
         column![
             text("Claude Code wants to run a query that changes data:").size(14).font(Font {
                 weight: iced::font::Weight::Bold,
                 ..Font::default()
             }),
-            container(text(shown).size(12).font(Font::MONOSPACE))
-                .padding(6)
+            container(scrollable(container(text(query).size(12).font(Font::MONOSPACE)).padding(6).width(Fill)))
+                .max_height(260)
                 .width(Fill)
                 .style(|_| container::background(Color::from_rgb(0.95, 0.95, 0.95))),
             row![
                 button(text("Allow").size(13)).style(button::danger).on_press(Message::AnswerWrite(true)),
                 button(text("Don't allow").size(13)).style(button::secondary).on_press(Message::AnswerWrite(false)),
+                text(format!("{} lines", query.lines().count())).size(12).color(Color::from_rgb(0.47, 0.47, 0.47)),
             ]
-            .spacing(8),
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
         ]
         .spacing(8),
     )
