@@ -114,23 +114,7 @@ impl GraphView<'_> {
                     })
                 });
         }
-        self.graph
-            .edges
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| match self.visualization {
-                Visualization::Canton => canton_draw::edge_drawn(self, e),
-                Visualization::Standard => self.graph.edge_visible(e),
-            })
-            .find(|(_, e)| {
-                if self.visualization == Visualization::Canton {
-                    return canton_draw::near_edge(self, bounds, e, point);
-                }
-                let a = self.camera.to_screen(bounds, self.graph.nodes[e.from].pos);
-                let b = self.camera.to_screen(bounds, self.graph.nodes[e.to].pos);
-                distance_to_segment(point, a, b) <= 5.0
-            })
-            .map(|(i, _)| i)
+        canton_draw::edge_at(self, bounds, point)
     }
 
     /// Records (and their relations) to draw in full colour while hovering.
