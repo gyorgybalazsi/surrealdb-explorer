@@ -161,8 +161,9 @@ pub struct GraphConfig {
     pub overview_above: usize,
     /// How many transactions the Canton view loads at a time.
     pub canton_transactions: usize,
-    /// In the Canton view, zoom so the filtered records fill the view
-    /// whenever a filter changes.
+    /// How many transactions the Canton view puts side by side.
+    pub canton_columns: usize,
+    /// In the Canton view, scroll back to the top whenever a filter changes.
     pub fit_on_filter: bool,
     /// How the graph is drawn.
     pub visualization: Visualization,
@@ -239,6 +240,7 @@ impl Default for GraphConfig {
             refresh_seconds: 2,
             overview_above: 2000,
             canton_transactions: 50,
+            canton_columns: 3,
             fit_on_filter: true,
             visualization: Visualization::Standard,
         }
@@ -307,6 +309,9 @@ impl Config {
         }
         if self.graph.max_records_per_table == 0 || self.graph.max_result_records == 0 {
             return Err("the record limits must be at least 1".into());
+        }
+        if self.graph.canton_columns == 0 {
+            return Err("canton_columns must be at least 1".into());
         }
         if self.graph.canton_transactions == 0 {
             return Err("canton_transactions must be at least 1".into());

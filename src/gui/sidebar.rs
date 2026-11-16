@@ -182,8 +182,13 @@ impl App {
         if let Some(notice) = &self.notice {
             col = col.push(text(notice).size(12).color(MUTED));
         }
+        let hint = if self.canton() {
+            "Hover a record to highlight its neighbours. Click for details; right-click for more actions. Scroll, drag the background or use the scrollbar to move up and down."
+        } else {
+            "Hover a record to highlight its neighbours. Click for details; right-click for more actions. Drag to move, scroll to zoom, drag the background to pan."
+        };
         col = col.push(
-            text("Hover a record to highlight its neighbours. Click for details; right-click for more actions. Drag to move, scroll to zoom, drag the background to pan.")
+            text(hint)
                 .size(12)
                 .color(MUTED),
         );
@@ -341,6 +346,16 @@ impl App {
         let summary = &self.graph.canton_summary;
         let counts = &summary.counts;
         let mut col = Column::new().spacing(5);
+
+        col = col.push(heading("Layout"));
+        col = col.push(
+            row![
+                text("Transactions side by side").size(13).width(Fill),
+                text_input("3", &self.canton_columns).on_input(Message::CantonColumns).width(56).size(13),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center),
+        );
 
         col = col.push(heading("Node kinds"));
         for kind in NodeKind::ALL {
@@ -506,7 +521,7 @@ impl App {
         );
         col = col.push(
             checkbox(self.config.graph.fit_on_filter)
-                .label("Zoom to fit when filtering")
+                .label("Back to the top when filtering")
                 .on_toggle(Message::ToggleFitOnFilter)
                 .text_size(12),
         );
