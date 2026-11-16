@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
-use canton_analytics::{analysis, runner::Runner, source};
+use analytics_reader as analysis;
+use canton_analytics::{runner::Runner, source};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]

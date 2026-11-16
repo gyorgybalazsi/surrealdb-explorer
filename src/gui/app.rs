@@ -33,6 +33,8 @@ pub enum Tab {
     #[default]
     Graph,
     Table,
+    /// Charts over an analytics table (see `dashboard.rs`).
+    Dashboard,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -154,6 +156,9 @@ pub enum Message {
     /// Runs an action without asking (safe cases only).
     RunDataAction(DataAction),
     DataActionDone(DataAction, Result<(), String>),
+
+    /// Anything in the Dashboard tab.
+    Dashboard(crate::gui::dashboard::Msg),
 }
 
 pub struct App {
@@ -189,6 +194,7 @@ pub struct App {
     /// The last query result, shown as the graph.
     pub(super) result_view: Option<ResultView>,
     pub(super) tab: Tab,
+    pub(super) dashboard: crate::gui::dashboard::Dashboard,
 
     /// Shared with the MCP server; `None` if it's turned off.
     pub(super) mcp: Option<mcp::Shared>,
@@ -242,6 +248,7 @@ impl App {
 
         let limit = config.graph.max_records_per_table;
         let config_canton_transactions = config.graph.canton_transactions;
+        let dashboard_table = config.analytics.table.clone();
         let (db, data, error) = match runtime.block_on(db::connect(&config.database)) {
             // The Canton view loads its own window of transactions below.
             Ok(db) if config.graph.visualization == Visualization::Canton => (Some(db), GraphData::default(), None),
@@ -285,6 +292,7 @@ impl App {
             query_outcome: None,
             result_view: None,
             tab: Tab::Graph,
+            dashboard: crate::gui::dashboard::Dashboard::new(dashboard_table),
             pending_data_action: None,
             data_busy: false,
             canvas_size: iced::Size::new(880.0, 760.0),
@@ -325,7 +333,14 @@ impl App {
         } else {
             Subscription::none()
         };
-        Subscription::batch([frames, refresh, Subscription::run(mcp_commands)])
+        // Reload the dashboard when the analytics runner commits.
+        let dashboard = if self.tab == Tab::Dashboard {
+            iced::time::every(std::time::Duration::from_secs(2))
+                .map(|_| Message::Dashboard(crate::gui::dashboard::Msg::Check))
+        } else {
+            Subscription::none()
+        };
+        Subscription::batch([frames, refresh, dashboard, Subscription::run(mcp_commands)])
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -589,7 +604,22 @@ impl App {
             Message::ToggleQuery => self.query_open = !self.query_open,
             Message::QueryEdited(action) => self.query_text.perform(action),
             Message::RunQuery => return self.run_query(),
-            Message::ShowTab(tab) => self.tab = tab,
+            Message::ShowTab(tab) => {
+                let opened = tab == Tab::Dashboard && self.tab != Tab::Dashboard;
+                self.tab = tab;
+                if opened {
+                    return self.dashboard.reload().map(Message::Dashboard);
+                }
+            }
+            Message::Dashboard(m) => {
+                if let crate::gui::dashboard::Msg::PathSubmitted = m {
+                    self.config.analytics.table = self.dashboard.path.trim().to_string();
+                    if let Err(e) = self.config.save() {
+                        warn!(error = %e, "could not save the dashboard's table folder");
+                    }
+                }
+                return self.dashboard.update(m).map(Message::Dashboard);
+            }
             Message::QueryDone(outcome, changes_data) => {
                 self.query_running = false;
                 let has_records = !query::record_ids(&outcome).is_empty();
@@ -1320,6 +1350,7 @@ impl App {
         let main: Element<'_, Message> = match self.tab {
             Tab::Graph => layers.into(),
             Tab::Table => self.table_view(),
+            Tab::Dashboard => self.dashboard.view().map(Message::Dashboard),
         };
         // A pending write must be answered whichever tab is open.
         let main: Element<'_, Message> = match (&self.pending_write, self.tab) {
@@ -1343,7 +1374,7 @@ impl App {
                 .padding([3, 12])
                 .on_press(Message::ShowTab(which))
         };
-        container(row![tab("Graph", Tab::Graph), tab("Table", Tab::Table)].spacing(4))
+        container(row![tab("Graph", Tab::Graph), tab("Table", Tab::Table), tab("Dashboard", Tab::Dashboard)].spacing(4))
             .padding([4, 8])
             .width(Fill)
             .into()

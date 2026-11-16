@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["runner"]
+members = ["reader", "runner"]
 # Plugins build for wasm32-wasip2, so they are separate workspaces.
 exclude = ["plugins"]
 

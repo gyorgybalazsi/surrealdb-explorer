@@ -3,6 +3,7 @@
 mod app;
 mod canton_draw;
 mod canvas;
+mod dashboard;
 mod layout;
 mod model;
 mod query_panel;

@@ -6,3 +6,4 @@
 /data-encrypted-backup
 /analytics/target
 /analytics/plugins/*/target
+/tables

@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+canton-analytics-reader = { path = "analytics/reader" }
+iced_plot = "0.5"
+iced_table2 = "0.14"
+plotters = { version = "0.3", default-features = false }
+plotters-iced2 = "0.14"
 iced = { version = "0.14", features = ["canvas", "tokio"] }
 csv = "1.4"
 serde = { version = "1.0.229", features = ["derive"] }

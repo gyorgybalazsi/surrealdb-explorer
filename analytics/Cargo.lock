@@ -971,6 +971,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "canton-analytics-reader",
  "clap",
  "deltalake",
  "futures-util",
@@ -983,6 +984,16 @@ dependencies = [
  "tracing-subscriber",
  "wasmtime",
  "wasmtime-wasi",
+]
+
+[[package]]
+name = "canton-analytics-reader"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "deltalake",
+ "polars",
+ "tokio",
 ]
 
 [[package]]

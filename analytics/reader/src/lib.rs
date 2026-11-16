@@ -1,4 +1,8 @@
-//! Reading a plugin's Delta table with Polars.
+//! Reads the Delta Lake tables that canton-analytics plugins write, with
+//! Polars. Used by the runner's `show` command and by the explorer's
+//! dashboard; it doesn't depend on wasmtime or SurrealDB.
+
+pub mod lifetimes;
 
 use std::path::Path;
 
@@ -6,6 +10,28 @@ use anyhow::{Context, Result};
 use deltalake::ensure_table_uri;
 use deltalake::kernel::engine::arrow_conversion::TryIntoArrow;
 use polars::prelude::*;
+
+/// The table's newest version (commit number), or `None` if `table_path`
+/// holds no Delta table yet. Cheap: it only lists the `_delta_log` folder,
+/// so it can be polled to see when the runner commits.
+pub fn latest_version(table_path: &Path) -> Result<Option<i64>> {
+    let log = table_path.join("_delta_log");
+    let entries = match std::fs::read_dir(&log) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("could not read {}", log.display())),
+    };
+    let mut newest = None;
+    for entry in entries {
+        let name = entry?.file_name();
+        let name = name.to_string_lossy();
+        // Commits are named like 00000000000000000012.json.
+        if let Some(version) = name.strip_suffix(".json").and_then(|n| n.parse::<i64>().ok()) {
+            newest = newest.max(Some(version));
+        }
+    }
+    Ok(newest)
+}
 
 /// The table's current version as a Polars lazy frame. Reads a consistent
 /// snapshot: files the runner is writing meanwhile are not part of it until

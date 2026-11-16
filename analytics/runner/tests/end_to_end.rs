@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use canton_analytics::analysis;
+use analytics_reader as analysis;
 use canton_analytics::runner::{Runner, Step};
 use canton_analytics::source::{self, Connection, UserLevel};
 use polars::prelude::*;
@@ -117,6 +117,12 @@ fn lifetimes_are_appended_in_steps_resumed_and_read_with_polars() {
         let summary = analysis::lifetimes_by_template(analysis::scan(&table).await.unwrap()).collect().unwrap();
         let templates = strings(&summary, "template_name");
         assert_eq!(templates[0], "Main.Ticket", "two tickets were archived");
+        // What the explorer's dashboard shows.
+        let dashboard = analysis::lifetimes::load(&table).await.unwrap();
+        assert_eq!(dashboard.archived, 4);
+        assert_eq!(dashboard.newest_offset, Some(6));
+        assert_eq!(dashboard.longest[0].contract_id, "00c5e9f6");
+        assert_eq!(dashboard.over_time.bucket_seconds, 3_600);
         println!("{frame}\n{summary}");
     });
 }
