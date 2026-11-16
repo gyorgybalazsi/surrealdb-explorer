@@ -155,7 +155,19 @@ fn filters_keep_a_match_with_its_transaction() {
     };
 
     let active = Filters { status: StatusFilter::Active, ..Filters::default() };
-    assert_eq!(shown(&active), ["created:00c3c7d4", "created:00c5e9f6", "transaction:3", "transaction:4"]);
+    // Active contracts come with the choices exercised on them: Carol showed
+    // her ticket (non-consuming) at offset 5, and the ticket is still active.
+    assert_eq!(
+        shown(&active),
+        ["created:00c3c7d4", "created:00c5e9f6", "exercised:[5, 0]", "transaction:3", "transaction:4", "transaction:5"]
+    );
+    let ticket = ids.iter().position(|i| i == "created:00c5e9f6").unwrap();
+    let show = ids.iter().position(|i| i == "exercised:[5, 0]").unwrap();
+    assert_eq!(m.exercises_on(ticket), [show]);
+    assert_eq!(m.exercised_on(show), Some(ticket));
+    // The archived filter still shows contracts only.
+    let archived = Filters { status: StatusFilter::Archived, ..Filters::default() };
+    assert!(shown(&archived).iter().all(|i| !i.starts_with("exercised")));
 
     let search = Filters { search: "ticket_show".into(), ..Filters::default() };
     assert_eq!(shown(&search), ["exercised:[5, 0]", "transaction:5"]);

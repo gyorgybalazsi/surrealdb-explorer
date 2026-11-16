@@ -390,6 +390,19 @@ impl Model {
         }
     }
 
+    /// The contract an exercise targets, when it is loaded.
+    pub fn exercised_on(&self, i: usize) -> Option<usize> {
+        self.targets(i, "TARGET").find(|&t| self.kinds[t] == NodeKind::Created)
+    }
+
+    /// The choices exercised on a contract, in ledger order.
+    pub fn exercises_on(&self, contract: usize) -> Vec<usize> {
+        let mut v: Vec<usize> =
+            self.sources(contract, "TARGET").filter(|&e| self.kinds[e] == NodeKind::Exercised).collect();
+        v.sort_by_key(|&e| (self.facts[e].offset, self.facts[e].order));
+        v
+    }
+
     /// Every party the graph names, sorted.
     pub fn parties(&self) -> BTreeSet<String> {
         self.facts.iter().flat_map(|f| f.parties.iter().cloned()).collect()
@@ -481,7 +494,14 @@ pub fn visible(m: &Model, filters: &Filters) -> Vec<bool> {
                 return false;
             }
         }
-        match (filters.status, f.status) {
+        // A choice exercised on an active contract counts as active too, so
+        // the active filter shows what was done to the contracts it keeps.
+        // Such an exercise is non-consuming: a consuming one archives its target.
+        let status = match (filters.status, kind) {
+            (StatusFilter::Active, NodeKind::Exercised) => m.exercised_on(i).and_then(|t| m.facts[t].status),
+            _ => f.status,
+        };
+        match (filters.status, status) {
             (StatusFilter::Active, Some(s)) if s != Status::Active => return false,
             (StatusFilter::Archived, Some(s)) if s != Status::Archived => return false,
             (StatusFilter::Active | StatusFilter::Archived, None)

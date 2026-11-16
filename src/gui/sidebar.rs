@@ -248,9 +248,26 @@ impl App {
                     .filter(|e| e.to == i)
                     .map(|e| format!("{} → {}", g.nodes[e.from].label, e.label))
                     .collect();
+                // A contract lists the choices exercised on it, in ledger order.
+                let exercises = (n.kind == NodeKind::Created).then(|| {
+                    let mut on: Vec<&crate::gui::model::Node> = g
+                        .edges
+                        .iter()
+                        .filter(|e| e.to == i && e.kind == "TARGET" && g.nodes[e.from].kind == NodeKind::Exercised)
+                        .map(|e| &g.nodes[e.from])
+                        .collect();
+                    on.sort_by_key(|x| {
+                        (x.data.get("offset").and_then(|v| v.as_i64()), x.data.get("node_id").and_then(|v| v.as_i64()))
+                    });
+                    on.iter().map(|x| exercise_line(&x.data)).collect::<Vec<String>>()
+                });
+                let mut head =
+                    column![text(&n.label).size(15).font(bold()), text(&n.id).size(12).font(Font::MONOSPACE)].spacing(6);
+                if let Some(lines) = exercises {
+                    head = head.push(heading("Choices exercised")).push(list(lines));
+                }
                 column![
-                    text(&n.label).size(15).font(bold()),
-                    text(&n.id).size(12).font(Font::MONOSPACE),
+                    head,
                     heading("Outgoing"),
                     list(outgoing),
                     heading("Incoming"),
@@ -275,6 +292,29 @@ impl App {
                 .into()
             }
         }
+    }
+}
+
+/// `Ticket_Show at offset 5 by Carol, non-consuming`.
+fn exercise_line(data: &serde_json::Value) -> String {
+    let mut s = data.get("choice_name").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+    if let Some(o) = data.get("offset").and_then(|v| v.as_i64()) {
+        s += &format!(" at offset {o}");
+    }
+    let by: Vec<String> = match data.get("acting_parties") {
+        Some(serde_json::Value::Array(ps)) => {
+            ps.iter().filter_map(|p| p.as_str()).map(|p| canton::short_party(p).to_string()).collect()
+        }
+        Some(serde_json::Value::String(p)) => vec![canton::short_party(p.trim_matches('\'')).to_string()],
+        _ => Vec::new(),
+    };
+    if !by.is_empty() {
+        s += &format!(" by {}", by.join(", "));
+    }
+    match data.get("consuming").and_then(|v| v.as_bool()) {
+        Some(true) => s + ", consuming",
+        Some(false) => s + ", non-consuming",
+        None => s,
     }
 }
 
