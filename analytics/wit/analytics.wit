@@ -1,0 +1,56 @@
+package canton:analytics@0.1.0;
+
+/// What an analytics plugin exports. The runner (the host) does all the I/O:
+/// it reads from SurrealDB, keeps the cursor and the plugin's state, and
+/// appends the plugin's rows to a Delta Lake table. The plugin only holds
+/// logic: it gets no folders, environment or network.
+///
+/// One step of the runner:
+///   1. Runs `source.high-water` to find how far the database has got.
+///   2. Runs `source.query` with `$from` (exclusive) and `$to` (inclusive)
+///      bound to a cursor range, e.g. Canton offsets.
+///   3. Calls `transform` with every statement's result and the state the
+///      plugin returned last time.
+///   4. Appends the returned rows to the Delta table, and stores the new
+///      cursor and state in the same commit, so a crash never loses or
+///      repeats a batch.
+interface plugin {
+    record plugin-info {
+        name: string,
+        version: string,
+        description: string,
+    }
+
+    record query-source {
+        /// SurrealQL run each step, with `$from` and `$to` bound. May hold
+        /// several statements; their results are passed to `transform` in order.
+        query: string,
+        /// SurrealQL whose last statement returns one integer: the highest
+        /// cursor value available.
+        high-water: string,
+    }
+
+    record output {
+        /// The rows, as an Arrow IPC stream with the schema from `schema`.
+        /// May hold no rows.
+        rows: list<u8>,
+        /// Opaque state handed back on the next call, e.g. contracts that
+        /// were created but not yet archived.
+        state: list<u8>,
+    }
+
+    info: func() -> plugin-info;
+
+    /// The output table's columns, as an Arrow IPC stream with no rows.
+    schema: func() -> list<u8>;
+
+    source: func() -> query-source;
+
+    /// `results` holds one JSON document per statement of `source.query`.
+    /// `state` is empty on the first call.
+    transform: func(results: list<string>, state: list<u8>) -> result<output, string>;
+}
+
+world analytics-plugin {
+    export plugin;
+}
