@@ -79,6 +79,8 @@ pub struct Graph {
     pub bands: Vec<(String, Vector)>,
     /// What the Canton view's sidebar lists, as of the last Canton layout.
     pub canton_summary: CantonSummary,
+    /// The Canton layout's width and height, in graph space.
+    pub canton_extent: Vector,
 }
 
 /// The kinds, parties and templates in the Canton event graph.
@@ -190,6 +192,7 @@ impl Graph {
             truncated: data.truncated,
             bands: Vec::new(),
             canton_summary: CantonSummary::default(),
+            canton_extent: Vector::ZERO,
         }
     }
 
@@ -234,10 +237,9 @@ impl Graph {
 
     /// Lays the records out as alt-canton's ledger explorer does (see
     /// `canton::layout`): the records `filters` keeps and that aren't hidden.
-    /// They are first laid out on one line, and `wrap` picks, from that
-    /// line's width and height, the width the columns then wrap at.
-    /// Positions are card centres.
-    pub fn canton_layout(&mut self, filters: &Filters, wrap: impl FnOnce(f32, f32) -> f32) {
+    /// `columns` transactions sit side by side, on lines at least `fill`
+    /// units wide. Positions are card centres.
+    pub fn canton_layout(&mut self, filters: &Filters, columns: usize, fill: f32) {
         // The model reads every record, so it is built once per layout, and
         // what the sidebar lists from it is kept rather than rebuilt per frame.
         let model = self.canton_model();
@@ -246,20 +248,8 @@ impl Graph {
         for (k, n) in keep.iter_mut().zip(&self.nodes) {
             *k &= !n.hidden;
         }
-        let one_line = canton::layout(&model, &keep, f32::MAX);
-        // Measured to a card's centre plus a whole card, as the wrap was tuned with.
-        let (width, height) = one_line
-            .pos
-            .iter()
-            .flatten()
-            .fold((0.0_f32, 0.0_f32), |(w, h), &(x, y)| {
-                (w.max(x + 1.5 * canton::NODE_W), h.max(y + 1.5 * canton::NODE_H))
-            });
-        let layout = if width > 0.0 && height > 0.0 {
-            canton::layout(&model, &keep, wrap(width, height))
-        } else {
-            one_line
-        };
+        let layout = canton::layout(&model, &keep, columns, fill);
+        self.canton_extent = Vector::new(layout.width, layout.height);
         let half = Vector::new(canton::NODE_W / 2.0, canton::NODE_H / 2.0);
         for (i, n) in self.nodes.iter_mut().enumerate() {
             let f = &model.facts[i];

@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use iced::widget::{button, canvas, column, container, pin, row, rule, scrollable, stack, text, text_editor};
 use iced::{Color, Element, Fill, Font, Point, Subscription, Task, Theme, Vector, window};
-use surrealdb_explorer::canton::{self, Filters, NodeKind, StatusFilter};
+use surrealdb_explorer::canton::{Filters, NodeKind, StatusFilter};
 use surrealdb_explorer::config::{Config, Connection, UserLevel, Visualization};
 use surrealdb_explorer::db::{self, Database};
 use surrealdb_explorer::graph::{self, GraphData, ResultGraph};
@@ -18,7 +18,7 @@ use tokio::sync::{mpsc, oneshot};
 use surrealdb_explorer::query::{self, QueryOutcome};
 use tracing::{debug, error, info, warn};
 
-use crate::gui::canvas::{Camera, GraphView};
+use crate::gui::canvas::{CANTON_MARGIN, Camera, GraphView, SCROLLBAR_WIDTH};
 use crate::gui::layout::Layout;
 use crate::gui::model::Graph;
 use crate::gui::settings::{SettingsField, SettingsForm};
@@ -93,6 +93,12 @@ pub enum Message {
     CantonPage(graph::CantonWindow),
     /// The text typed in the "latest n transactions" box.
     CantonCount(String),
+    /// The Canton view's "columns side by side" box, as typed.
+    CantonColumns(String),
+    /// Scrolls the Canton view down by this many pixels (up when negative).
+    CantonScroll(f32),
+    /// Scrolls the Canton view to this many pixels from the top.
+    CantonScrollTo(f32),
     /// Turns zooming to fit after each filter change on or off (and remembers it).
     ToggleFitOnFilter(bool),
     /// Draws the whole database even though it's bigger than `overview_above`.
@@ -223,6 +229,10 @@ pub struct App {
     pub(super) canton_left_out: usize,
     /// The "latest n transactions" box as typed; also the step for Older / Newer.
     pub(super) canton_count: String,
+    /// The "columns side by side" box as typed.
+    pub(super) canton_columns: String,
+    /// How far the Canton view is scrolled down, in pixels.
+    pub(super) canton_scroll: f32,
 }
 
 impl App {
@@ -242,6 +252,7 @@ impl App {
 
         let limit = config.graph.max_records_per_table;
         let config_canton_transactions = config.graph.canton_transactions;
+        let config_canton_columns = config.graph.canton_columns;
         let (db, data, error) = match runtime.block_on(db::connect(&config.database)) {
             // The Canton view loads its own window of transactions below.
             Ok(db) if config.graph.visualization == Visualization::Canton => (Some(db), GraphData::default(), None),
@@ -297,6 +308,8 @@ impl App {
             canton_offsets: None,
             canton_left_out: 0,
             canton_count: config_canton_transactions.to_string(),
+            canton_columns: config_canton_columns.to_string(),
+            canton_scroll: 0.0,
         };
         app.apply_visualization();
         if app.canton() {
@@ -358,10 +371,13 @@ impl App {
                 self.layout.reheat(0.3);
             }
             Message::DragEnd => self.dragging = None,
+            Message::Pan(delta) if self.canton() => self.scroll_canton(self.canton_scroll - delta.y),
             Message::Pan(delta) => {
                 self.following = false;
                 self.camera.offset = self.camera.offset + delta;
             }
+            // The Canton view always fills the canvas's width, so it scrolls rather than zooms.
+            Message::Zoom { .. } if self.canton() => {}
             Message::Zoom { factor, anchor, from_centre } => {
                 self.following = false;
                 let scale = (self.camera.scale * factor).clamp(0.03, 5.0);
@@ -504,6 +520,25 @@ impl App {
                     self.canton_count = text.trim().to_string();
                 }
             }
+            Message::CantonColumns(text) => {
+                let text = text.trim().to_string();
+                match text.parse::<usize>() {
+                    Ok(n) if (1..=100).contains(&n) => {
+                        self.canton_columns = text;
+                        if n != self.config.graph.canton_columns {
+                            self.config.graph.canton_columns = n;
+                            if let Err(e) = self.config.save() {
+                                warn!(error = %e, "could not save the setting");
+                            }
+                            self.relayout_canton();
+                        }
+                    }
+                    _ if text.is_empty() => self.canton_columns = text,
+                    _ => {}
+                }
+            }
+            Message::CantonScroll(delta) => self.scroll_canton(self.canton_scroll + delta),
+            Message::CantonScrollTo(to) => self.scroll_canton(to),
             Message::CantonPage(window) => {
                 let previous = std::mem::replace(&mut self.canton_window, window);
                 let loaded_before = self.canton_offsets.is_some();
@@ -898,7 +933,7 @@ impl App {
         });
     }
 
-    fn canton(&self) -> bool {
+    pub(super) fn canton(&self) -> bool {
         self.config.graph.visualization == Visualization::Canton
     }
 
@@ -926,48 +961,52 @@ impl App {
         }
     }
 
-    /// The width the Canton view's columns wrap at, in layout units, as the explorer picks it.
-    fn canton_wrap(&self) -> f32 {
-        (self.canvas_size.width * 1.35).max(1000.0).round()
-    }
-
-    /// Lays out the Canton view with as many lines as suit the canvas's
-    /// shape: first on one line to measure it, then wrapped so the whole
-    /// history fills the canvas instead of a narrow strip.
+    /// Lays out the Canton view: the chosen number of transactions side by
+    /// side, stretched to fill the canvas's width, keeping the scroll
+    /// position where it can.
     fn canton_layout_fitted(&mut self) {
         let filters = self.canton_filters.clone();
-        let aspect = (self.canvas_size.width - 40.0).max(100.0) / (self.canvas_size.height - 20.0).max(100.0);
-        let min_wrap = self.canton_wrap();
-        self.graph.canton_layout(&filters, |width, height| {
-            // Lines of width W/r stacked r high match the canvas when W / (r² · H) = aspect.
-            let lines = (width / (height * aspect)).sqrt().max(1.0);
-            (width / lines + canton::NODE_W).max(min_wrap.min(width + 1.0))
-        });
+        let columns = self.config.graph.canton_columns.max(1);
+        self.graph.canton_layout(&filters, columns, self.canton_fill_width());
+        self.scroll_canton(self.canton_scroll);
     }
 
-    /// Zooms and pans so every shown record is in view. The Canton view puts
-    /// the layout's top-left corner at the canvas's, never zoomed past 1; the
-    /// standard view just recentres, since its layout is still spreading out.
-    fn fit_view(&mut self) {
+    /// The canvas width the Canton layout fills, in pixels: all of it but the
+    /// margins and the scrollbar.
+    fn canton_fill_width(&self) -> f32 {
+        (self.canvas_size.width - 2.0 * CANTON_MARGIN.0 - SCROLLBAR_WIDTH).max(200.0)
+    }
+
+    /// The Canton view's zoom: 1, unless the columns don't fit the canvas
+    /// at that size; then smaller, so they still do.
+    fn canton_scale(&self) -> f32 {
+        let width = self.graph.canton_extent.x;
+        if width <= 0.0 { 1.0 } else { (self.canton_fill_width() / width).clamp(0.02, 1.0) }
+    }
+
+    /// How tall the Canton view's content is, in pixels.
+    pub(super) fn canton_content_height(&self) -> f32 {
+        self.graph.canton_extent.y * self.canton_scale() + 2.0 * CANTON_MARGIN.1
+    }
+
+    /// Scrolls the Canton view to `to` pixels from the top (kept within the
+    /// content) and points the camera there.
+    fn scroll_canton(&mut self, to: f32) {
         let (w, h) = (self.canvas_size.width, self.canvas_size.height);
+        let max = (self.canton_content_height() - h).max(0.0);
+        self.canton_scroll = to.clamp(0.0, max);
+        self.camera = Camera {
+            offset: Vector::new(CANTON_MARGIN.0 - w / 2.0, CANTON_MARGIN.1 - self.canton_scroll - h / 2.0),
+            scale: self.canton_scale(),
+        };
+    }
+
+    /// Zooms and pans so every shown record is in view. The Canton view
+    /// always fills the canvas's width, so it just goes back to the top; the
+    /// standard view recentres, since its layout is still spreading out.
+    fn fit_view(&mut self) {
         if self.canton() {
-            let corner = Vector::new(canton::NODE_W, canton::NODE_H) * 0.5;
-            let extent = self
-                .graph
-                .nodes
-                .iter()
-                .filter(|n| n.card.shown)
-                .fold(Vector::new(canton::NODE_W, canton::NODE_H), |m, n| {
-                    let far = n.pos + corner;
-                    Vector::new(m.x.max(far.x), m.y.max(far.y))
-                });
-            let (lw, lh) = (extent.x, extent.y + 56.0);
-            let k = ((w - 40.0) / lw).min((h - 20.0) / lh).clamp(0.04, 1.3);
-            // A graph narrower or shorter than the canvas sits in its middle;
-            // a bigger one starts at the top left, where the history begins.
-            let left = ((w - lw * k) / 2.0).max(20.0);
-            let top = ((h - lh * k) / 2.0).max(10.0);
-            self.camera = Camera { offset: Vector::new(left - w / 2.0, top - h / 2.0), scale: k };
+            self.scroll_canton(0.0);
             return;
         }
         self.camera = self.standard_fit();
@@ -1046,6 +1085,7 @@ impl App {
         new.graph.connect_results = live.graph.connect_results;
         new.graph.auto_refresh = live.graph.auto_refresh;
         new.graph.fit_on_filter = live.graph.fit_on_filter;
+        new.graph.canton_columns = live.graph.canton_columns;
         new.graph.visualization = live.graph.visualization;
         new.mcp = live.mcp.clone();
         if let Err(e) = new.save() {
@@ -1300,6 +1340,7 @@ impl App {
             selection: self.selection,
             visualization: self.config.graph.visualization,
             known_size: self.canvas_size,
+            scroll: self.canton().then(|| (self.canton_scroll, self.canton_content_height())),
         })
         .width(Fill)
         .height(Fill);

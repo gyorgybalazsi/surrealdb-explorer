@@ -106,29 +106,39 @@ fn layout_matches_the_explorer() {
     // Parties start hidden, so the columns start at the left edge.
     let keep = canton::visible(&m, &Filters::default());
     assert!(ids.iter().enumerate().all(|(i, id)| keep[i] != id.starts_with("party:")));
-    let l = canton::layout(&m, &keep, 1000.0);
+    let l = canton::layout(&m, &keep, 4, 0.0);
     let pos = |id: &str| l.pos[at(id)].unwrap_or_else(|| panic!("{id} not placed"));
     assert_eq!(pos("transaction:1"), (0.0, 40.0));
-    // One column per transaction, in offset order, each as wide as its indented tree, plus a gap.
-    assert_eq!(pos("transaction:2").0 - pos("transaction:1").0, 22.0 + NODE_W + 40.0);
+    // One column per transaction, in offset order, each as wide as the most indented tree, plus a gap.
+    let pitch = 66.0 + NODE_W + 40.0;
+    assert_eq!(pos("transaction:2").0 - pos("transaction:1").0, pitch);
+    assert_eq!(l.width, 4.0 * pitch - 40.0);
     // The tree goes down its column, each level indented further.
     let tx3 = pos("transaction:3");
     assert_eq!(pos("exercised:[3, 0]"), (tx3.0 + 22.0, tx3.1 + 56.0));
     assert_eq!(pos("exercised:[3, 1]"), (tx3.0 + 44.0, tx3.1 + 112.0));
     assert_eq!(pos("created:00c3c7d4"), (tx3.0 + 66.0, tx3.1 + 168.0));
     assert_eq!(pos("created:00c4d8e5"), (tx3.0 + 44.0, tx3.1 + 224.0));
-    // Columns wrap like text: the fifth starts a new line under the deepest column.
+    // Four columns side by side: the fifth starts a new line under the deepest column.
     let tx5 = pos("transaction:5");
     assert_eq!(tx5.0, 0.0);
     assert!(tx5.1 > pos("created:00c4d8e5").1 + NODE_H);
     // The band header names the domain.
     assert_eq!(l.bands[0].0, "domain global-domain::1220ab");
 
+    // Asked to fill a wider canvas, the columns spread out to its full width.
+    let wide = canton::layout(&m, &keep, 2, 2000.0);
+    let wpos = |id: &str| wide.pos[at(id)].unwrap();
+    assert_eq!(wpos("transaction:2").0, (2000.0 + 40.0) / 2.0);
+    assert_eq!(wide.width, 2000.0);
+    assert!(wpos("transaction:3").1 > wpos("transaction:1").1);
+    assert_eq!(wpos("transaction:3").0, 0.0);
+
     // Turning parties on puts them in a column of their own on the left.
     let mut with_parties = Filters::default();
     with_parties.kinds.insert(NodeKind::Party);
     let keep = canton::visible(&m, &with_parties);
-    let l = canton::layout(&m, &keep, 1000.0);
+    let l = canton::layout(&m, &keep, 4, 0.0);
     assert_eq!(l.pos[at("party:`Bank::1220f3a9c1d2`")].unwrap().0, 0.0);
     assert_eq!(l.pos[at("transaction:1")].unwrap().0, NODE_W + 70.0);
 }
@@ -193,7 +203,7 @@ fn records_outside_the_event_graph_go_in_a_band_underneath() {
     ];
     let m = Model::new(&nodes, Vec::new());
     assert_eq!(m.facts[1].title, "Alice");
-    let l = canton::layout(&m, &[true, true, true], 1000.0);
+    let l = canton::layout(&m, &[true, true, true], 3, 1000.0);
     let (a, b) = (l.pos[1].unwrap(), l.pos[2].unwrap());
     assert!(a.1 > l.pos[0].unwrap().1 && a.1 == b.1);
     assert_eq!(b.0 - a.0, NODE_W + 40.0);

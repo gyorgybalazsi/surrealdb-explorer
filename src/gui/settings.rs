@@ -134,6 +134,8 @@ impl SettingsForm {
                 refresh_seconds,
                 overview_above,
                 canton_transactions,
+                // Set in the Canton view's sidebar; the app keeps the live value.
+                canton_columns: 3,
                 fit_on_filter: self.fit_on_filter,
                 visualization: self.visualization,
             },
