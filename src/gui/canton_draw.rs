@@ -4,7 +4,7 @@
 //! relations running down the left of their column; other relations as curves
 //! between the cards' nearer sides; archived contracts faded and struck through.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use iced::alignment;
 use iced::widget::canvas::{Frame, LineDash, Path, Stroke, Text};
@@ -69,32 +69,89 @@ pub fn on_card(view: &GraphView, bounds: Rectangle, i: usize, point: Point) -> b
     (g.x - p.x).abs() <= NODE_W / 2.0 && (g.y - p.y).abs() <= NODE_H / 2.0
 }
 
-/// The path of a relation in graph space, as the explorer's `edge_path`: a
-/// tree relation runs down the left of its column; any other curves between
-/// the nearer sides. Returns the points to draw through, ending at the tip.
-fn edge_points(kind: &str, (ax, ay): (f32, f32), (bx, by): (f32, f32)) -> Vec<Point> {
-    if matches!(kind, "ACTION" | "CONSEQUENCE") && (bx - ax).abs() < NODE_W {
-        let x = ax + 10.0;
-        return vec![Point::new(x, ay + NODE_H), Point::new(x, by + NODE_H / 2.0), Point::new(bx, by + NODE_H / 2.0)];
-    }
-    let (sx, ex) = if bx >= ax + NODE_W {
-        (ax + NODE_W, bx)
+/// Whether a relation is drawn as a tree branch: down the left of its column.
+fn is_tree(kind: &str, (ax, _): (f32, f32), (bx, _): (f32, f32)) -> bool {
+    matches!(kind, "ACTION" | "CONSEQUENCE") && (bx - ax).abs() < NODE_W
+}
+
+/// Which sides of the two cards a curved relation joins: `true` for the right
+/// side. As the explorer's `edge_path`, the nearer sides.
+fn sides((ax, _): (f32, f32), (bx, _): (f32, f32)) -> (bool, bool) {
+    if bx >= ax + NODE_W {
+        (true, false)
     } else if bx + NODE_W <= ax {
-        (ax, bx + NODE_W)
+        (false, true)
     } else {
-        (ax + NODE_W, bx + NODE_W)
-    };
-    let (sy, ey) = (ay + NODE_H / 2.0, by + NODE_H / 2.0);
-    let bend = ((ex - sx).abs() / 2.0).max(40.0);
-    let (c1, c2) = if ex >= sx {
-        (sx + bend, ex - bend)
-    } else if (bx - ax).abs() < NODE_W {
-        (sx + bend, ex + bend)
-    } else {
-        (sx - bend, ex + bend)
-    };
-    // A cubic Bézier, sampled.
-    let (p0, p1, p2, p3) = (Point::new(sx, sy), Point::new(c1, sy), Point::new(c2, ey), Point::new(ex, ey));
+        (true, true)
+    }
+}
+
+/// The path of each relation in graph space, `None` for one not drawn: the
+/// points to draw through, ending at the tip.
+///
+/// A tree relation runs down the left of its column and into its child's left
+/// side; any other curves between the cards' nearer sides. Every relation
+/// gets its own port on each side it touches, spread down the side in the
+/// order of the cards at the other end (a tree branch on top), so that two
+/// relations never meet a card at the same point or run along the same line,
+/// and each arrow can be told apart.
+pub fn routes(view: &GraphView) -> Vec<Option<Vec<Point>>> {
+    let g = view.graph;
+    let corners: Vec<(f32, f32)> = g.nodes.iter().map(|n| corner(n.pos)).collect();
+    // The relations at each side of each card: (node, right side) ->
+    // (tree branch first, the other card's y, relation, at its end).
+    let mut ports: HashMap<(usize, bool), Vec<(bool, f32, usize, bool)>> = HashMap::new();
+    for (i, e) in g.edges.iter().enumerate() {
+        if !edge_drawn(view, e) {
+            continue;
+        }
+        let (a, b) = (corners[e.from], corners[e.to]);
+        if is_tree(&e.kind, a, b) {
+            ports.entry((e.to, false)).or_default().push((false, a.1, i, true));
+        } else {
+            let (from_right, to_right) = sides(a, b);
+            ports.entry((e.from, from_right)).or_default().push((true, b.1, i, false));
+            ports.entry((e.to, to_right)).or_default().push((true, a.1, i, true));
+        }
+    }
+    // The y of each relation's ends.
+    let mut port_y: HashMap<(usize, bool), f32> = HashMap::new();
+    for ((node, _), mut list) in ports {
+        list.sort_by(|p, q| (p.0, p.1, p.2, p.3).partial_cmp(&(q.0, q.1, q.2, q.3)).unwrap_or(std::cmp::Ordering::Equal));
+        let n = list.len() as f32;
+        for (k, &(_, _, edge, at_end)) in list.iter().enumerate() {
+            port_y.insert((edge, at_end), corners[node].1 + NODE_H * (k as f32 + 1.0) / (n + 1.0));
+        }
+    }
+    g.edges
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            if !edge_drawn(view, e) {
+                return None;
+            }
+            let (a, b) = (corners[e.from], corners[e.to]);
+            let ey = port_y[&(i, true)];
+            if is_tree(&e.kind, a, b) {
+                let x = a.0 + 10.0;
+                return Some(vec![Point::new(x, a.1 + NODE_H), Point::new(x, ey), Point::new(b.0, ey)]);
+            }
+            let sy = port_y[&(i, false)];
+            let (from_right, to_right) = sides(a, b);
+            let sx = if from_right { a.0 + NODE_W } else { a.0 };
+            let ex = if to_right { b.0 + NODE_W } else { b.0 };
+            Some(curve(Point::new(sx, sy), Point::new(ex, ey), from_right, to_right))
+        })
+        .collect()
+}
+
+/// A cubic Bézier from `p0` to `p3`, sampled, leaving and entering each card
+/// square to its side.
+fn curve(p0: Point, p3: Point, from_right: bool, to_right: bool) -> Vec<Point> {
+    let bend = ((p3.x - p0.x).abs() / 2.0).max(40.0);
+    let c1 = if from_right { p0.x + bend } else { p0.x - bend };
+    let c2 = if to_right { p3.x + bend } else { p3.x - bend };
+    let (p1, p2) = (Point::new(c1, p0.y), Point::new(c2, p3.y));
     (0..=24)
         .map(|i| {
             let t = i as f32 / 24.0;
@@ -105,13 +162,8 @@ fn edge_points(kind: &str, (ax, ay): (f32, f32), (bx, by): (f32, f32)) -> Vec<Po
         .collect()
 }
 
-fn screen_points(view: &GraphView, bounds: Rectangle, e: &Edge) -> Vec<Point> {
-    let a = corner(view.graph.nodes[e.from].pos);
-    let b = corner(view.graph.nodes[e.to].pos);
-    edge_points(&e.kind, a, b)
-        .into_iter()
-        .map(|p| view.camera.to_screen(bounds, Vector::new(p.x, p.y)))
-        .collect()
+fn to_screen(view: &GraphView, bounds: Rectangle, pts: &[Point]) -> Vec<Point> {
+    pts.iter().map(|p| view.camera.to_screen(bounds, Vector::new(p.x, p.y))).collect()
 }
 
 /// Whether a relation's two records are both on screen.
@@ -119,11 +171,12 @@ pub fn edge_drawn(view: &GraphView, e: &Edge) -> bool {
     view.graph.nodes[e.from].card.shown && view.graph.nodes[e.to].card.shown
 }
 
-/// Whether `point` is within a few pixels of the relation's path.
-pub fn near_edge(view: &GraphView, bounds: Rectangle, e: &Edge, point: Point) -> bool {
-    screen_points(view, bounds, e)
-        .windows(2)
-        .any(|w| super::canvas::distance_to_segment(point, w[0], w[1]) <= 5.0)
+/// The drawn relation passing within a few pixels of `point`.
+pub fn edge_at(view: &GraphView, bounds: Rectangle, point: Point) -> Option<usize> {
+    routes(view).into_iter().enumerate().find_map(|(i, pts)| {
+        let pts = to_screen(view, bounds, &pts?);
+        pts.windows(2).any(|w| super::canvas::distance_to_segment(point, w[0], w[1]) <= 5.0).then_some(i)
+    })
 }
 
 /// Draws the whole graph. `lit` are the records to emphasise (a hovered or
@@ -147,10 +200,11 @@ pub fn draw(view: &GraphView, frame: &mut Frame, bounds: Rectangle, lit: Option<
         });
     }
 
+    let routes = routes(view);
     for (i, e) in g.edges.iter().enumerate() {
-        if !edge_drawn(view, e) {
+        let Some(route) = &routes[i] else {
             continue;
-        }
+        };
         let touches = |set: &HashSet<usize>| set.contains(&e.from) && set.contains(&e.to);
         let focus = view.hover.or(match view.selection {
             Some(Selection::Node(n)) => Some(n),
@@ -166,7 +220,7 @@ pub fn draw(view: &GraphView, frame: &mut Frame, bounds: Rectangle, lit: Option<
             _ => (0.85, 1.4),
         };
         let color = if selected { SELECTED } else { faded(color, alpha) };
-        let pts = screen_points(view, bounds, e);
+        let pts = to_screen(view, bounds, route);
         let path = Path::new(|b| {
             b.move_to(pts[0]);
             for p in &pts[1..] {
