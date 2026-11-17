@@ -137,6 +137,8 @@ impl SettingsForm {
                 // Set in the Canton view's sidebar; the app keeps the live value.
                 canton_columns: 3,
                 fit_on_filter: self.fit_on_filter,
+                // Set in the Canton view's sidebar; the app keeps the live value.
+                canton_follow_newest: false,
                 visualization: self.visualization,
             },
             logging: LoggingConfig {

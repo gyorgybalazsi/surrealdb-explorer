@@ -165,6 +165,9 @@ pub struct GraphConfig {
     pub canton_columns: usize,
     /// In the Canton view, scroll back to the top whenever a filter changes.
     pub fit_on_filter: bool,
+    /// In the Canton view, scroll down to the newest transactions whenever
+    /// auto refresh brings in new ones (for watching a ledger live).
+    pub canton_follow_newest: bool,
     /// How the graph is drawn.
     pub visualization: Visualization,
 }
@@ -242,6 +245,7 @@ impl Default for GraphConfig {
             canton_transactions: 50,
             canton_columns: 3,
             fit_on_filter: true,
+            canton_follow_newest: false,
             visualization: Visualization::Standard,
         }
     }
