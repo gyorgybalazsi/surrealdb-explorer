@@ -318,8 +318,8 @@ impl Model {
                 } else {
                     Status::Active
                 });
-                let t = self.str_prop(i, "template_name").unwrap_or("Created");
-                f.title = t.rsplit('.').next().unwrap_or(t).to_string();
+                // The same `Module:Entity` form as an exercised card's template line.
+                f.title = f.template.clone().unwrap_or_else(|| "Created".into());
                 f.subtitle = ellipsize(self.str_prop(i, "contract_id").unwrap_or(""), 14);
             }
             NodeKind::Exercised | NodeKind::Fetched => {
