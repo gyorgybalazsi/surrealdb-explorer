@@ -227,3 +227,76 @@ fn contracts_from_the_active_set_have_no_offset() {
     let range = Filters { offset_from: Some(5), ..Filters::default() };
     assert_eq!(canton::visible(&m, &range), [true, true]);
 }
+
+/// The Accept transaction of the ticket purchase demo, with the witnesses the
+/// syncer records: Accept (consuming the offer) and the ticket agreement are
+/// seen by Alice and TicketWizard; the cash Transfer under Accept, the new
+/// cash and the archive are also seen by ScroogeBank, the cash issuer.
+#[test]
+fn witness_parties_give_each_party_its_projection() {
+    let all = ["Alice::1220", "TicketWizard::1220"];
+    let bank = ["Alice::1220", "TicketWizard::1220", "ScroogeBank::1220"];
+    let data = [
+        serde_json::json!({ "offset": 9 }),
+        serde_json::json!({ "offset": 9, "node_id": 0, "choice_name": "Accept", "consuming": true,
+            "acting_parties": ["Alice::1220"], "witness_parties": all }),
+        serde_json::json!({ "offset": 9, "node_id": 2, "choice_name": "Transfer", "consuming": false,
+            "acting_parties": ["Alice::1220"], "witness_parties": bank }),
+        serde_json::json!({ "offset": 9, "node_id": 3, "signatories": ["ScroogeBank::1220"],
+            "observers": ["TicketWizard::1220"], "witness_parties": bank }),
+        serde_json::json!({ "offset": 9, "node_id": 4, "choice_name": "Archive", "consuming": true,
+            "acting_parties": ["Alice::1220"], "witness_parties": bank }),
+        serde_json::json!({ "offset": 9, "node_id": 5, "signatories": ["TicketWizard::1220", "Alice::1220"],
+            "witness_parties": all }),
+    ];
+    let names = ["transaction:9", "accept", "transfer", "cash", "archive", "agreement"];
+    let kinds = [
+        NodeKind::Transaction,
+        NodeKind::Exercised,
+        NodeKind::Exercised,
+        NodeKind::Created,
+        NodeKind::Exercised,
+        NodeKind::Created,
+    ];
+    let nodes: Vec<ModelNode> =
+        (0..6).map(|i| ModelNode { kind: kinds[i], data: &data[i], name: names[i] }).collect();
+    let edge = |from, to, kind: &str, index| ModelEdge { from, to, kind: kind.into(), index: Some(index) };
+    let edges = vec![
+        edge(0, 1, "ACTION", 0),
+        edge(1, 2, "CONSEQUENCE", 0),
+        edge(1, 5, "CONSEQUENCE", 1),
+        edge(2, 3, "CONSEQUENCE", 0),
+        edge(2, 4, "CONSEQUENCE", 1),
+    ];
+    let m = Model::new(&nodes, edges);
+    let for_party = |p: &str| {
+        let keep = canton::visible(&m, &Filters { party: Some(p.into()), ..Filters::default() });
+        let shown: Vec<&str> = (0..6).filter(|&i| keep[i]).map(|i| names[i]).collect();
+        let at = canton::layout(&m, &keep, 1, 0.0).pos;
+        let Some((tx, _)) = at[0] else { return (shown, Vec::new()) };
+        let indent: Vec<f32> = (0..6).filter(|&i| keep[i]).map(|i| at[i].unwrap().0 - tx).collect();
+        (shown, indent)
+    };
+
+    for p in ["Alice::1220", "TicketWizard::1220"] {
+        let (shown, indent) = for_party(p);
+        assert_eq!(shown, names, "{p}");
+        // Accept under the transaction, Transfer under Accept, its events under it.
+        assert!(indent[1] > 0.0 && indent[2] > indent[1] && indent[3] > indent[2], "{p}: {indent:?}");
+        assert_eq!(indent[3], indent[4]);
+    }
+
+    // The bank sees only the Transfer subtree; signatories and actors on the
+    // hidden events don't count, and Transfer hangs straight under the
+    // transaction rather than at Accept's child depth.
+    let (shown, indent) = for_party("ScroogeBank::1220");
+    assert_eq!(shown, ["transaction:9", "transfer", "cash", "archive"]);
+    let (_, alice) = for_party("Alice::1220");
+    assert_eq!(indent[1], alice[1], "Transfer takes Accept's place: {indent:?}");
+    assert_eq!(indent[2], alice[2]);
+    assert_eq!(indent[3], alice[2]);
+
+    // Records without witnesses keep matching on the parties named on them.
+    let (none, _) = for_party("Nobody::1220");
+    assert!(none.is_empty());
+}

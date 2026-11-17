@@ -135,6 +135,8 @@ pub struct Facts {
     /// under, itself for a root. `None` for a party, and for an event whose
     /// root isn't loaded.
     pub root: Option<usize>,
+    /// The event it is a consequence of, `None` for a root's own events.
+    pub parent: Option<usize>,
     pub depth: usize,
     /// Its place in its root's preorder walk; 0 for the root.
     pub order: usize,
@@ -143,6 +145,8 @@ pub struct Facts {
     /// Only on `Created`.
     pub status: Option<Status>,
     /// Every party joined to the record, and for a root every party in its tree.
+    /// For an event that records `witness_parties` (as the syncer writes
+    /// them), exactly those: the parties whose projection holds it.
     pub parties: BTreeSet<String>,
     pub title: String,
     pub subtitle: String,
@@ -266,9 +270,18 @@ impl Model {
             .filter(|&o| self.kinds[o] == NodeKind::Party)
             .filter_map(|o| self.str_prop(o, "party_id").map(str::to_string))
             .collect();
-        for field in PARTY_FIELDS {
-            if let Some(v) = data.get(*field) {
-                parties.extend(parties_in(v));
+        // The Ledger API's witnesses say who sees an event; without them,
+        // fall back to the parties named on the record.
+        match data.get("witness_parties") {
+            Some(w) if matches!(kind, NodeKind::Created | NodeKind::Exercised | NodeKind::Fetched) => {
+                parties = parties_in(w).into_iter().collect();
+            }
+            _ => {
+                for field in PARTY_FIELDS {
+                    if let Some(v) = data.get(*field) {
+                        parties.extend(parties_in(v));
+                    }
+                }
             }
         }
         let mut f = Facts {
@@ -349,8 +362,9 @@ impl Model {
         for r in roots {
             self.facts[r].root = Some(r);
             let mut order = 0;
-            let mut stack: Vec<(usize, usize)> = self.children(r).into_iter().rev().map(|c| (c, 1)).collect();
-            while let Some((i, depth)) = stack.pop() {
+            let mut stack: Vec<(usize, usize, Option<usize>)> =
+                self.children(r).into_iter().rev().map(|c| (c, 1, None)).collect();
+            while let Some((i, depth, parent)) = stack.pop() {
                 // Already under an earlier root (or a root itself): it stays there.
                 if self.facts[i].root.is_some() {
                     continue;
@@ -359,12 +373,13 @@ impl Model {
                 let (domain, offset) = (self.facts[r].domain.clone(), self.facts[r].offset);
                 let f = &mut self.facts[i];
                 f.root = Some(r);
+                f.parent = parent;
                 f.depth = depth;
                 f.order = order;
                 f.domain = f.domain.clone().or(domain);
                 f.offset = f.offset.or(offset);
                 for c in self.children(i).into_iter().rev() {
-                    stack.push((c, depth + 1));
+                    stack.push((c, depth + 1, Some(i)));
                 }
             }
         }
@@ -618,7 +633,18 @@ pub fn layout(m: &Model, keep: &[bool], columns: usize, fill: f32) -> Layout {
             let mut tree = members.remove(&r).unwrap_or_default();
             tree.sort_by_key(|&j| m.facts[j].order);
             for j in tree {
-                let indent = m.facts[j].depth.saturating_sub(1) as f32 * INDENT + if keep[r] { INDENT } else { 0.0 };
+                // Indented under its nearest shown ancestor: an event whose
+                // parent is filtered out (a party that sees only part of a
+                // transaction) hangs straight under the transaction.
+                let mut depth = 1;
+                let mut up = m.facts[j].parent;
+                while let Some(a) = up {
+                    if keep[a] {
+                        depth += 1;
+                    }
+                    up = m.facts[a].parent;
+                }
+                let indent = (depth - 1) as f32 * INDENT + if keep[r] { INDENT } else { 0.0 };
                 cards.push((j, indent));
             }
         }
