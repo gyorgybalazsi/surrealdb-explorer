@@ -11,6 +11,8 @@ use surrealdb_explorer::canton;
 use surrealdb_explorer::graph;
 
 pub(super) const SIDEBAR_WIDTH: f32 = 320.0;
+/// The sidebar's scrollable, scrolled to the end to show a new selection.
+pub(super) const SIDEBAR_SCROLL: &str = "sidebar";
 pub(super) const MUTED: Color = Color::from_rgb(0.47, 0.47, 0.47);
 pub(super) const WARNING: Color = Color::from_rgb(0.67, 0.4, 0.0);
 pub(super) const ERROR: Color = Color::from_rgb(0.7, 0.0, 0.0);
@@ -118,7 +120,7 @@ impl App {
         col = col.push(heading("Selected"));
         col = col.push(self.details());
 
-        scrollable(col).height(Fill).into()
+        scrollable(col).id(SIDEBAR_SCROLL).height(Fill).into()
     }
 
     /// Options that apply whichever view is chosen: reloading, the table
@@ -355,6 +357,12 @@ impl App {
             ]
             .spacing(6)
             .align_y(iced::Alignment::Center),
+        );
+        col = col.push(
+            checkbox(self.config.graph.canton_follow_newest)
+                .label("Follow the newest transactions")
+                .on_toggle(Message::ToggleFollowNewest)
+                .text_size(12),
         );
 
         col = col.push(heading("Node kinds"));

@@ -19,6 +19,7 @@ use surrealdb_explorer::query::{self, QueryOutcome};
 use tracing::{debug, error, info, warn};
 
 use crate::gui::canvas::{CANTON_MARGIN, Camera, GraphView, SCROLLBAR_WIDTH};
+use crate::gui::sidebar::SIDEBAR_SCROLL;
 use crate::gui::layout::Layout;
 use crate::gui::model::Graph;
 use crate::gui::settings::{SettingsField, SettingsForm};
@@ -101,6 +102,8 @@ pub enum Message {
     CantonScrollTo(f32),
     /// Turns zooming to fit after each filter change on or off (and remembers it).
     ToggleFitOnFilter(bool),
+    /// Turns following the newest transactions in the Canton view on or off (and remembers it).
+    ToggleFollowNewest(bool),
     /// Draws the whole database even though it's bigger than `overview_above`.
     LoadEverything,
     /// From an overview table's menu: draws that table's records.
@@ -362,6 +365,10 @@ impl App {
                     Selection::Edge(e) => e < self.graph.edges.len(),
                 });
                 self.menu = None;
+                // The details are at the end of the sidebar: show them.
+                if self.selection.is_some() {
+                    return iced::widget::operation::snap_to_end(SIDEBAR_SCROLL);
+                }
             }
             Message::DragNode(node, pos) => {
                 let Some(n) = self.graph.nodes.get_mut(node) else { return Task::none() };
@@ -504,6 +511,15 @@ impl App {
                     // The views load different records: a window of transactions, or every table.
                     self.reload();
                     self.relayout_canton();
+                }
+            }
+            Message::ToggleFollowNewest(on) => {
+                self.config.graph.canton_follow_newest = on;
+                if let Err(e) = self.config.save() {
+                    warn!(error = %e, "could not save the setting");
+                }
+                if on && self.canton() {
+                    self.scroll_canton(f32::MAX);
                 }
             }
             Message::ToggleFitOnFilter(on) => {
@@ -664,6 +680,42 @@ impl App {
                         } else {
                             self.notice = Some("Claude Code changed data. Show the whole graph to see it.".into());
                         }
+                    }
+                    WindowCommand::Select { id, reply } if id.is_empty() => {
+                        self.selection = None;
+                        let _ = reply.send(Ok(serde_json::json!({ "selected": null })));
+                    }
+                    WindowCommand::Select { id, reply } => {
+                        let Some(i) = self.graph.nodes.iter().position(|n| n.id == id) else {
+                            let _ = reply.send(Err(format!("no record {id} is drawn in the window")));
+                            return Task::none();
+                        };
+                        info!(record = %id, "selecting a record for Claude Code");
+                        self.selection = Some(Selection::Node(i));
+                        self.menu = None;
+                        self.bring_into_view(i);
+                        let _ = reply.send(Ok(self.card_on_screen(i)));
+                        return iced::widget::operation::snap_to_end(SIDEBAR_SCROLL);
+                    }
+                    WindowCommand::Scroll { to, reply } => {
+                        let answer = match to.as_str() {
+                            "top" if self.canton() => {
+                                self.scroll_canton(0.0);
+                                Ok(serde_json::json!({ "scroll": self.canton_scroll }))
+                            }
+                            "bottom" if self.canton() => {
+                                self.scroll_canton(f32::MAX);
+                                Ok(serde_json::json!({ "scroll": self.canton_scroll }))
+                            }
+                            id => match self.graph.nodes.iter().position(|n| n.id == id) {
+                                Some(i) => {
+                                    self.bring_into_view(i);
+                                    Ok(self.card_on_screen(i))
+                                }
+                                None => Err(format!("no record {id} is drawn in the window (or top/bottom outside the Canton view)")),
+                            },
+                        };
+                        let _ = reply.send(answer);
                     }
                     WindowCommand::ApproveWrite { query, reply } => {
                         // A newer request replaces an unanswered one, which counts as declined.
@@ -920,12 +972,15 @@ impl App {
             .and_then(|id| self.graph.nodes.iter().position(|n| n.id == id))
             .map(Selection::Node);
         self.hover = None;
+        let added = self.graph.nodes.len() as i64 - before as i64;
         if self.canton() {
             self.canton_layout_fitted();
+            if added > 0 && self.config.graph.canton_follow_newest {
+                self.scroll_canton(f32::MAX);
+            }
         } else {
             self.layout.reheat(0.3);
         }
-        let added = self.graph.nodes.len() as i64 - before as i64;
         self.notice = Some(match added {
             0 => "Updated".into(),
             n if n > 0 => format!("Updated: {} new", plural(n as usize, "record")),
@@ -999,6 +1054,38 @@ impl App {
             offset: Vector::new(CANTON_MARGIN.0 - w / 2.0, CANTON_MARGIN.1 - self.canton_scroll - h / 2.0),
             scale: self.canton_scale(),
         };
+    }
+
+    /// Moves the view so record `i`'s card is on screen: in the Canton view
+    /// it scrolls (only if the card isn't fully shown, putting it a third of
+    /// the way down); in the standard view the camera centres on it.
+    fn bring_into_view(&mut self, i: usize) {
+        let pos = self.graph.nodes[i].pos;
+        if self.canton() {
+            let scale = self.canton_scale();
+            let h = self.canvas_size.height;
+            let top = CANTON_MARGIN.1 + pos.y * scale - self.canton_scroll;
+            let half = 40.0 * scale;
+            if top - half < 0.0 || top + half > h {
+                self.scroll_canton(CANTON_MARGIN.1 + pos.y * scale - h / 3.0);
+            }
+        } else {
+            self.following = false;
+            self.camera.offset = pos * (-self.camera.scale);
+        }
+    }
+
+    /// Where record `i`'s card centre is drawn, in canvas pixels from the
+    /// canvas's top-left corner, with the canvas size.
+    fn card_on_screen(&self, i: usize) -> serde_json::Value {
+        let bounds = iced::Rectangle::new(Point::ORIGIN, self.canvas_size);
+        let p = self.camera.to_screen(bounds, self.graph.nodes[i].pos);
+        serde_json::json!({
+            "id": self.graph.nodes[i].id,
+            "x": p.x, "y": p.y,
+            "canvas_width": self.canvas_size.width, "canvas_height": self.canvas_size.height,
+            "scroll": self.canton_scroll,
+        })
     }
 
     /// Zooms and pans so every shown record is in view. The Canton view
@@ -1086,6 +1173,7 @@ impl App {
         new.graph.auto_refresh = live.graph.auto_refresh;
         new.graph.fit_on_filter = live.graph.fit_on_filter;
         new.graph.canton_columns = live.graph.canton_columns;
+        new.graph.canton_follow_newest = live.graph.canton_follow_newest;
         new.graph.visualization = live.graph.visualization;
         new.mcp = live.mcp.clone();
         if let Err(e) = new.save() {

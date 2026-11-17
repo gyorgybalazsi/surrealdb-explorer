@@ -38,6 +38,11 @@ pub enum WindowCommand {
     ApproveWrite { query: String, reply: oneshot::Sender<bool> },
     /// Data was changed through a tool; the window should show the current state.
     DataChanged,
+    /// Select a record, as a click on it does, and scroll it into view.
+    /// Answers with where its card is drawn, or why it couldn't.
+    Select { id: String, reply: oneshot::Sender<Result<serde_json::Value, String>> },
+    /// Scroll the graph: `top`, `bottom`, or to a record's id.
+    Scroll { to: String, reply: oneshot::Sender<Result<serde_json::Value, String>> },
 }
 
 /// What the window tells the MCP server: kept up to date by the window.
@@ -107,6 +112,18 @@ pub struct ShowRequest {
         drawn; relations bring the records at both ends. To get path rows in the window's Table \
         view (like Neo4j), return one array per path: [record, relation, record, ...].")]
     pub query: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SelectRequest {
+    #[schemars(description = "The id of a record drawn in the window, e.g. created:abc or exercised:xyz; empty to clear the selection.")]
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ScrollRequest {
+    #[schemars(description = "Where to scroll the graph: \"top\", \"bottom\", or the id of a drawn record to bring into view.")]
+    pub to: String,
 }
 
 #[derive(Clone)]
@@ -201,6 +218,22 @@ impl Explorer {
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 
+    #[tool(description = "Select a record in the app window, as clicking it does: it is \
+        highlighted, scrolled into view, and its fields appear under Selected in the sidebar. \
+        Returns the centre of its card in the graph canvas, in pixels.")]
+    async fn select_record(&self, Parameters(SelectRequest { id }): Parameters<SelectRequest>) -> Result<CallToolResult, McpError> {
+        let (reply, answer) = oneshot::channel();
+        self.window_request(WindowCommand::Select { id, reply }, answer).await
+    }
+
+    #[tool(description = "Scroll the graph in the app window to the top, to the bottom, or so \
+        that a given record is in view. The Canton event graph view scrolls; in the standard \
+        view only a record id is accepted, and the camera centres on it.")]
+    async fn scroll_graph(&self, Parameters(ScrollRequest { to }): Parameters<ScrollRequest>) -> Result<CallToolResult, McpError> {
+        let (reply, answer) = oneshot::channel();
+        self.window_request(WindowCommand::Scroll { to, reply }, answer).await
+    }
+
     #[tool(description = "Go back to the overview of the whole database in the app window.")]
     async fn overview(&self) -> Result<CallToolResult, McpError> {
         self.shared.to_window.send(WindowCommand::Overview).map_err(|_| internal("the window is closed"))?;
@@ -209,6 +242,20 @@ impl Explorer {
 }
 
 impl Explorer {
+    /// Sends the window a command and waits for its answer.
+    async fn window_request(
+        &self,
+        command: WindowCommand,
+        answer: oneshot::Receiver<Result<serde_json::Value, String>>,
+    ) -> Result<CallToolResult, McpError> {
+        self.shared.to_window.send(command).map_err(|_| internal("the window is closed"))?;
+        match tokio::time::timeout(Duration::from_secs(10), answer).await {
+            Ok(Ok(Ok(v))) => Ok(CallToolResult::success(vec![ContentBlock::text(v.to_string())])),
+            Ok(Ok(Err(e))) => Ok(CallToolResult::error(vec![ContentBlock::text(e)])),
+            _ => Err(internal("the window didn't answer")),
+        }
+    }
+
     /// Asks the user in the window; `false` if they decline or don't answer in time.
     async fn approved(&self, query: &str) -> bool {
         let (reply, answer) = oneshot::channel();

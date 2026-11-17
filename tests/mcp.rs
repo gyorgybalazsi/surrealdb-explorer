@@ -102,6 +102,14 @@ fn claude_code_can_read_draw_and_ask_to_write() {
                         WindowCommand::Show { query, graph, .. } => {
                             shown.lock().unwrap().push((query, graph.data.nodes.len()));
                         }
+                        // The window answers for person:alice only, as if only she were drawn.
+                        WindowCommand::Select { id, reply } | WindowCommand::Scroll { to: id, reply } => {
+                            let _ = reply.send(if id == "person:alice" || id.is_empty() || id == "bottom" {
+                                Ok(json!({ "id": id }))
+                            } else {
+                                Err(format!("no record {id} is drawn in the window"))
+                            });
+                        }
                         _ => {}
                     }
                 }
@@ -117,7 +125,7 @@ fn claude_code_can_read_draw_and_ask_to_write() {
         let mut names: Vec<&str> =
             tools["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
         names.sort();
-        assert_eq!(names, ["get_schema", "get_selection", "overview", "query", "show"]);
+        assert_eq!(names, ["get_schema", "get_selection", "overview", "query", "scroll_graph", "select_record", "show"]);
 
         let (schema, _) = session.call("get_schema", json!({})).await;
         assert!(schema.contains("connects: person ->knows-> person"), "{schema}");
@@ -154,5 +162,13 @@ fn claude_code_can_read_draw_and_ask_to_write() {
         shared.window.lock().unwrap().selection = Some(json!({"id": "person:alice"}));
         let (selection, _) = session.call("get_selection", json!({})).await;
         assert!(selection.contains("person:alice"));
+
+        // select_record and scroll_graph pass the window's answer on.
+        let (picked, failed) = session.call("select_record", json!({"id": "person:alice"})).await;
+        assert!(!failed && picked.contains("person:alice"), "{picked}");
+        let (missing, failed) = session.call("select_record", json!({"id": "person:nobody"})).await;
+        assert!(failed && missing.contains("no record person:nobody"), "{missing}");
+        let (_, failed) = session.call("scroll_graph", json!({"to": "bottom"})).await;
+        assert!(!failed);
     });
 }
