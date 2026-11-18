@@ -2,6 +2,9 @@
 name = "surrealdb-explorer"
 version = "0.1.0"
 edition = "2024"
+description = "Desktop graph explorer for SurrealDB, with a Canton event graph view and an MCP server for Claude Code"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/gyorgybalazsi/surrealdb-explorer"
 
 [dependencies]
 iced = { version = "0.14", features = ["canvas", "tokio"] }
