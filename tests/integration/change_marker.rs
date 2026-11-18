@@ -1,7 +1,7 @@
 //! Auto refresh's check for changes: a fingerprint that changes when records
 //! are added or removed, without counting every record of a big table.
 
-mod common;
+use crate::common;
 
 use surrealdb_explorer::graph::{self, Watch};
 use surrealdb_explorer::{data, db};

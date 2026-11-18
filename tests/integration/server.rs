@@ -2,7 +2,7 @@
 //! temporary in-memory server with the `surreal` program; skipped (with a
 //! note) if that program isn't installed.
 
-mod common;
+use crate::common;
 
 use std::process::{Child, Command, Stdio};
 

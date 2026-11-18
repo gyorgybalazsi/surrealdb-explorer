@@ -1,7 +1,7 @@
 //! Tests for the configuration file and for running queries.
 //! They use a temporary database, so they never touch `./data`.
 
-mod common;
+use crate::common;
 
 use common::temp_dir;
 use surrealdb_explorer::config::{Config, Connection, DatabaseConfig, UserLevel};

@@ -1,7 +1,7 @@
 //! Reading and writing records as Rust structs, including a nested struct.
 //! (This was the `getting_started` example.)
 
-mod common;
+use crate::common;
 
 use surrealdb::types::{RecordId, SurrealValue};
 use surrealdb_explorer::db;

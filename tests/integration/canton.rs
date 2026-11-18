@@ -2,7 +2,7 @@
 //! shape, and the model, filters and layout treat it as alt-canton's ledger
 //! explorer does.
 
-mod common;
+use crate::common;
 
 use std::collections::HashMap;
 
