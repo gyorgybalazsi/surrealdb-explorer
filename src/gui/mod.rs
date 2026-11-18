@@ -3,6 +3,7 @@
 mod app;
 mod canton_draw;
 mod canvas;
+pub(crate) mod icon;
 mod layout;
 mod model;
 mod query_panel;
@@ -25,7 +26,11 @@ pub fn run(config: Config, startup_error: Option<String>, log: Option<LogControl
     .title("SurrealDB Explorer")
     .subscription(App::subscription)
     .theme(App::theme)
-    .window_size((1200.0, 800.0))
+    .window(iced::window::Settings {
+        size: iced::Size::new(1200.0, 800.0),
+        icon: icon::window_icon(),
+        ..Default::default()
+    })
     .antialiasing(true)
     .run()
 }

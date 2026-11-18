@@ -16,6 +16,29 @@ tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 rmcp = { version = "3.9", features = ["server", "macros", "transport-streamable-http-server"] }
 axum = "0.8.9"
+png = "0.18"
+
+# The Dock icon on macOS: a window icon does nothing there, so the app sets
+# its icon image directly (the same objc2 versions winit already uses).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
+
+# `cargo bundle` (https://github.com/burtonageo/cargo-bundle) builds a macOS
+# .app (or .deb / .msi) with this icon.
+[package.metadata.bundle]
+name = "SurrealDB Explorer"
+identifier = "io.github.gyorgybalazsi.surrealdb-explorer"
+icon = [
+    "assets/icon/icon-16.png",
+    "assets/icon/icon-32.png",
+    "assets/icon/icon-64.png",
+    "assets/icon/icon-128.png",
+    "assets/icon/icon-256.png",
+    "assets/icon/icon-512.png",
+    "assets/icon/icon-1024.png",
+]
 
 [dev-dependencies]
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
