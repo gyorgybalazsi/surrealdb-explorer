@@ -36,7 +36,7 @@ jobs:
       - name: Build
         run: cargo build --all-targets --locked
 
-      # tests/server.rs skips itself: the `surreal` binary isn't installed here.
+      # tests/integration/server.rs skips itself: the `surreal` binary isn't installed here.
       - name: Test
         run: cargo test --locked
 

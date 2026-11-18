@@ -1,6 +1,6 @@
 //! Loading the sample data and erasing the database.
 
-mod common;
+use crate::common;
 
 use surrealdb_explorer::{data, db, graph};
 

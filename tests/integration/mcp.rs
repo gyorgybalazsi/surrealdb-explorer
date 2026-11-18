@@ -1,7 +1,7 @@
 //! The MCP server, spoken to over HTTP the way Claude Code does. A stand-in
 //! for the window answers write approvals and records what it was told.
 
-mod common;
+use crate::common;
 
 use std::sync::{Arc, Mutex};
 
@@ -116,7 +116,7 @@ fn claude_code_can_read_draw_and_ask_to_write() {
             });
         }
 
-        let port = 18_766;
+        let port = 18_768;
         tokio::spawn(mcp::serve(shared.clone(), port));
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         let mut session = Session::open(format!("http://127.0.0.1:{port}/mcp")).await;

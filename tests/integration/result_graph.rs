@@ -1,6 +1,6 @@
 //! Drawing a query's result: exactly what it returned, read by id.
 
-mod common;
+use crate::common;
 
 use surrealdb_explorer::{data, db, graph, query};
 
