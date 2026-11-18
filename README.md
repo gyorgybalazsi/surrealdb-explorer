@@ -96,7 +96,7 @@ for the fields it uses. Any indexer that writes this shape will work.
 cargo test
 ```
 
-`tests/server.rs` runs against a real SurrealDB server. It is skipped when the
+`tests/integration/server.rs` runs against a real SurrealDB server. It is skipped when the
 `surreal` binary isn't on your `PATH`.
 
 ## License
