@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel superseded runs on the same ref to save runner minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# The workflow only reads the code; give its token nothing more.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-test:
+    name: build / test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --all-targets --locked
+
+      # tests/server.rs skips itself: the `surreal` binary isn't installed here.
+      - name: Test
+        run: cargo test --locked
+
+      # Report only for now: the code has existing clippy findings. Once they
+      # are fixed, drop `continue-on-error` and add `-- -D warnings`.
+      - name: Clippy (report only)
+        continue-on-error: true
+        run: cargo clippy --all-targets --locked
