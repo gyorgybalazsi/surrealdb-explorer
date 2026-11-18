@@ -355,7 +355,6 @@ impl App {
         match message {
             Message::WindowOpened => {
                 crate::gui::icon::set_dock_icon();
-                Task::none()
             }
             Message::Tick => {
                 self.layout.step(&mut self.graph, self.dragging);
