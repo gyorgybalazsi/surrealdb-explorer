@@ -295,6 +295,20 @@ fn witness_parties_give_each_party_its_projection() {
     assert_eq!(indent[1], alice[1], "Transfer takes Accept's place: {indent:?}");
     assert_eq!(indent[2], alice[2]);
     assert_eq!(indent[3], alice[2]);
+    // Transfer's parent, Accept, is hidden, so a bridge joins it to the
+    // transaction; its own events keep their real CONSEQUENCE edges.
+    let keep = canton::visible(&m, &Filters { party: Some("ScroogeBank::1220".into()), ..Filters::default() });
+    assert_eq!(canton::bridges(&m, &keep), [(0, 2)]);
+    // Nothing is bridged when every parent is shown.
+    let keep = canton::visible(&m, &Filters { party: Some("Alice::1220".into()), ..Filters::default() });
+    assert!(canton::bridges(&m, &keep).is_empty());
+    // With the transaction hidden too, Transfer has no shown ancestor.
+    let only_exercised = Filters {
+        party: Some("ScroogeBank::1220".into()),
+        kinds: [NodeKind::Exercised, NodeKind::Created].into(),
+        ..Filters::default()
+    };
+    assert!(canton::bridges(&m, &canton::visible(&m, &only_exercised)).is_empty());
 
     // Records without witnesses keep matching on the parties named on them.
     let (none, _) = for_party("Nobody::1220");

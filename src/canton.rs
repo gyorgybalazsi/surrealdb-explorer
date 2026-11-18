@@ -552,6 +552,34 @@ pub fn visible(m: &Model, filters: &Filters) -> Vec<bool> {
     keep
 }
 
+/// The tree branches that stand in for hidden events: for each shown event
+/// whose parent (or, for a root's own event, root) is filtered out, a link
+/// from its nearest shown ancestor, as `(ancestor, event)`. Without them an
+/// event a party sees only part of the transaction above would hang under
+/// its transaction with nothing joining the two.
+pub fn bridges(m: &Model, keep: &[bool]) -> Vec<(usize, usize)> {
+    let mut links = Vec::new();
+    for (j, f) in m.facts.iter().enumerate() {
+        let Some(r) = f.root else { continue };
+        if !keep[j] || r == j || keep[f.parent.unwrap_or(r)] {
+            continue;
+        }
+        let mut up = f.parent;
+        let mut found = None;
+        while let Some(a) = up {
+            if keep[a] {
+                found = Some(a);
+                break;
+            }
+            up = m.facts[a].parent;
+        }
+        if let Some(a) = found.or(keep[r].then_some(r)) {
+            links.push((a, j));
+        }
+    }
+    links
+}
+
 pub const NODE_W: f32 = 168.0;
 pub const NODE_H: f32 = 40.0;
 const INDENT: f32 = 22.0;
