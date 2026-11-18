@@ -79,7 +79,7 @@ fn facts_match_the_explorer() {
     let f = |id: &str| &m.facts[at(id)];
 
     assert_eq!((f("transaction:3").title.as_str(), f("transaction:3").subtitle.as_str()), ("Tx 3", "by Bob"));
-    assert_eq!(f("created:00c1a5b2").title, "Cash");
+    assert_eq!(f("created:00c1a5b2").title, "Main:Cash");
     assert_eq!(f("created:00c1a5b2").template.as_deref(), Some("Main:Cash"));
     assert_eq!(f("exercised:[3, 1]").subtitle, "Main:Cash");
     // Consumed contracts are archived; the rest are active.
