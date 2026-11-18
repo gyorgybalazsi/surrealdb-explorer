@@ -39,20 +39,28 @@ fn decode_rgba(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
 
 /// Sets the Dock icon on macOS. A window icon does nothing there, and an app
 /// started with `cargo run` (not from a `.app` bundle) would otherwise show
-/// the generic executable icon. Must run on the main thread after the event
-/// loop exists; elsewhere it does nothing.
+/// the generic executable icon. Must run on the main thread after the app has
+/// finished launching (AppKit resets an icon set before that), so it is called
+/// when the window opens.
 #[cfg(target_os = "macos")]
 pub fn set_dock_icon() {
     use objc2::{AllocAnyThread, MainThreadMarker};
     use objc2_app_kit::{NSApplication, NSImage};
     use objc2_foundation::NSData;
 
-    let Some(mtm) = MainThreadMarker::new() else { return };
+    let Some(mtm) = MainThreadMarker::new() else {
+        tracing::warn!("not on the main thread, so the Dock icon was not set");
+        return;
+    };
     let data = NSData::with_bytes(DOCK_ICON_PNG);
-    let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else { return };
+    let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
+        tracing::warn!("the Dock icon PNG could not be loaded");
+        return;
+    };
     let app = NSApplication::sharedApplication(mtm);
     // SAFETY: `image` is a valid, retained NSImage and we are on the main thread.
     unsafe { app.setApplicationIconImage(Some(&image)) };
+    tracing::debug!("Dock icon set");
 }
 
 #[cfg(not(target_os = "macos"))]

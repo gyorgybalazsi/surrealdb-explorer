@@ -69,6 +69,9 @@ pub enum CantonFilterChange {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    /// The main window has opened: macOS has finished launching the app, so
+    /// the Dock icon can be set now (set earlier, AppKit resets it).
+    WindowOpened,
     /// An animation frame while the layout is moving.
     Tick,
     Hover(Option<usize>),
@@ -338,7 +341,8 @@ impl App {
         } else {
             Subscription::none()
         };
-        Subscription::batch([frames, refresh, Subscription::run(mcp_commands)])
+        let opened = window::open_events().map(|_| Message::WindowOpened);
+        Subscription::batch([frames, refresh, opened, Subscription::run(mcp_commands)])
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -349,6 +353,10 @@ impl App {
 
     fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::WindowOpened => {
+                crate::gui::icon::set_dock_icon();
+                Task::none()
+            }
             Message::Tick => {
                 self.layout.step(&mut self.graph, self.dragging);
                 self.follow_layout();
