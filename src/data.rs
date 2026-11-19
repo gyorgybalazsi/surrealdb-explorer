@@ -3,7 +3,7 @@
 use crate::Error;
 use surrealdb::types::Value;
 
-use crate::config::{Connection, DatabaseConfig, UserLevel};
+use crate::config::{DatabaseConfig, UserLevel};
 use crate::db::Database;
 
 /// The sample data, from `src/seed.surql`.
@@ -38,8 +38,8 @@ pub async fn load_canton_sample(db: &Database) -> Result<(), Error> {
 /// removed instead. Its users and access methods stay: the app signs in
 /// with them.
 pub async fn erase(db: &Database, config: &DatabaseConfig) -> Result<(), Error> {
-    let statements = match (config.connection, config.user_level) {
-        (Connection::Server, UserLevel::Database) => remove_definitions(db).await?,
+    let statements = match config.user_level {
+        UserLevel::Database => remove_definitions(db).await?,
         _ => {
             let name = escape_ident(&config.database);
             format!("REMOVE DATABASE IF EXISTS {name}; DEFINE DATABASE {name};")

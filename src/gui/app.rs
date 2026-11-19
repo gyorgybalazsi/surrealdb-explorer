@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use iced::widget::{button, canvas, column, container, pin, row, rule, scrollable, stack, text, text_editor};
 use iced::{Color, Element, Fill, Font, Point, Subscription, Task, Theme, Vector, window};
 use surrealdb_explorer::canton::{Filters, NodeKind, StatusFilter};
-use surrealdb_explorer::config::{Config, Connection, UserLevel, Visualization};
+use surrealdb_explorer::config::{Config, UserLevel, Visualization};
 use surrealdb_explorer::db::{self, Database};
 use surrealdb_explorer::graph::{self, GraphData, ResultGraph};
 use surrealdb_explorer::config::DatabaseConfig;
@@ -134,7 +134,6 @@ pub enum Message {
     OpenSettings,
     CloseSettings,
     SettingChanged(SettingsField, String),
-    ConnectionChanged(Connection),
     UserLevelChanged(UserLevel),
     SaveSettings,
 
@@ -169,10 +168,7 @@ pub enum Message {
 }
 
 pub struct App {
-    /// Runs the database queries. Embedded SurrealDB needs a bigger stack than
-    /// tokio worker threads get by default (2 MB); SurrealDB's docs recommend
-    /// 10 MB. With the default, queries run on worker threads spun forever at
-    /// 100% CPU here. See https://docs.rs/surrealdb/latest/surrealdb/engine/local/index.html
+    /// Runs the database queries, off iced's own threads.
     pub(super) runtime: tokio::runtime::Runtime,
     pub(super) db: Option<Database>,
     /// The configuration the app is running with.
@@ -252,7 +248,6 @@ impl App {
     pub fn boot(config: Config, startup_error: Option<String>, log: Option<LogControl>) -> App {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
-            .thread_stack_size(10 * 1024 * 1024)
             .build()
             .expect("failed to start the async runtime");
 
@@ -628,12 +623,6 @@ impl App {
             Message::SettingChanged(field, value) => {
                 if let Some(form) = &mut self.settings {
                     form.set(field, value);
-                }
-            }
-            Message::ConnectionChanged(connection) => {
-                if let Some(form) = &mut self.settings {
-                    form.connection = connection;
-                    form.message = None;
                 }
             }
             Message::UserLevelChanged(level) => {
@@ -1243,11 +1232,10 @@ impl App {
     }
 
     /// Opens the database `config` describes in place of the current one.
-    /// A different folder or server is opened first, and the old connection
-    /// is closed only if that succeeds (closing a folder releases its lock,
-    /// so it can be opened again later).
+    /// A different server (or user) is connected to first, and the old
+    /// connection is closed only if that succeeds.
     fn switch_database(&mut self, config: &DatabaseConfig) -> Result<(), String> {
-        // The same folder or server keeps its connection and only switches
+        // The same server and user keep the connection and only switch
         // namespace and database.
         let same_place = config.same_place(&self.config.database);
         match &self.db {
@@ -1283,8 +1271,7 @@ impl App {
         }
         self.query_running = true;
         let changes_data = !query::is_read_only(&sql);
-        // Run on our runtime (big thread stacks, see `runtime`), and only
-        // wait for the result on iced's side, so the window stays responsive.
+        // Run on our runtime, and only wait for the result on iced's side, so the window stays responsive.
         let handle = self.runtime.spawn(async move { query::run(&db, sql).await });
         Task::perform(
             async move {

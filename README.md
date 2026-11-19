@@ -23,8 +23,8 @@ draw in the app's window.
   projection), template, active or archived, offset range and text search. The
   view can page through the latest *n* transactions and follow new ones as they
   arrive.
-- **Two ways to connect.** Open a local SurrealKV database folder, or connect to
-  a SurrealDB server (`ws://…`) as a root, namespace or database user.
+- **Connects to a SurrealDB server** (`ws://…`) as a root, namespace or
+  database user, as one client among others.
 - **Auto refresh.** The graph redraws when another program changes the database.
 - **MCP server for Claude Code.** It lets Claude describe the schema, run
   queries, draw results in the window, and read, set or scroll to the current
@@ -35,15 +35,24 @@ draw in the app's window.
 
 ## Build and run
 
-You need a recent stable Rust toolchain (edition 2024).
+You need a recent stable Rust toolchain (edition 2024) and a running SurrealDB
+server. To try the app, [install SurrealDB](https://surrealdb.com/install) and
+start an in-memory server:
+
+```sh
+surreal db start --user root --pass secret memory
+```
+
+Then build and run the app:
 
 ```sh
 cargo run --release
 ```
 
-The first run creates `config.toml` in the current folder. Logs go to the
-terminal and to `logs/`. Every setting can also be changed in the app under
-**Settings**.
+The first run creates `config.toml` in the current folder and connects to
+`ws://127.0.0.1:8000` as `root`. Set the password (`secret` above) in
+**Settings** (Settings → Data has the sample data). Every setting can be
+changed there or in the file. Logs go to the terminal and to `logs/`.
 
 To build a macOS `.app` with the icon, use
 [cargo-bundle](https://github.com/burtonageo/cargo-bundle):
@@ -58,18 +67,14 @@ cargo bundle --release
 
 | Section      | What it sets |
 |--------------|--------------|
-| `[database]` | `connection` (`folder` or `server`), `path`, `server`, `username`, `user_level` (`root`, `namespace` or `database`), `password`, `namespace`, `database` |
+| `[database]` | `server`, `username`, `user_level` (`root`, `namespace` or `database`), `password`, `namespace`, `database` |
 | `[graph]`    | Record limits, auto refresh, the visualization (`standard` or `canton`) and Canton view options |
 | `[logging]`  | Log level and folder |
 | `[mcp]`      | `enabled` and `port` (default 8765) |
 
 `password` can be a 1Password reference (`op://vault/item/field`). The app then
 reads it with the 1Password CLI (`op`), so the secret never has to be in the
-file. `config.toml`, `data/` and `logs/` are in `.gitignore`.
-
-In folder mode the app holds the database open, so only one copy can use a
-folder at a time. Use a server connection to share the database with other
-programs.
+file. `config.toml` and `logs/` are in `.gitignore`.
 
 ## Using it from Claude Code
 
@@ -96,8 +101,8 @@ for the fields it uses. Any indexer that writes this shape will work.
 cargo test
 ```
 
-`tests/integration/server.rs` runs against a real SurrealDB server. It is skipped when the
-`surreal` binary isn't on your `PATH`.
+The tests start temporary in-memory SurrealDB servers, so they need the
+`surreal` program, on your `PATH` or in `~/.surrealdb`.
 
 ## License
 
@@ -108,8 +113,8 @@ This project is licensed under either of
 
 at your option.
 
-SurrealDB, which this app embeds, is under its own license (BSL 1.1 for the
-database engine). See [surrealdb/surrealdb](https://github.com/surrealdb/surrealdb).
+The `surrealdb` client crate this app uses is under its own license (Business
+Source License 1.1). See [surrealdb/surrealdb](https://github.com/surrealdb/surrealdb).
 
 Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in this work by you, as defined in the Apache-2.0 license, shall
