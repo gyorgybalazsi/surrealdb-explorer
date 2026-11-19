@@ -10,7 +10,7 @@ use surrealdb_explorer::{db, graph, query};
 #[test]
 fn config_is_created_with_defaults_and_round_trips() {
     let dir = temp_dir("config");
-    let path = dir.join("config.toml");
+    let path = dir.path().join("config.toml");
 
     let (config, created) = Config::load_or_create_at(&path).unwrap();
     assert!(created);
@@ -29,7 +29,7 @@ fn config_is_created_with_defaults_and_round_trips() {
 #[test]
 fn missing_fields_take_defaults_and_bad_values_are_refused() {
     let dir = temp_dir("partial");
-    let path = dir.join("config.toml");
+    let path = dir.path().join("config.toml");
 
     std::fs::write(&path, "[graph]\nmax_records_per_table = 7\n").unwrap();
     let (config, _) = Config::load_or_create_at(&path).unwrap();

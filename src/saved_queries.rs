@@ -108,16 +108,21 @@ impl SavedQueries {
 mod tests {
     use super::*;
 
-    fn temp_file(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("sdbx-saved-queries-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir.join(QUERIES_FILE)
+    /// A queries file path in a new temporary folder. Keep the returned
+    /// folder alive for the test: it is removed when dropped, also when the
+    /// test fails or panics.
+    fn temp_file(name: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("sdbx-saved-queries-{name}-"))
+            .tempdir()
+            .unwrap();
+        let path = dir.path().join(QUERIES_FILE);
+        (dir, path)
     }
 
     #[test]
     fn a_new_file_starts_with_the_ticket_demo_query() {
-        let path = temp_file("new");
+        let (_dir, path) = temp_file("new");
         let queries = SavedQueries::load_or_create_at(&path).unwrap();
         assert!(path.exists());
         assert_eq!(queries.names(), vec![TICKET_DEMO_NAME.to_string()]);
@@ -128,7 +133,7 @@ mod tests {
 
     #[test]
     fn saved_queries_are_added_replaced_and_deleted() {
-        let path = temp_file("edit");
+        let (_dir, path) = temp_file("edit");
         let mut queries = SavedQueries::load_or_create_at(&path).unwrap();
         assert!(!queries.put(" People ", "SELECT * FROM person;").unwrap());
         assert!(queries.put("People", "SELECT name FROM person;").unwrap());
@@ -141,7 +146,7 @@ mod tests {
 
     #[test]
     fn a_deleted_default_stays_deleted() {
-        let path = temp_file("delete");
+        let (_dir, path) = temp_file("delete");
         let mut queries = SavedQueries::load_or_create_at(&path).unwrap();
         assert!(queries.remove(TICKET_DEMO_NAME));
         assert!(!queries.remove(TICKET_DEMO_NAME));
