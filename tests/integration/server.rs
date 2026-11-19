@@ -161,3 +161,60 @@ fn a_database_user_erases_its_database() {
         }
     });
 }
+
+
+/// With a read-only viewer user set, the queries a person types or Claude
+/// Code sends run as that user: the server keeps them from changing data.
+#[test]
+fn queries_run_as_the_read_only_viewer() {
+    let mut config = common::temp_database("viewer_queries");
+    common::run(async move {
+        let main = db::connect(&config).await.unwrap();
+        main.query("DEFINE USER viewer ON DATABASE PASSWORD 'viewer-pass' ROLES VIEWER;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        data::load_sample_data(&main).await.unwrap();
+
+        // Without a viewer user, queries use the main connection.
+        assert!(matches!(db::Queries::connect(&config).await, db::Queries::Main));
+
+        config.viewer_username = "viewer".into();
+        config.viewer_password = "wrong".into();
+        let failed = db::Queries::connect(&config).await;
+        assert!(failed.pick(&main).is_err(), "a viewer that can't sign in runs nothing, rather than the main user");
+
+        config.viewer_password = "viewer-pass".into();
+        let queries = db::Queries::connect(&config).await;
+        assert!(queries.enforced());
+        let viewer = queries.pick(&main).unwrap();
+
+        let read = "SELECT VALUE id FROM person:alice;";
+        let outcome = query::run(&viewer, read.into()).await;
+        assert!(!query::record_ids(&outcome).is_empty(), "the viewer reads");
+
+        // Writes change nothing. The server skips data changes without an
+        // error and refuses definitions; the note says what happened.
+        let write = "DELETE person:alice; CREATE person:eve; DEFINE TABLE secret;";
+        let mut outcome = query::run(&viewer, write.into()).await;
+        query::explain_refused_writes(&mut outcome, write);
+        assert_eq!(outcome.note.as_deref(), Some(query::WRITES_IGNORED));
+        let statements = outcome.statements.unwrap();
+        let refused = statements[2].result.as_ref().unwrap_err();
+        assert!(refused.starts_with("Refused: queries run as a read-only user"), "{refused}");
+
+        let left = query::run(&main, "SELECT VALUE id FROM person:alice, person:eve; INFO FOR DB;".into()).await;
+        let left = left.statements.unwrap();
+        assert_eq!(left[0].result.as_ref().unwrap(), &serde_json::json!(["person:alice"]));
+        assert!(left[1].result.as_ref().unwrap()["tables"].get("secret").is_none());
+
+        // A read gets no note.
+        let mut outcome = query::run(&viewer, read.into()).await;
+        query::explain_refused_writes(&mut outcome, read);
+        assert!(outcome.note.is_none());
+
+        queries.close().await;
+        db::close(main).await.unwrap();
+    });
+}

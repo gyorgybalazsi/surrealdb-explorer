@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
+use crate::secret;
 
 /// Where the configuration is read from and saved to.
 pub const CONFIG_FILE: &str = "config.toml";
@@ -40,7 +41,7 @@ impl Default for McpConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DatabaseConfig {
     /// Address of the SurrealDB server, e.g. `ws://127.0.0.1:8000`.
@@ -54,6 +55,15 @@ pub struct DatabaseConfig {
     pub password: String,
     pub namespace: String,
     pub database: String,
+    /// A read-only user (`ROLES VIEWER`) for the queries typed in the query
+    /// panel or sent by Claude Code, so the server itself refuses any that
+    /// would change data. Empty: those queries use the user above, and the
+    /// app refuses the ones that look like writes.
+    pub viewer_username: String,
+    /// Where the viewer user is defined; usually on the database.
+    pub viewer_user_level: UserLevel,
+    /// The viewer's password, or a 1Password reference to it (`op://…`).
+    pub viewer_password: String,
 }
 
 /// Where a server user is defined (`DEFINE USER … ON ROOT | NAMESPACE | DATABASE`).
@@ -81,6 +91,24 @@ impl std::fmt::Display for UserLevel {
     }
 }
 
+/// Leaves the passwords out (a 1Password reference is shown): settings are logged.
+impl std::fmt::Debug for DatabaseConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let hidden = |p: &str| if secret::is_1password_reference(p) { p.trim().to_string() } else { "…".to_string() };
+        f.debug_struct("DatabaseConfig")
+            .field("server", &self.server)
+            .field("username", &self.username)
+            .field("user_level", &self.user_level)
+            .field("password", &hidden(&self.password))
+            .field("namespace", &self.namespace)
+            .field("database", &self.database)
+            .field("viewer_username", &self.viewer_username)
+            .field("viewer_user_level", &self.viewer_user_level)
+            .field("viewer_password", &hidden(&self.viewer_password))
+            .finish()
+    }
+}
+
 impl DatabaseConfig {
     /// Whether `other` reaches the same server as the same user (it may
     /// still use another namespace or database).
@@ -96,6 +124,20 @@ impl DatabaseConfig {
                 UserLevel::Namespace => self.namespace == other.namespace,
                 UserLevel::Database => self.namespace == other.namespace && self.database == other.database,
             }
+    }
+
+    /// The connection settings of the read-only viewer user, if one is set:
+    /// the same server, namespace and database, signed in as the viewer.
+    pub fn viewer(&self) -> Option<DatabaseConfig> {
+        let username = self.viewer_username.trim();
+        (!username.is_empty()).then(|| DatabaseConfig {
+            username: username.to_string(),
+            user_level: self.viewer_user_level,
+            password: self.viewer_password.clone(),
+            viewer_username: String::new(),
+            viewer_password: String::new(),
+            ..self.clone()
+        })
     }
 
     /// Where the database is, for messages and the log (never the password).
@@ -190,6 +232,9 @@ impl Default for DatabaseConfig {
             password: String::new(),
             namespace: "main".into(),
             database: "main".into(),
+            viewer_username: String::new(),
+            viewer_user_level: UserLevel::Database,
+            viewer_password: String::new(),
         }
     }
 }

@@ -8,7 +8,7 @@ use iced::widget::{button, canvas, column, container, pin, row, rule, scrollable
 use iced::{Color, Element, Fill, Font, Point, Subscription, Task, Theme, Vector, window};
 use surrealdb_explorer::canton::{Filters, NodeKind, StatusFilter};
 use surrealdb_explorer::config::{Config, UserLevel, Visualization};
-use surrealdb_explorer::db::{self, Database};
+use surrealdb_explorer::db::{self, Database, Queries};
 use surrealdb_explorer::graph::{self, GraphData, ResultGraph};
 use surrealdb_explorer::config::DatabaseConfig;
 use surrealdb_explorer::data;
@@ -135,14 +135,15 @@ pub enum Message {
     CloseSettings,
     SettingChanged(SettingsField, String),
     UserLevelChanged(UserLevel),
+    ViewerUserLevelChanged(UserLevel),
     SaveSettings,
 
     // Query panel
     ToggleQuery,
     QueryEdited(text_editor::Action),
     RunQuery,
-    /// The query's outcome, and whether the query may have changed data.
-    QueryDone(QueryOutcome, bool),
+    /// The query's outcome.
+    QueryDone(QueryOutcome),
     ShowTab(Tab),
     /// The last query's result, read from the database as a graph.
     ResultLoaded(Result<ResultGraph, String>),
@@ -171,6 +172,9 @@ pub struct App {
     /// Runs the database queries, off iced's own threads.
     pub(super) runtime: tokio::runtime::Runtime,
     pub(super) db: Option<Database>,
+    /// Where the queries typed in the query panel run: as the read-only
+    /// viewer user, if one is set.
+    pub(super) queries: Queries,
     /// The configuration the app is running with.
     pub(super) config: Config,
     /// Changes the log level when settings are saved.
@@ -267,9 +271,15 @@ impl App {
             Err(e) => (None, GraphData::default(), Some(format!("Could not open the database: {e}"))),
         };
 
+        let queries = runtime.block_on(Queries::connect(&config.database));
+        if let Queries::Failed(e) = &queries {
+            error!(error = %e, "could not connect the viewer user");
+        }
+
         let mcp = config.mcp.enabled.then(|| start_mcp(&runtime, config.mcp.port));
         if let Some(shared) = &mcp {
             *shared.db.lock().unwrap() = db.clone();
+            *shared.queries.lock().unwrap() = queries.clone();
             *shared.limits.lock().unwrap() = (config.graph.max_result_records, config.graph.connect_results);
         }
 
@@ -279,6 +289,7 @@ impl App {
             synced_selection: None,
             runtime,
             db,
+            queries,
             config,
             log,
             graph: Graph::new(data, None),
@@ -631,23 +642,25 @@ impl App {
                     form.message = None;
                 }
             }
+            Message::ViewerUserLevelChanged(level) => {
+                if let Some(form) = &mut self.settings {
+                    form.viewer_user_level = level;
+                    form.message = None;
+                }
+            }
             Message::SaveSettings => self.save_settings(),
 
             Message::ToggleQuery => self.query_open = !self.query_open,
             Message::QueryEdited(action) => self.query_text.perform(action),
             Message::RunQuery => return self.run_query(),
             Message::ShowTab(tab) => self.tab = tab,
-            Message::QueryDone(outcome, changes_data) => {
+            Message::QueryDone(outcome) => {
                 self.query_running = false;
                 let has_records = !query::record_ids(&outcome).is_empty();
                 self.query_outcome = Some(outcome);
-                // A result with records becomes the graph. Otherwise, a query
-                // that changed data shows the current state of the database.
+                // A result with records becomes the graph.
                 if has_records {
                     return self.load_result();
-                }
-                if changes_data {
-                    self.reload();
                 }
             }
             Message::ShowQueryInGraph => return self.load_result(),
@@ -1186,7 +1199,12 @@ impl App {
         let database_changed = new.database != old.database || self.db.is_none();
         if database_changed {
             match self.switch_database(&new.database) {
-                Ok(()) => self.config.database = new.database.clone(),
+                Ok(()) => {
+                    self.config.database = new.database.clone();
+                    if let Queries::Failed(e) = &self.queries {
+                        problems.push(format!("Queries won't run: {e}"));
+                    }
+                }
                 Err(e) => problems.push(format!("Could not open the new database, still using the previous one: {e}")),
             }
         }
@@ -1254,6 +1272,14 @@ impl App {
                 }
             }
         }
+        // The viewer signs in again: a database or namespace viewer belongs
+        // to one database or namespace.
+        let queries = self.runtime.block_on(Queries::connect(config));
+        if let Queries::Failed(e) = &queries {
+            error!(error = %e, "could not connect the viewer user");
+        }
+        let old = std::mem::replace(&mut self.queries, queries);
+        self.runtime.block_on(old.close());
         // The query results and pending actions belong to the previous database.
         // A write Claude Code asked for was meant for the previous database.
         self.answer_write(false);
@@ -1265,22 +1291,37 @@ impl App {
 
     fn run_query(&mut self) -> Task<Message> {
         let sql = self.query_text.text();
-        let Some(db) = self.db.clone() else { return Task::none() };
+        let Some(main) = &self.db else { return Task::none() };
         if sql.trim().is_empty() || self.query_running {
             return Task::none();
         }
+        // The query panel only reads. With a viewer user the server refuses
+        // writes; without one, the app refuses what looks like a write.
+        let refused = match self.queries.pick(main) {
+            Err(e) => Some(format!("The query didn't run: {e}")),
+            Ok(_) if !self.queries.enforced() && !query::is_read_only(&sql) => Some(query::WRITE_REFUSED_HERE.to_string()),
+            Ok(_) => None,
+        };
+        if let Some(message) = refused {
+            self.query_outcome = Some(QueryOutcome::refused(message));
+            return Task::none();
+        }
+        let Ok(db) = self.queries.pick(main) else { return Task::none() };
         self.query_running = true;
-        let changes_data = !query::is_read_only(&sql);
+        let enforced = self.queries.enforced();
         // Run on our runtime, and only wait for the result on iced's side, so the window stays responsive.
-        let handle = self.runtime.spawn(async move { query::run(&db, sql).await });
+        let handle = self.runtime.spawn(async move {
+            let mut outcome = query::run(&db, sql.clone()).await;
+            if enforced {
+                query::explain_refused_writes(&mut outcome, &sql);
+            }
+            outcome
+        });
         Task::perform(
             async move {
-                handle.await.unwrap_or_else(|e| QueryOutcome {
-                    statements: Err(format!("the query task failed: {e}")),
-                    elapsed: Default::default(),
-                })
+                handle.await.unwrap_or_else(|e| QueryOutcome::refused(format!("the query task failed: {e}")))
             },
-            move |outcome| Message::QueryDone(outcome, changes_data),
+            Message::QueryDone,
         )
     }
 
@@ -1359,6 +1400,9 @@ impl App {
         if let Ok(mut db) = shared.db.lock() {
             // A cheap handle copy; keeps up with database switches in Settings.
             *db = self.db.clone();
+        }
+        if let Ok(mut queries) = shared.queries.lock() {
+            *queries = self.queries.clone();
         }
         if let Ok(mut limits) = shared.limits.lock() {
             *limits = (self.config.graph.max_result_records, self.config.graph.connect_results);

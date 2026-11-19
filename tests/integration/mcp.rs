@@ -172,3 +172,55 @@ fn claude_code_can_read_draw_and_ask_to_write() {
         assert!(!failed);
     });
 }
+
+/// With a viewer user set, Claude Code's reads run as that user, and a write
+/// the user allowed runs as the main user.
+#[test]
+fn claude_code_reads_as_the_viewer() {
+    let mut config = common::temp_database("mcp_viewer");
+    common::run(async move {
+        let database = db::connect(&config).await.unwrap();
+        database
+            .query("DEFINE USER viewer ON DATABASE PASSWORD 'viewer-pass' ROLES VIEWER;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        data::load_sample_data(&database).await.unwrap();
+
+        let (to_window, mut window) = mpsc::unbounded_channel();
+        let shared = Shared::new(to_window);
+        *shared.db.lock().unwrap() = Some(database.clone());
+        // The stand-in window allows every write.
+        tokio::spawn(async move {
+            while let Some(command) = window.recv().await {
+                if let WindowCommand::ApproveWrite { reply, .. } = command {
+                    let _ = reply.send(true);
+                }
+            }
+        });
+
+        let port = 18_769;
+        tokio::spawn(mcp::serve(shared.clone(), port));
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let mut session = Session::open(format!("http://127.0.0.1:{port}/mcp")).await;
+
+        // A viewer that can't sign in: reads don't run at all.
+        config.viewer_username = "viewer".into();
+        config.viewer_password = "wrong".into();
+        *shared.queries.lock().unwrap() = db::Queries::connect(&config).await;
+        let (refused, failed) = session.call("query", json!({"query": "SELECT VALUE id FROM person;"})).await;
+        assert!(failed && refused.contains("viewer"), "{refused}");
+
+        config.viewer_password = "viewer-pass".into();
+        *shared.queries.lock().unwrap() = db::Queries::connect(&config).await;
+        let (people, failed) = session.call("query", json!({"query": "SELECT VALUE id FROM person;"})).await;
+        assert!(!failed && people.contains("person:alice"), "{people}");
+
+        // An allowed write runs as the main user.
+        let (_, failed) = session.call("query", json!({"query": "DELETE person:bob;"})).await;
+        assert!(!failed);
+        let (count, _) = session.call("query", json!({"query": "SELECT VALUE count() FROM person GROUP ALL;"})).await;
+        assert!(count.contains('5'), "bob is gone: {count}");
+    });
+}

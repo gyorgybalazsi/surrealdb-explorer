@@ -15,7 +15,8 @@ draw in the app's window.
   layout. You can hover, select, hide, focus on a record and see its
   neighbourhood. Large databases open on a table overview first.
 - **Table view and query panel.** Run SurrealQL and see each query's result as
-  its own graph or as rows.
+  its own graph or as rows. The query panel only reads: see
+  [Read-only queries](#read-only-queries).
 - **Canton event graph view.** This view is for a SurrealDB copy of a Canton
   ledger: one column per transaction, with the event tree indented under it. It
   draws `consumes` and `target` arrows, fades archived contracts, and can show
@@ -29,7 +30,7 @@ draw in the app's window.
 - **MCP server for Claude Code.** It lets Claude describe the schema, run
   queries, draw results in the window, and read, set or scroll to the current
   selection. Queries that would change data run only after you click Allow in
-  the window.
+  the window; the others run as the read-only viewer user, if one is set.
 - **Sample data.** Settings → Data → *Load sample data* or *Load Canton sample*.
   There is a larger Canton demo in [`demo/canton_demo.surql`](demo/canton_demo.surql).
 
@@ -67,14 +68,39 @@ cargo bundle --release
 
 | Section      | What it sets |
 |--------------|--------------|
-| `[database]` | `server`, `username`, `user_level` (`root`, `namespace` or `database`), `password`, `namespace`, `database` |
+| `[database]` | `server`, `username`, `user_level` (`root`, `namespace` or `database`), `password`, `namespace`, `database`, and the read-only `viewer_username`, `viewer_user_level`, `viewer_password` |
 | `[graph]`    | Record limits, auto refresh, the visualization (`standard` or `canton`) and Canton view options |
 | `[logging]`  | Log level and folder |
 | `[mcp]`      | `enabled` and `port` (default 8765) |
 
-`password` can be a 1Password reference (`op://vault/item/field`). The app then
+`password` and `viewer_password` can be a 1Password reference (`op://vault/item/field`). The app then
 reads it with the 1Password CLI (`op`), so the secret never has to be in the
 file. `config.toml` and `logs/` are in `.gitignore`.
+
+## Read-only queries
+
+The queries you type in the query panel, and the ones Claude Code sends, are
+for reading. To have the server enforce that, define a user with the `VIEWER`
+role and set it under **Settings → Read-only queries** (or `viewer_username`
+and `viewer_password` in `config.toml`):
+
+```sql
+DEFINE USER viewer ON DATABASE PASSWORD 'viewer-secret' ROLES VIEWER;
+```
+
+Those queries then run as that user, on a second connection. As a viewer,
+SurrealDB ignores `CREATE`, `UPDATE`, `DELETE` and `RELATE` (they return no
+records) and refuses `DEFINE` and `REMOVE`, so the query panel says so when a
+query looks like a write. If the viewer can't sign in, those queries don't run.
+
+The main user (`username`) is still used for drawing the graph, for
+Settings → Data (*Load sample data*, *Erase database*), and for a write
+Claude Code asks for after you click Allow.
+
+Without a viewer user, user queries run as the main user, and the app itself
+refuses the ones that look like writes before sending them. That check reads
+the query's words, so it is cautious rather than exact: a viewer user is the
+safer setup.
 
 ## Using it from Claude Code
 

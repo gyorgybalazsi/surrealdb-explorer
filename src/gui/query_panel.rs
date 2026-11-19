@@ -52,6 +52,19 @@ impl App {
         if let Some(summary) = self.query_outcome.as_ref().map(summary) {
             status = status.push(summary);
         }
+        // Why a query didn't run, or didn't change anything, in sight
+        // whichever tab is open.
+        let warning = self.query_outcome.as_ref().and_then(|o| match &o.statements {
+            Err(e) => Some(e.clone()),
+            Ok(_) => o.note.clone(),
+        });
+        if let Some(warning) = warning {
+            return column![container(toggle).padding([2, 0]), editor, status, text(warning).size(12).color(ERROR)]
+                .spacing(6)
+                .padding([4, 8])
+                .height(Length::Shrink)
+                .into();
+        }
 
         column![container(toggle).padding([2, 0]), editor, status]
             .spacing(6)

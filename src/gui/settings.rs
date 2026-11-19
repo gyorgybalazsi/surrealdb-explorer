@@ -18,6 +18,8 @@ pub enum SettingsField {
     Password,
     Namespace,
     Database,
+    ViewerUsername,
+    ViewerPassword,
     MaxRecords,
     MaxResultRecords,
     RefreshSeconds,
@@ -36,6 +38,10 @@ pub struct SettingsForm {
     pub password: String,
     pub namespace: String,
     pub database: String,
+    pub viewer_username: String,
+    pub viewer_user_level: UserLevel,
+    /// The viewer's password or a 1Password reference; shown hidden.
+    pub viewer_password: String,
     pub max_records: String,
     pub max_result_records: String,
     /// Changed with the checkbox in the query panel; kept so saving doesn't reset it.
@@ -64,6 +70,9 @@ impl SettingsForm {
             password: c.database.password.clone(),
             namespace: c.database.namespace.clone(),
             database: c.database.database.clone(),
+            viewer_username: c.database.viewer_username.clone(),
+            viewer_user_level: c.database.viewer_user_level,
+            viewer_password: c.database.viewer_password.clone(),
             max_records: c.graph.max_records_per_table.to_string(),
             max_result_records: c.graph.max_result_records.to_string(),
             connect_results: c.graph.connect_results,
@@ -87,6 +96,8 @@ impl SettingsForm {
             SettingsField::Password => &mut self.password,
             SettingsField::Namespace => &mut self.namespace,
             SettingsField::Database => &mut self.database,
+            SettingsField::ViewerUsername => &mut self.viewer_username,
+            SettingsField::ViewerPassword => &mut self.viewer_password,
             SettingsField::MaxRecords => &mut self.max_records,
             SettingsField::MaxResultRecords => &mut self.max_result_records,
             SettingsField::RefreshSeconds => &mut self.refresh_seconds,
@@ -117,6 +128,9 @@ impl SettingsForm {
                 password: self.password.clone(),
                 namespace: self.namespace.trim().into(),
                 database: self.database.trim().into(),
+                viewer_username: self.viewer_username.trim().into(),
+                viewer_user_level: self.viewer_user_level,
+                viewer_password: self.viewer_password.clone(),
             },
             graph: GraphConfig {
                 max_records_per_table,
@@ -198,6 +212,39 @@ impl SettingsForm {
         );
         col = col.push(field("Namespace", "", &self.namespace, SettingsField::Namespace));
         col = col.push(field("Database", "", &self.database, SettingsField::Database));
+
+        col = col.push(heading("Read-only queries"));
+        col = col.push(
+            text("Queries typed in the query panel or sent by Claude Code run as this user. Give it the VIEWER role, \
+                  so the server refuses any query that would change data. Left empty, they run as the user above, \
+                  and the app refuses queries that look like writes.")
+                .size(11)
+                .color(MUTED),
+        );
+        col = col.push(field(
+            "Viewer username",
+            "For example: DEFINE USER viewer ON DATABASE PASSWORD '…' ROLES VIEWER",
+            &self.viewer_username,
+            SettingsField::ViewerUsername,
+        ));
+        col = col.push(
+            column![
+                text("Viewer user level").size(13),
+                pick_list(UserLevel::ALL, Some(self.viewer_user_level), Message::ViewerUserLevelChanged).text_size(13),
+            ]
+            .spacing(3),
+        );
+        col = col.push(
+            column![
+                text("Viewer password").size(13),
+                text_input("", &self.viewer_password)
+                    .on_input(|v| Message::SettingChanged(SettingsField::ViewerPassword, v))
+                    .secure(!self.viewer_password.trim().starts_with("op://"))
+                    .size(13),
+                text("The password, or a 1Password reference (op://…).").size(11).color(MUTED),
+            ]
+            .spacing(3),
+        );
         col = col.push(heading("Graph: all views"));
         col = col.push(field(
             "Max records per table",
