@@ -9,6 +9,7 @@ pub mod graph;
 pub mod logging;
 pub mod mcp;
 pub mod query;
+pub mod saved_queries;
 pub mod schema;
 pub mod secret;
 
