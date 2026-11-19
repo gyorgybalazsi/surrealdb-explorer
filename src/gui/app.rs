@@ -213,6 +213,12 @@ pub struct App {
     pub(super) saved_query_name: String,
     /// Waiting for the user to confirm deleting `saved_query`.
     pub(super) confirm_delete_query: bool,
+    /// `queries.toml` could not be read, so saving is refused: writing the
+    /// list the app has (empty) would wipe the user's queries.
+    pub(super) saved_queries_unreadable: bool,
+    /// The last query switched to the Table tab by itself (its result had
+    /// no records), so a result with records switches back to the graph.
+    pub(super) table_by_itself: bool,
     /// The last query result, shown as the graph.
     pub(super) result_view: Option<ResultView>,
     pub(super) tab: Tab,
@@ -315,7 +321,7 @@ impl App {
             selection: None,
             menu: None,
             dragging: None,
-            error: startup_error.or(error).or(queries_error),
+            error: startup_error.or(error).or(queries_error.clone()),
             notice: None,
             settings: None,
             query_open: false,
@@ -326,6 +332,8 @@ impl App {
             saved_query: None,
             saved_query_name: String::new(),
             confirm_delete_query: false,
+            saved_queries_unreadable: queries_error.is_some(),
+            table_by_itself: false,
             result_view: None,
             tab: Tab::Graph,
             pending_data_action: None,
@@ -667,7 +675,10 @@ impl App {
             Message::ToggleQuery => self.query_open = !self.query_open,
             Message::QueryEdited(action) => self.query_text.perform(action),
             Message::RunQuery => return self.run_query(),
-            Message::ShowTab(tab) => self.tab = tab,
+            Message::ShowTab(tab) => {
+                self.tab = tab;
+                self.table_by_itself = false;
+            }
             Message::PickSavedQuery(name) => {
                 if let Some(saved) = self.saved_queries.get(&name) {
                     self.query_text = text_editor::Content::with_text(&saved.query);
@@ -691,7 +702,11 @@ impl App {
                 // A result without records (counts, fields, …) has nothing to
                 // draw, so show it as the table.
                 if !has_records && outcome.statements.is_ok() && !changes_data {
+                    self.table_by_itself = self.tab == Tab::Graph || self.table_by_itself;
                     self.tab = Tab::Table;
+                } else if has_records && self.table_by_itself {
+                    self.tab = Tab::Graph;
+                    self.table_by_itself = false;
                 }
                 self.query_outcome = Some(outcome);
                 // A result with records becomes the graph. Otherwise, a query
@@ -1319,6 +1334,9 @@ impl App {
     /// Saves the editor's query under the typed name (replacing a saved
     /// query of that name) and writes `queries.toml`.
     fn save_query(&mut self) {
+        if self.refuse_unreadable_queries() {
+            return;
+        }
         let name = self.saved_query_name.trim().to_string();
         match self.saved_queries.put(&name, &self.query_text.text()) {
             Ok(replaced) => {
@@ -1337,7 +1355,21 @@ impl App {
         }
     }
 
+    /// Whether saving must be refused because `queries.toml` couldn't be read.
+    fn refuse_unreadable_queries(&mut self) -> bool {
+        if self.saved_queries_unreadable {
+            self.notice = Some(format!(
+                "Not saved: {} could not be read. Fix or remove it, then restart.",
+                SavedQueries::path().display()
+            ));
+        }
+        self.saved_queries_unreadable
+    }
+
     fn delete_saved_query(&mut self) {
+        if self.refuse_unreadable_queries() {
+            return;
+        }
         let Some(name) = self.saved_query.take() else { return };
         if !self.saved_queries.remove(&name) {
             return;
