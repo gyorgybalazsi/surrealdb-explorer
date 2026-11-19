@@ -5,7 +5,9 @@ use std::collections::HashMap;
 
 use iced::keyboard::{Key, key::Named};
 use iced::widget::text_editor::{Binding, KeyPress};
-use iced::widget::{Column, button, checkbox, column, container, row, scrollable, text, text_editor};
+use iced::widget::{
+    Column, button, checkbox, column, container, pick_list, row, scrollable, space, text, text_editor, text_input,
+};
 use iced::{Alignment, Color, Element, Fill, Font, Length};
 use surrealdb_explorer::query::QueryOutcome;
 
@@ -53,10 +55,56 @@ impl App {
             status = status.push(summary);
         }
 
-        column![container(toggle).padding([2, 0]), editor, status]
+        column![container(toggle).padding([2, 0]), self.saved_queries_row(), editor, status]
             .spacing(6)
             .padding([4, 8])
             .height(Length::Shrink)
+            .into()
+    }
+
+    /// Saved queries: pick one to put it in the editor, delete it, or save
+    /// the editor's query under a name.
+    fn saved_queries_row(&self) -> Element<'_, Message> {
+        let names = self.saved_queries.names();
+        let picked = self.saved_query.clone().filter(|n| names.contains(n));
+        let placeholder = if names.is_empty() { "No saved queries" } else { "Saved queries…" };
+        let picker = pick_list(names, picked.clone(), Message::PickSavedQuery)
+            .placeholder(placeholder)
+            .text_size(13)
+            .width(Length::FillPortion(3));
+
+        let delete: Element<'_, Message> = match (&picked, self.confirm_delete_query) {
+            (Some(name), true) => row![
+                text(format!("Delete \"{name}\"?")).size(12),
+                button(text("Delete").size(12))
+                    .style(button::danger)
+                    .on_press(Message::ConfirmDeleteSavedQuery(true)),
+                button(text("Keep").size(12))
+                    .style(button::secondary)
+                    .on_press(Message::ConfirmDeleteSavedQuery(false)),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .into(),
+            _ => button(text("Delete").size(13))
+                .style(button::secondary)
+                .on_press_maybe(picked.as_ref().map(|_| Message::AskDeleteSavedQuery))
+                .into(),
+        };
+
+        let name = text_input("Name for this query", &self.saved_query_name)
+            .on_input(Message::SavedQueryName)
+            .on_submit(Message::SaveQuery)
+            .size(13)
+            .width(Length::FillPortion(2));
+        let can_save = !self.saved_query_name.trim().is_empty() && !self.query_text.text().trim().is_empty();
+        let save = button(text("Save query").size(13))
+            .style(button::secondary)
+            .on_press_maybe(can_save.then_some(Message::SaveQuery));
+
+        row![picker, delete, space::horizontal().width(16), name, save]
+            .spacing(8)
+            .align_y(Alignment::Center)
             .into()
     }
 
