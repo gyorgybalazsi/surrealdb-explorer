@@ -3,7 +3,7 @@
 use iced::widget::{Column, button, column, pick_list, row, scrollable, text, text_input};
 use iced::{Element, Fill};
 use surrealdb_explorer::config::{
-    CONFIG_FILE, Config, Connection, DatabaseConfig, GraphConfig, UserLevel,
+    CONFIG_FILE, Config, DatabaseConfig, GraphConfig, UserLevel,
     LOG_LEVELS, LoggingConfig, McpConfig, Visualization,
 };
 
@@ -13,7 +13,6 @@ use crate::gui::sidebar::{ERROR, MUTED, SIDEBAR_WIDTH, SUCCESS, heading};
 /// A text field of the settings form.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SettingsField {
-    DatabasePath,
     Server,
     Username,
     Password,
@@ -30,8 +29,6 @@ pub enum SettingsField {
 
 /// The settings as edited, kept as text until saved.
 pub struct SettingsForm {
-    pub connection: Connection,
-    pub database_path: String,
     pub server: String,
     pub username: String,
     pub user_level: UserLevel,
@@ -61,8 +58,6 @@ pub struct SettingsForm {
 impl SettingsForm {
     pub fn from_config(c: &Config) -> Self {
         SettingsForm {
-            connection: c.database.connection,
-            database_path: c.database.path.clone(),
             server: c.database.server.clone(),
             username: c.database.username.clone(),
             user_level: c.database.user_level,
@@ -87,7 +82,6 @@ impl SettingsForm {
 
     pub fn set(&mut self, field: SettingsField, value: String) {
         let target = match field {
-            SettingsField::DatabasePath => &mut self.database_path,
             SettingsField::Server => &mut self.server,
             SettingsField::Username => &mut self.username,
             SettingsField::Password => &mut self.password,
@@ -117,8 +111,6 @@ impl SettingsForm {
         let canton_transactions = whole(&self.canton_transactions, "transactions loaded at a time")?;
         let config = Config {
             database: DatabaseConfig {
-                connection: self.connection,
-                path: self.database_path.trim().into(),
                 server: self.server.trim().into(),
                 username: self.username.trim().into(),
                 user_level: self.user_level,
@@ -177,48 +169,33 @@ impl SettingsForm {
 
         col = col.push(heading("Database"));
         col = col.push(
-            column![
-                text("Connection").size(13),
-                pick_list(Connection::ALL, Some(self.connection), Message::ConnectionChanged).text_size(13),
-                text(match self.connection {
-                    Connection::Folder => "The app opens the folder itself; nothing else can use it while the app runs.",
-                    Connection::Server => "The app connects to a running SurrealDB server, which other programs can use at the same time.",
-                })
+            text("The app connects to a running SurrealDB server, which other programs can use at the same time.")
                 .size(11)
                 .color(MUTED),
+        );
+        col = col.push(field("Server", "For example ws://127.0.0.1:8000", &self.server, SettingsField::Server));
+        col = col.push(field("Username", "A user of the server; the next setting says where it is defined.", &self.username, SettingsField::Username));
+        col = col.push(
+            column![
+                text("User level").size(13),
+                pick_list(UserLevel::ALL, Some(self.user_level), Message::UserLevelChanged).text_size(13),
+                text("Where the user is defined. A namespace or database user signs in to the namespace and database below.")
+                    .size(11)
+                    .color(MUTED),
             ]
             .spacing(3),
         );
-        match self.connection {
-            Connection::Folder => {
-                col = col.push(field("Folder", "Relative to the folder the app runs from.", &self.database_path, SettingsField::DatabasePath));
-            }
-            Connection::Server => {
-                col = col.push(field("Server", "For example ws://127.0.0.1:8000", &self.server, SettingsField::Server));
-                col = col.push(field("Username", "A user of the server; the next setting says where it is defined.", &self.username, SettingsField::Username));
-                col = col.push(
-                    column![
-                        text("User level").size(13),
-                        pick_list(UserLevel::ALL, Some(self.user_level), Message::UserLevelChanged).text_size(13),
-                        text("Where the user is defined. A namespace or database user signs in to the namespace and database below.")
-                            .size(11)
-                            .color(MUTED),
-                    ]
-                    .spacing(3),
-                );
-                col = col.push(
-                    column![
-                        text("Password").size(13),
-                        text_input("", &self.password)
-                            .on_input(|v| Message::SettingChanged(SettingsField::Password, v))
-                            .secure(!self.password.trim().starts_with("op://"))
-                            .size(13),
-                        text("The password, or a 1Password reference (op://…).").size(11).color(MUTED),
-                    ]
-                    .spacing(3),
-                );
-            }
-        }
+        col = col.push(
+            column![
+                text("Password").size(13),
+                text_input("", &self.password)
+                    .on_input(|v| Message::SettingChanged(SettingsField::Password, v))
+                    .secure(!self.password.trim().starts_with("op://"))
+                    .size(13),
+                text("The password, or a 1Password reference (op://…).").size(11).color(MUTED),
+            ]
+            .spacing(3),
+        );
         col = col.push(field("Namespace", "", &self.namespace, SettingsField::Namespace));
         col = col.push(field("Database", "", &self.database, SettingsField::Database));
         col = col.push(heading("Graph: all views"));

@@ -1,60 +1,19 @@
-//! Connecting to a SurrealDB server, as one client among others. Starts a
-//! temporary in-memory server with the `surreal` program; skipped (with a
-//! note) if that program isn't installed.
+//! Server features beyond a single root user: several clients at once, and
+//! users defined on a namespace or a database. Each test starts its own
+//! server, as they define users and namespaces of their own.
 
 use crate::common;
 
-use std::process::{Child, Command, Stdio};
-
-use surrealdb_explorer::config::{Connection, DatabaseConfig, UserLevel};
+use surrealdb_explorer::config::{DatabaseConfig, UserLevel};
 use surrealdb_explorer::{data, db, graph, query};
-
-struct Server(Child);
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-fn surreal_program() -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    [format!("{home}/.surrealdb/surreal"), "surreal".to_string()]
-        .into_iter()
-        .find(|p| Command::new(p).arg("--help").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok())
-}
-
-fn start_server(port: u16) -> Option<Server> {
-    let program = surreal_program()?;
-    let child = Command::new(program)
-        .args(["start", "--user", "root", "--pass", "secret", "--bind", &format!("127.0.0.1:{port}"), "memory"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    // Wait until it accepts connections.
-    for _ in 0..50 {
-        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return Some(Server(child));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    None
-}
 
 #[test]
 fn two_clients_share_a_server() {
-    let port = 18_765;
-    let Some(_server) = start_server(port) else {
-        eprintln!("skipped: the surreal program isn't installed");
-        return;
-    };
+    let server = common::start_server();
     let config = DatabaseConfig {
-        connection: Connection::Server,
-        server: format!("ws://127.0.0.1:{port}"),
-        username: "root".into(),
-        password: "secret".into(),
+        server: server.address(),
+        username: common::USERNAME.into(),
+        password: common::PASSWORD.into(),
         ..DatabaseConfig::default()
     };
     let wrong = DatabaseConfig { password: "wrong".into(), ..config.clone() };
@@ -83,16 +42,11 @@ fn two_clients_share_a_server() {
 /// (`DEFINE USER … ON DATABASE`), sign in to their own namespace or database.
 #[test]
 fn namespace_and_database_users_sign_in() {
-    let port = 18_766;
-    let Some(_server) = start_server(port) else {
-        eprintln!("skipped: the surreal program isn't installed");
-        return;
-    };
+    let server = common::start_server();
     let root = DatabaseConfig {
-        connection: Connection::Server,
-        server: format!("ws://127.0.0.1:{port}"),
-        username: "root".into(),
-        password: "secret".into(),
+        server: server.address(),
+        username: common::USERNAME.into(),
+        password: common::PASSWORD.into(),
         namespace: "canton".into(),
         database: "event_graph".into(),
         ..DatabaseConfig::default()
@@ -156,16 +110,11 @@ fn namespace_and_database_users_sign_in() {
 /// in it instead, and keeps the user it signed in with.
 #[test]
 fn a_database_user_erases_its_database() {
-    let port = 18_767;
-    let Some(_server) = start_server(port) else {
-        eprintln!("skipped: the surreal program isn't installed");
-        return;
-    };
+    let server = common::start_server();
     let root = DatabaseConfig {
-        connection: Connection::Server,
-        server: format!("ws://127.0.0.1:{port}"),
-        username: "root".into(),
-        password: "secret".into(),
+        server: server.address(),
+        username: common::USERNAME.into(),
+        password: common::PASSWORD.into(),
         namespace: "canton".into(),
         database: "event_graph".into(),
         ..DatabaseConfig::default()

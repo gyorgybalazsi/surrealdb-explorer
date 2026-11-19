@@ -43,12 +43,7 @@ impl Default for McpConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DatabaseConfig {
-    /// Open a database folder directly, or connect to a SurrealDB server.
-    pub connection: Connection,
-    /// Folder of the SurrealKV database, relative to the folder the app runs
-    /// from (folder connection).
-    pub path: String,
-    /// Address of the SurrealDB server, e.g. `ws://127.0.0.1:8000` (server connection).
+    /// Address of the SurrealDB server, e.g. `ws://127.0.0.1:8000`.
     pub server: String,
     /// User to sign in to the server with.
     pub username: String,
@@ -59,16 +54,6 @@ pub struct DatabaseConfig {
     pub password: String,
     pub namespace: String,
     pub database: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Connection {
-    /// The app opens the folder itself; nothing else can use it meanwhile.
-    Folder,
-    /// The app is one client of a SurrealDB server, which other programs
-    /// (Studio, an import job, …) can use at the same time.
-    Server,
 }
 
 /// Where a server user is defined (`DEFINE USER … ON ROOT | NAMESPACE | DATABASE`).
@@ -96,48 +81,26 @@ impl std::fmt::Display for UserLevel {
     }
 }
 
-impl Connection {
-    pub const ALL: [Connection; 2] = [Connection::Folder, Connection::Server];
-}
-
-impl std::fmt::Display for Connection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Connection::Folder => "Database folder",
-            Connection::Server => "SurrealDB server",
-        })
-    }
-}
-
 impl DatabaseConfig {
-    /// Whether `other` reaches the same folder or server (it may still use
-    /// another namespace or database).
+    /// Whether `other` reaches the same server as the same user (it may
+    /// still use another namespace or database).
     pub fn same_place(&self, other: &DatabaseConfig) -> bool {
-        self.connection == other.connection
-            && match self.connection {
-                Connection::Folder => self.path == other.path,
-                Connection::Server => {
-                    self.server == other.server
-                        && self.username == other.username
-                        && self.password == other.password
-                        && self.user_level == other.user_level
-                        // A namespace or database user signs in to its own
-                        // namespace or database, so another one needs a new sign-in.
-                        && match self.user_level {
-                            UserLevel::Root => true,
-                            UserLevel::Namespace => self.namespace == other.namespace,
-                            UserLevel::Database => self.namespace == other.namespace && self.database == other.database,
-                        }
-                }
+        self.server == other.server
+            && self.username == other.username
+            && self.password == other.password
+            && self.user_level == other.user_level
+            // A namespace or database user signs in to its own namespace or
+            // database, so another one needs a new sign-in.
+            && match self.user_level {
+                UserLevel::Root => true,
+                UserLevel::Namespace => self.namespace == other.namespace,
+                UserLevel::Database => self.namespace == other.namespace && self.database == other.database,
             }
     }
 
     /// Where the database is, for messages and the log (never the password).
     pub fn location(&self) -> String {
-        match self.connection {
-            Connection::Folder => format!("folder {}", self.path),
-            Connection::Server => format!("server {}", self.server),
-        }
+        format!("server {}", self.server)
     }
 }
 
@@ -221,8 +184,6 @@ impl Default for Config {
 impl Default for DatabaseConfig {
     fn default() -> Self {
         DatabaseConfig {
-            connection: Connection::Folder,
-            path: "data".into(),
             server: "ws://127.0.0.1:8000".into(),
             username: "root".into(),
             user_level: UserLevel::Root,
@@ -302,14 +263,8 @@ impl Config {
         if d.namespace.trim().is_empty() || d.database.trim().is_empty() {
             return Err("namespace and database must not be empty".into());
         }
-        match d.connection {
-            Connection::Folder if d.path.trim().is_empty() => {
-                return Err("the database folder must not be empty".into());
-            }
-            Connection::Server if d.server.trim().is_empty() || d.username.trim().is_empty() => {
-                return Err("the server address and username must not be empty".into());
-            }
-            _ => {}
+        if d.server.trim().is_empty() || d.username.trim().is_empty() {
+            return Err("the server address and username must not be empty".into());
         }
         if self.graph.max_records_per_table == 0 || self.graph.max_result_records == 0 {
             return Err("the record limits must be at least 1".into());

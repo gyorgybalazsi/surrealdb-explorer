@@ -36,7 +36,15 @@ jobs:
       - name: Build
         run: cargo build --all-targets --locked
 
-      # tests/integration/server.rs skips itself: the `surreal` binary isn't installed here.
+      # The integration tests start temporary in-memory servers with the
+      # `surreal` program; they look for it in ~/.surrealdb. Keep the version
+      # in step with the surrealdb crate in Cargo.toml.
+      - name: Install SurrealDB
+        run: |
+          mkdir -p "$HOME/.surrealdb"
+          curl -sSf https://install.surrealdb.com | sh -s -- --db --version 4.0.0 "$HOME/.surrealdb"
+          "$HOME/.surrealdb/surreal" db version
+
       - name: Test
         run: cargo test --locked
 
