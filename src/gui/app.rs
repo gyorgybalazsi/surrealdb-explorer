@@ -16,6 +16,7 @@ use surrealdb_explorer::logging::LogControl;
 use surrealdb_explorer::mcp::{self, WindowCommand};
 use tokio::sync::{mpsc, oneshot};
 use surrealdb_explorer::query::{self, QueryOutcome};
+use surrealdb_explorer::saved_queries::SavedQueries;
 use tracing::{debug, error, info, warn};
 
 use crate::gui::canvas::{CANTON_MARGIN, Camera, GraphView, SCROLLBAR_WIDTH};
@@ -148,6 +149,16 @@ pub enum Message {
     ResultLoaded(Result<ResultGraph, String>),
     /// Turns drawing every relation between a result's records on or off.
     ToggleConnectResults(bool),
+    /// Puts the saved query of this name in the editor.
+    PickSavedQuery(String),
+    /// The name typed for saving the query.
+    SavedQueryName(String),
+    /// Saves the editor's query under the typed name.
+    SaveQuery,
+    /// Asks whether to delete the picked saved query.
+    AskDeleteSavedQuery,
+    /// Deletes it (true) or keeps it (false).
+    ConfirmDeleteSavedQuery(bool),
 
     // Claude Code, through the MCP server
     /// A command from the MCP server (taken out of the cell once handled).
@@ -194,6 +205,20 @@ pub struct App {
     pub(super) query_text: text_editor::Content,
     pub(super) query_running: bool,
     pub(super) query_outcome: Option<QueryOutcome>,
+    /// Named queries from `queries.toml`.
+    pub(super) saved_queries: SavedQueries,
+    /// The saved query last picked or saved, if it still exists.
+    pub(super) saved_query: Option<String>,
+    /// The name typed for saving the query.
+    pub(super) saved_query_name: String,
+    /// Waiting for the user to confirm deleting `saved_query`.
+    pub(super) confirm_delete_query: bool,
+    /// `queries.toml` could not be read, so saving is refused: writing the
+    /// list the app has (empty) would wipe the user's queries.
+    pub(super) saved_queries_unreadable: bool,
+    /// The last query switched to the Table tab by itself (its result had
+    /// no records), so a result with records switches back to the graph.
+    pub(super) table_by_itself: bool,
     /// The last query result, shown as the graph.
     pub(super) result_view: Option<ResultView>,
     pub(super) tab: Tab,
@@ -273,6 +298,14 @@ impl App {
             *shared.limits.lock().unwrap() = (config.graph.max_result_records, config.graph.connect_results);
         }
 
+        let (saved_queries, queries_error) = match SavedQueries::load_or_create_at(&SavedQueries::path()) {
+            Ok(q) => (q, None),
+            Err(e) => {
+                warn!(error = %e, "could not read the saved queries");
+                (SavedQueries { queries: Vec::new() }, Some(format!("Could not read the saved queries: {e}")))
+            }
+        };
+
         let mut app = App {
             mcp,
             pending_write: None,
@@ -288,13 +321,19 @@ impl App {
             selection: None,
             menu: None,
             dragging: None,
-            error: startup_error.or(error),
+            error: startup_error.or(error).or(queries_error.clone()),
             notice: None,
             settings: None,
             query_open: false,
             query_text: text_editor::Content::with_text("SELECT * FROM person;"),
             query_running: false,
             query_outcome: None,
+            saved_queries,
+            saved_query: None,
+            saved_query_name: String::new(),
+            confirm_delete_query: false,
+            saved_queries_unreadable: queries_error.is_some(),
+            table_by_itself: false,
             result_view: None,
             tab: Tab::Graph,
             pending_data_action: None,
@@ -636,10 +675,39 @@ impl App {
             Message::ToggleQuery => self.query_open = !self.query_open,
             Message::QueryEdited(action) => self.query_text.perform(action),
             Message::RunQuery => return self.run_query(),
-            Message::ShowTab(tab) => self.tab = tab,
+            Message::ShowTab(tab) => {
+                self.tab = tab;
+                self.table_by_itself = false;
+            }
+            Message::PickSavedQuery(name) => {
+                if let Some(saved) = self.saved_queries.get(&name) {
+                    self.query_text = text_editor::Content::with_text(&saved.query);
+                    self.saved_query_name = name.clone();
+                    self.saved_query = Some(name);
+                    self.confirm_delete_query = false;
+                }
+            }
+            Message::SavedQueryName(name) => self.saved_query_name = name,
+            Message::SaveQuery => self.save_query(),
+            Message::AskDeleteSavedQuery => self.confirm_delete_query = self.saved_query.is_some(),
+            Message::ConfirmDeleteSavedQuery(delete) => {
+                self.confirm_delete_query = false;
+                if delete {
+                    self.delete_saved_query();
+                }
+            }
             Message::QueryDone(outcome, changes_data) => {
                 self.query_running = false;
                 let has_records = !query::record_ids(&outcome).is_empty();
+                // A result without records (counts, fields, …) has nothing to
+                // draw, so show it as the table.
+                if !has_records && outcome.statements.is_ok() && !changes_data {
+                    self.table_by_itself = self.tab == Tab::Graph || self.table_by_itself;
+                    self.tab = Tab::Table;
+                } else if has_records && self.table_by_itself {
+                    self.tab = Tab::Graph;
+                    self.table_by_itself = false;
+                }
                 self.query_outcome = Some(outcome);
                 // A result with records becomes the graph. Otherwise, a query
                 // that changed data shows the current state of the database.
@@ -1261,6 +1329,58 @@ impl App {
         self.result_view = None;
         self.pending_data_action = None;
         Ok(())
+    }
+
+    /// Saves the editor's query under the typed name (replacing a saved
+    /// query of that name) and writes `queries.toml`.
+    fn save_query(&mut self) {
+        if self.refuse_unreadable_queries() {
+            return;
+        }
+        let name = self.saved_query_name.trim().to_string();
+        match self.saved_queries.put(&name, &self.query_text.text()) {
+            Ok(replaced) => {
+                if let Err(e) = self.saved_queries.save_to(&SavedQueries::path()) {
+                    warn!(error = %e, "could not save the queries");
+                    self.error = Some(format!("Could not save the queries: {e}"));
+                    return;
+                }
+                info!(query = %name, replaced, "saved a query");
+                self.notice = Some(format!("{} \"{name}\"", if replaced { "Updated" } else { "Saved" }));
+                self.saved_query_name = name.clone();
+                self.saved_query = Some(name);
+                self.confirm_delete_query = false;
+            }
+            Err(e) => self.notice = Some(format!("Not saved: {e}")),
+        }
+    }
+
+    /// Whether saving must be refused because `queries.toml` couldn't be read.
+    fn refuse_unreadable_queries(&mut self) -> bool {
+        if self.saved_queries_unreadable {
+            self.notice = Some(format!(
+                "Not saved: {} could not be read. Fix or remove it, then restart.",
+                SavedQueries::path().display()
+            ));
+        }
+        self.saved_queries_unreadable
+    }
+
+    fn delete_saved_query(&mut self) {
+        if self.refuse_unreadable_queries() {
+            return;
+        }
+        let Some(name) = self.saved_query.take() else { return };
+        if !self.saved_queries.remove(&name) {
+            return;
+        }
+        if let Err(e) = self.saved_queries.save_to(&SavedQueries::path()) {
+            warn!(error = %e, "could not save the queries");
+            self.error = Some(format!("Could not save the queries: {e}"));
+            return;
+        }
+        info!(query = %name, "deleted a saved query");
+        self.notice = Some(format!("Deleted \"{name}\""));
     }
 
     fn run_query(&mut self) -> Task<Message> {

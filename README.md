@@ -76,6 +76,21 @@ cargo bundle --release
 reads it with the 1Password CLI (`op`), so the secret never has to be in the
 file. `config.toml` and `logs/` are in `.gitignore`.
 
+## Saved queries
+
+The query panel (**▸ Query** under the graph) keeps named queries in
+`queries.toml` in the current folder. Pick one from **Saved queries…** to put it
+in the editor, then **Run** it. Type a name and press **Save query** to save the
+editor's query (an existing name is replaced), and **Delete** removes the picked
+one. A result without records, such as counts or chosen fields, opens in the
+**Table** tab.
+
+A new `queries.toml` starts with the *Ticket purchase demo query*, which lists
+each ticket bought in the
+[canton-event-graph-demo](https://github.com/gyorgybalazsi/canton-event-graph-demo)
+ticket purchase flow with its buyer and price. It can be deleted like any other
+query and doesn't come back.
+
 ## Using it from Claude Code
 
 While the app is running, its MCP server listens on `127.0.0.1` only:
