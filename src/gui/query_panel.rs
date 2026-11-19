@@ -1,12 +1,14 @@
-//! The query panel under the main area (a SurrealQL editor and Run), and the
-//! Table view of the last result.
+//! The query panel under the graph: saved queries, a SurrealQL editor and
+//! Run, and the last result under them.
 
 use std::collections::HashMap;
 
 use iced::keyboard::{Key, key::Named};
 use iced::widget::text_editor::{Binding, KeyPress};
+use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{
-    Column, button, checkbox, column, container, pick_list, row, scrollable, space, text, text_editor, text_input,
+    Column, Row, button, checkbox, column, container, pick_list, row, scrollable, space, text, text_editor, text_input,
+    tooltip,
 };
 use iced::{Alignment, Color, Element, Fill, Font, Length};
 use surrealdb_explorer::query::QueryOutcome;
@@ -17,6 +19,27 @@ use crate::gui::sidebar::{ERROR, MUTED, SUCCESS, bold};
 /// Results longer than this many lines per statement are cut, so a huge
 /// result can't make the window sluggish.
 const MAX_RESULT_LINES: usize = 400;
+/// Most rows drawn in a result table.
+const MAX_TABLE_ROWS: usize = 300;
+
+/// The open query panel's height to begin with, and its limits when resized.
+pub(super) const PANEL_HEIGHT: f32 = 300.0;
+pub(super) const MIN_PANEL_HEIGHT: f32 = 160.0;
+/// The graph above the panel keeps at least this height.
+pub(super) const MIN_GRAPH_HEIGHT: f32 = 160.0;
+/// The panel's rows other than the editor and the result: the toggle, saved
+/// queries, the Run row, spacing and padding.
+const PANEL_CHROME: f32 = 120.0;
+/// Room left for the result when the panel grows to fit the query.
+const MIN_RESULT_HEIGHT: f32 = 110.0;
+/// One line of the editor at text size 13, and its padding.
+const EDITOR_LINE: f32 = 17.0;
+const EDITOR_PADDING: f32 = 12.0;
+/// One character of the editor's monospace font at size 13.
+const EDITOR_CHAR_WIDTH: f32 = 7.9;
+/// The editor shows at least this many lines, and grows up to the most.
+const EDITOR_MIN_LINES: usize = 3;
+const EDITOR_MAX_LINES: usize = 24;
 
 impl App {
     pub(super) fn query_panel(&self) -> Element<'_, Message> {
@@ -26,6 +49,11 @@ impl App {
         if !self.query_open {
             return container(toggle).padding([2, 8]).width(Fill).into();
         }
+        // The editor fits the query, but leaves room for the result.
+        let editor_height = self
+            .editor_height()
+            .min(self.panel_height - PANEL_CHROME - MIN_RESULT_HEIGHT)
+            .max(editor_height_for(EDITOR_MIN_LINES));
 
         let editor = text_editor(&self.query_text)
             .placeholder("SurrealQL, e.g. SELECT * FROM person WHERE name = 'Tom Hanks';")
@@ -33,14 +61,14 @@ impl App {
             .key_binding(run_on_cmd_enter)
             .font(Font::MONOSPACE)
             .size(13)
-            .height(110);
+            .height(editor_height);
 
         let run = button(text(if self.query_running { "Running…" } else { "Run  ⌘↩" }).size(13))
             .style(button::primary)
             .on_press_maybe((!self.query_running && self.db.is_some()).then_some(Message::RunQuery));
         let show = button(text("Show in graph").size(13))
             .style(button::secondary)
-            .on_press_maybe(self.query_outcome.as_ref().map(|_| Message::ShowQueryInGraph));
+            .on_press_maybe(self.query_drawable.then_some(Message::ShowQueryInGraph));
         let mut status = row![
             run,
             show,
@@ -55,11 +83,32 @@ impl App {
             status = status.push(summary);
         }
 
-        column![container(toggle).padding([2, 0]), self.saved_queries_row(), editor, status]
+        column![container(toggle).padding([2, 0]), self.saved_queries_row(), editor, status, self.result_view()]
             .spacing(6)
             .padding([4, 8])
-            .height(Length::Shrink)
+            .height(self.panel_height)
             .into()
+    }
+
+    /// The editor's height for the query in it, counting a line that wraps
+    /// as the lines it takes.
+    fn editor_height(&self) -> f32 {
+        // The editor is as wide as the graph, less the panel's padding.
+        let columns = (((self.canvas_size.width - 32.0) / EDITOR_CHAR_WIDTH) as usize).max(20);
+        let lines: usize = self.query_text.text().lines().map(|l| l.chars().count().div_ceil(columns).max(1)).sum();
+        editor_height_for(lines.clamp(EDITOR_MIN_LINES, EDITOR_MAX_LINES))
+    }
+
+    /// Grows the panel so the whole query fits in the editor (up to
+    /// `EDITOR_MAX_LINES`), as long as the graph keeps `MIN_GRAPH_HEIGHT`.
+    /// It never shrinks the panel: that is left to the user's drag.
+    pub(super) fn fit_panel(&mut self) {
+        if !self.query_open {
+            return;
+        }
+        let wanted = PANEL_CHROME + self.editor_height() + MIN_RESULT_HEIGHT;
+        let room = self.panel_height + self.canvas_size.height - MIN_GRAPH_HEIGHT;
+        self.panel_height = self.panel_height.max(wanted.min(room)).max(MIN_PANEL_HEIGHT);
     }
 
     /// Saved queries: pick one to put it in the editor, delete it, or save
@@ -67,9 +116,10 @@ impl App {
     fn saved_queries_row(&self) -> Element<'_, Message> {
         let names = self.saved_queries.names();
         let picked = self.saved_query.clone().filter(|n| names.contains(n));
-        let placeholder = if names.is_empty() { "No saved queries" } else { "Saved queries…" };
+        let placeholder = if names.is_empty() { "No saved queries" } else { "Choose a saved query…" };
         let picker = pick_list(names, picked.clone(), Message::PickSavedQuery)
             .placeholder(placeholder)
+            .style(saved_queries_style)
             .text_size(13)
             .width(Length::FillPortion(3));
 
@@ -108,19 +158,21 @@ impl App {
             .into()
     }
 
-    /// The Table view: each statement's result, as path rows when it is a
-    /// list of paths, otherwise as JSON.
-    pub(super) fn table_view(&self) -> Element<'_, Message> {
+    /// The last result, under the Run row: each statement's result as path
+    /// rows when it is a list of paths, as a table when it is rows of
+    /// fields, otherwise as JSON.
+    fn result_view(&self) -> Element<'_, Message> {
         let Some(outcome) = &self.query_outcome else {
             return container(text("Run a query to see its result here.").size(13).color(MUTED))
-                .padding(16)
+                .padding(8)
+                .height(Fill)
                 .into();
         };
         let results = match &outcome.statements {
-            Err(e) => return container(grey_box(e.clone())).padding(12).into(),
+            Err(e) => return scrollable(grey_box(e.clone())).height(Fill).width(Fill).into(),
             Ok(results) => results,
         };
-        let mut col = Column::new().spacing(10).padding(12).width(Fill);
+        let mut col = Column::new().spacing(10).padding([4, 0]).width(Fill);
         for (i, r) in results.iter().enumerate() {
             let time = r
                 .time
@@ -138,14 +190,23 @@ impl App {
             if let Some(paths) = &paths {
                 heading = heading.push(text(plural(paths.len(), "path")).size(12).color(MUTED));
             }
-            let body: Element<'_, Message> = match (&r.result, paths) {
-                (Ok(_), Some(paths)) => self.path_rows(paths),
-                (Ok(v), None) => grey_box(cut(serde_json::to_string_pretty(v).unwrap_or_default())),
-                (Err(e), _) => grey_box(e.clone()),
+            let rows = r.result.as_ref().ok().and_then(table_rows);
+            if let Some(rows) = rows {
+                heading = heading.push(text(plural(rows.len(), "row")).size(12).color(MUTED));
+            }
+            let body: Element<'_, Message> = match (&r.result, paths, rows) {
+                (Ok(_), Some(paths), _) => self.path_rows(paths),
+                (Ok(_), None, Some(rows)) => result_table(rows, &self.query_ran),
+                (Ok(v), None, None) => grey_box(cut(serde_json::to_string_pretty(v).unwrap_or_default())),
+                (Err(e), _, _) => grey_box(e.clone()),
             };
             col = col.push(column![heading, body].spacing(4));
         }
-        scrollable(col).height(Fill).width(Fill).into()
+        scrollable(col)
+            .direction(Direction::Both { vertical: Scrollbar::default(), horizontal: Scrollbar::default() })
+            .height(Fill)
+            .width(Fill)
+            .into()
     }
 
     /// A result that is a list of paths, each `[record, relation, record, …]`
@@ -212,6 +273,130 @@ impl App {
 
 }
 
+/// The saved queries list looks like a control to use, even before a query
+/// is picked: white like the editor, with dark placeholder text and an
+/// accent border and arrow (the default is grey, as if it were disabled).
+fn saved_queries_style(theme: &iced::Theme, status: pick_list::Status) -> pick_list::Style {
+    let palette = theme.extended_palette();
+    let default = pick_list::default(theme, status);
+    let hovered = !matches!(status, pick_list::Status::Active);
+    pick_list::Style {
+        background: Color::WHITE.into(),
+        placeholder_color: palette.background.base.text,
+        handle_color: palette.primary.base.color,
+        border: iced::Border {
+            color: if hovered { palette.primary.strong.color } else { palette.primary.base.color },
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        ..default
+    }
+}
+
+fn editor_height_for(lines: usize) -> f32 {
+    lines as f32 * EDITOR_LINE + EDITOR_PADDING
+}
+
+/// A result that is a list of objects (rows of fields), such as most SELECTs.
+fn table_rows(value: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
+    value.as_array().filter(|rows| !rows.is_empty() && rows.iter().all(|r| r.is_object()))
+}
+
+/// Rows of fields as a table, a column per field. Long values are
+/// shortened; hovering one shows it whole.
+fn result_table(rows: &[serde_json::Value], query: &str) -> Element<'static, Message> {
+    let mut columns: Vec<&str> = Vec::new();
+    for r in rows {
+        for key in r.as_object().into_iter().flat_map(|o| o.keys()) {
+            if !columns.contains(&key.as_str()) {
+                columns.push(key);
+            }
+        }
+    }
+    order_like_query(&mut columns, query);
+    let shown = &rows[..rows.len().min(MAX_TABLE_ROWS)];
+    let cells: Vec<Vec<(String, String)>> = shown
+        .iter()
+        .map(|r| columns.iter().map(|c| cell(r.get(*c))).collect())
+        .collect();
+    // Each column is as wide as its widest value (monospace, so by characters).
+    let widths: Vec<f32> = columns
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let chars = cells.iter().map(|r| r[i].0.chars().count()).chain([c.chars().count()]).max().unwrap_or(1);
+            chars as f32 * 7.3 + 16.0
+        })
+        .collect();
+
+    let mut table = Column::new().width(Length::Shrink);
+    let header = columns.iter().zip(&widths).fold(Row::new(), |row, (c, w)| {
+        row.push(container(text(c.to_string()).size(12).font(bold())).width(*w).padding([3, 8]))
+    });
+    table = table.push(container(header).style(|_| container::background(Color::from_rgb(0.92, 0.92, 0.92))));
+    for (n, r) in cells.into_iter().enumerate() {
+        let line = r.into_iter().zip(&widths).fold(Row::new(), |row, ((short, full), w)| {
+            let value = container(text(short.clone()).size(12).font(Font::MONOSPACE)).width(*w).padding([3, 8]);
+            if short == full {
+                row.push(value)
+            } else {
+                let whole = container(text(full).size(12).font(Font::MONOSPACE))
+                    .padding(6)
+                    .style(container::rounded_box);
+                row.push(tooltip(value, whole, tooltip::Position::Bottom))
+            }
+        });
+        let shade = if n % 2 == 1 { Color::from_rgb(0.97, 0.97, 0.97) } else { Color::WHITE };
+        table = table.push(container(line).style(move |_| container::background(shade)));
+    }
+    if rows.len() > MAX_TABLE_ROWS {
+        table = table.push(text(format!("… and {} more rows", rows.len() - MAX_TABLE_ROWS)).size(12).color(MUTED));
+    }
+    table.into()
+}
+
+/// SurrealDB returns a row's fields sorted by name, so `SELECT offset, …
+/// AS buyer` would show `buyer` first. Puts the columns in the order their
+/// names first appear in the query instead; names it doesn't mention (as
+/// with `SELECT *`) keep their order, after the others.
+fn order_like_query(columns: &mut [&str], query: &str) {
+    columns.sort_by_key(|c| first_word(query, c).unwrap_or(usize::MAX));
+}
+
+/// Where `word` first appears in `text` as a whole word.
+fn first_word(text: &str, word: &str) -> Option<usize> {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    text.match_indices(word).map(|(i, _)| i).find(|&i| {
+        !text[..i].chars().next_back().is_some_and(is_word) && !text[i + word.len()..].chars().next().is_some_and(is_word)
+    })
+}
+
+/// A field's value as shown in the table, and in full.
+fn cell(value: Option<&serde_json::Value>) -> (String, String) {
+    const MAX_CHARS: usize = 48;
+    let full = match value {
+        None | Some(serde_json::Value::Null) => return ("—".into(), "—".into()),
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(v) => v.to_string(),
+    };
+    let short = if let Some(party) = short_party_id(&full) {
+        party
+    } else if full.chars().count() > MAX_CHARS {
+        format!("{}…", full.chars().take(MAX_CHARS - 1).collect::<String>())
+    } else {
+        full.clone()
+    };
+    (short, full)
+}
+
+/// A Canton party id (`Alice::1220e604…`, a name and a long hex
+/// fingerprint) with its fingerprint cut to six characters.
+fn short_party_id(s: &str) -> Option<String> {
+    let (name, fingerprint) = s.split_once("::")?;
+    let hex = fingerprint.len() > 12 && fingerprint.chars().all(|c| c.is_ascii_hexdigit());
+    (hex && !name.is_empty()).then(|| format!("{name}::{}…", &fingerprint[..6]))
+}
+
 /// ⌘↩ runs the query; every other key does what it normally does.
 fn run_on_cmd_enter(key: KeyPress) -> Option<Binding<Message>> {
     if key.key == Key::Named(Named::Enter) && key.modifiers.command() {
@@ -260,4 +445,38 @@ fn grey_box(body: String) -> Element<'static, Message> {
         .width(Fill)
         .style(|_| container::background(Color::from_rgb(0.95, 0.95, 0.95)))
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cell, order_like_query, short_party_id};
+    use serde_json::json;
+
+    #[test]
+    fn columns_follow_the_query() {
+        let query = "SELECT offset, array::first(->x.owner) AS buyer, array::first(->y.price) AS price FROM exercised";
+        let mut columns = vec!["buyer", "offset", "price"];
+        order_like_query(&mut columns, query);
+        assert_eq!(columns, ["offset", "buyer", "price"]);
+        let mut unknown = vec!["id", "name", "age"];
+        order_like_query(&mut unknown, "SELECT * FROM person");
+        assert_eq!(unknown, ["id", "name", "age"]);
+        let mut partial = vec!["id", "offsets", "offset"];
+        order_like_query(&mut partial, "SELECT offset, offsets FROM t");
+        assert_eq!(partial, ["offset", "offsets", "id"]);
+    }
+
+    #[test]
+    fn party_ids_are_shortened_and_other_values_kept() {
+        assert_eq!(short_party_id("Alice::1220e60453756687070256c5ab36").as_deref(), Some("Alice::1220e6…"));
+        assert_eq!(short_party_id("a::b"), None);
+        assert_eq!(short_party_id("not a party"), None);
+        let id = "Alice::1220e60453756687070256c5ab36";
+        assert_eq!(cell(Some(&json!(id))), ("Alice::1220e6…".to_string(), id.to_string()));
+        assert_eq!(cell(Some(&json!(25))), ("25".to_string(), "25".to_string()));
+        assert_eq!(cell(Some(&json!("10"))).0, "10");
+        assert_eq!(cell(None).0, "—");
+        let long = "x".repeat(60);
+        assert_eq!(cell(Some(&json!(long))).0.chars().count(), 48);
+    }
 }
