@@ -172,9 +172,11 @@ fn has_transaction_statements(query: &str) -> bool {
     has_word(query, &["BEGIN", "COMMIT", "CANCEL"])
 }
 
+/// Whether `query` has one of `words` as a whole word. `_` is part of a
+/// word, so a field such as `create_arguments` isn't the word CREATE.
 fn has_word(query: &str, words: &[&str]) -> bool {
     query
-        .split(|c: char| !c.is_ascii_alphanumeric())
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .any(|word| words.contains(&word.to_ascii_uppercase().as_str()))
 }
 
@@ -214,6 +216,15 @@ mod tests {
         let statements = outcome.statements.unwrap();
         assert!(statements[1].result.as_ref().unwrap_err().starts_with("Refused: queries run as a read-only user"));
         assert_eq!(statements[2].result.as_ref().unwrap_err(), "Parse error");
+    }
+
+    #[test]
+    fn field_names_with_keywords_in_them_only_read() {
+        assert!(is_read_only(crate::saved_queries::TICKET_DEMO_QUERY));
+        assert!(is_read_only("SELECT create_arguments FROM created"));
+        assert!(is_read_only("SELECT delete_at, update_count FROM person"));
+        assert!(!is_read_only("DELETE created;"));
+        assert!(!is_read_only("SELECT * FROM a; UPDATE created SET x = 1"));
     }
 
     #[test]
