@@ -300,3 +300,36 @@ fn witness_parties_give_each_party_its_projection() {
     let (none, _) = for_party("Nobody::1220");
     assert!(none.is_empty());
 }
+
+/// The syncer's topology events link to their party record
+/// (`party: party:⟨Alice::1220⟩`). That link names the same party as the plain
+/// ids on events, so the party list has each party once and filtering by it
+/// keeps both.
+#[test]
+fn a_link_to_a_party_record_is_that_party() {
+    let config = common::temp_database("party-links");
+    let g = common::run(async move {
+        let db = db::connect(&config).await.unwrap();
+        db.query(
+            "UPSERT party:⟨Alice::1220⟩ MERGE { party_id: 'Alice::1220' }; \
+             UPSERT topology_event:1 MERGE { mapping: 'party_key', op: 'added', party: party:⟨Alice::1220⟩ }; \
+             UPSERT transaction:1 MERGE { offset: 1 }; \
+             UPSERT created:⟨00a1⟩ MERGE { offset: 1, node_id: 0, signatories: ['Alice::1220'], witness_parties: ['Alice::1220'] }; \
+             RELATE transaction:1->action->created:⟨00a1⟩ SET index = 0;",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        graph::load(&db, 1000).await.unwrap()
+    });
+    let (m, ids) = model_of(&g);
+    assert_eq!(m.parties().into_iter().collect::<Vec<_>>(), ["Alice::1220"]);
+
+    let alice = Filters { party: Some("Alice::1220".into()), ..Filters::default() };
+    let keep = canton::visible(&m, &alice);
+    for id in ["topology_event:1", "transaction:1", "created:⟨00a1⟩"] {
+        let i = ids.iter().position(|x| x.as_str() == id || x.replace('`', "") == id.replace(['⟨', '⟩'], "")).unwrap();
+        assert!(keep[i], "{id} is kept for Alice");
+    }
+}
