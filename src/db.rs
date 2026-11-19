@@ -1,25 +1,21 @@
-//! Database connection: a database folder opened by the app itself, or a
-//! SurrealDB server the app connects to as one client among others.
+//! Database connection: the app is one client of a SurrealDB server, which
+//! other programs (Studio, an import job, …) can use at the same time.
 
 use surrealdb::Surreal;
 use surrealdb::engine::any::{self, Any};
 use surrealdb::opt::auth::{Database as DatabaseUser, Namespace as NamespaceUser, Root};
 
 use crate::Error;
-use crate::config::{Connection, DatabaseConfig, UserLevel};
+use crate::config::{DatabaseConfig, UserLevel};
 use crate::secret;
 
-/// The database handle used throughout the program, for either connection.
+/// The database handle used throughout the program.
 pub type Database = Surreal<Any>;
 
-/// Opens the configured folder or connects to the configured server, and
-/// selects the configured namespace and database.
+/// Connects and signs in to the configured server, and selects the
+/// configured namespace and database.
 pub async fn connect(config: &DatabaseConfig) -> Result<Database, Error> {
-    let opened = match config.connection {
-        Connection::Folder => any::connect(format!("surrealkv://{}", config.path)).await.map_err(Error::from),
-        Connection::Server => connect_to_server(config).await,
-    };
-    let db = opened.map_err(|e| {
+    let db = connect_to_server(config).await.map_err(|e| {
         tracing::error!(location = %config.location(), error = %e, "could not open the database");
         e
     })?;
@@ -69,9 +65,7 @@ async fn connect_to_server(config: &DatabaseConfig) -> Result<Database, Error> {
     Ok(db)
 }
 
-/// Shuts the connection down. For a folder this releases it, so it can be
-/// opened again in this process; just dropping the handle keeps it locked.
-/// Other copies of the handle stop working.
+/// Shuts the connection down. Other copies of the handle stop working.
 pub async fn close(db: Database) -> Result<(), Error> {
     db.shutdown().await?;
     drop(db);
