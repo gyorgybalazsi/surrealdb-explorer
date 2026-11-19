@@ -23,6 +23,15 @@ pub struct QueryOutcome {
     pub statements: Result<Vec<StatementResult>, String>,
     /// Wall-clock time of the whole query.
     pub elapsed: Duration,
+    /// A warning about the query as a whole, shown above its result.
+    pub note: Option<String>,
+}
+
+impl QueryOutcome {
+    /// A query that didn't run, and why.
+    pub fn refused(message: impl Into<String>) -> QueryOutcome {
+        QueryOutcome { statements: Err(message.into()), elapsed: Duration::ZERO, note: None }
+    }
 }
 
 /// Runs `sql` and collects every statement's result.
@@ -54,7 +63,40 @@ pub async fn run(db: &Database, sql: String) -> QueryOutcome {
     }
     tracing::debug!(%sql, "query text");
 
-    QueryOutcome { statements, elapsed }
+    QueryOutcome { statements, elapsed, note: None }
+}
+
+/// Shown when no viewer user is set and a query in the query panel looks
+/// like it would change data.
+pub const WRITE_REFUSED_HERE: &str = "The query panel only reads, and this query looks like it would change \
+    data (CREATE, UPDATE, DELETE, RELATE, DEFINE, a custom fn::…), so it didn't run. Set a read-only viewer \
+    user in Settings to have the server check every query instead.";
+
+/// Shown with the result of a query that looks like a write, run as the
+/// read-only viewer user.
+pub const WRITES_IGNORED: &str = "Nothing was changed: queries run as a read-only user. The server ignores \
+    CREATE, UPDATE, DELETE and RELATE for it (they return no records) and refuses DEFINE and REMOVE.";
+
+/// Explains a result of `sql` run as the read-only viewer user: why the
+/// server refused a statement, and, for a query that looks like a write,
+/// that nothing was changed (the server skips most writes without an error).
+pub fn explain_refused_writes(outcome: &mut QueryOutcome, sql: &str) {
+    if !is_read_only(sql) {
+        outcome.note = Some(WRITES_IGNORED.to_string());
+    }
+    let explain = |e: &mut String| {
+        if is_permission_error(e) {
+            *e = format!("Refused: queries run as a read-only user, so they can't change data. ({e})");
+        }
+    };
+    match &mut outcome.statements {
+        Err(e) => explain(e),
+        Ok(statements) => statements.iter_mut().filter_map(|s| s.result.as_mut().err()).for_each(explain),
+    }
+}
+
+fn is_permission_error(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("not enough permissions")
 }
 
 /// Every string in the results that looks like a record id (`table:key`).
@@ -152,6 +194,26 @@ mod tests {
         assert!(is_read_only("SELECT * FROM knows WHERE out = person:bob; SELECT updated_at FROM person"));
         assert!(!is_read_only("SELECT * FROM person; DELETE person:bob"));
         assert!(!is_read_only("relate person:a->knows->person:b"));
+    }
+
+    #[test]
+    fn explains_what_a_viewer_was_refused() {
+        use super::{QueryOutcome, StatementResult, WRITES_IGNORED, explain_refused_writes};
+        let statement = |result| StatementResult { time: None, result };
+        let mut outcome = QueryOutcome {
+            statements: Ok(vec![
+                statement(Ok(serde_json::json!([]))),
+                statement(Err("IAM error: Not enough permissions to perform this action".into())),
+                statement(Err("Parse error".into())),
+            ]),
+            elapsed: Default::default(),
+            note: None,
+        };
+        explain_refused_writes(&mut outcome, "DELETE a; DEFINE TABLE b; SELECT (");
+        assert_eq!(outcome.note.as_deref(), Some(WRITES_IGNORED));
+        let statements = outcome.statements.unwrap();
+        assert!(statements[1].result.as_ref().unwrap_err().starts_with("Refused: queries run as a read-only user"));
+        assert_eq!(statements[2].result.as_ref().unwrap_err(), "Parse error");
     }
 
     #[test]

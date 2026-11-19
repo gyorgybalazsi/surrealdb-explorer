@@ -82,7 +82,6 @@ impl App {
         if let Some(summary) = self.query_outcome.as_ref().map(summary) {
             status = status.push(summary);
         }
-
         column![container(toggle).padding([2, 0]), self.saved_queries_row(), editor, status, self.result_view()]
             .spacing(6)
             .padding([4, 8])
@@ -169,10 +168,15 @@ impl App {
                 .into();
         };
         let results = match &outcome.statements {
-            Err(e) => return scrollable(grey_box(e.clone())).height(Fill).width(Fill).into(),
+            // Why the query didn't run, such as a refused write.
+            Err(e) => return scrollable(text(e.clone()).size(12).color(ERROR)).height(Fill).width(Fill).into(),
             Ok(results) => results,
         };
         let mut col = Column::new().spacing(10).padding([4, 0]).width(Fill);
+        // Such as: a write run as the read-only viewer changed nothing.
+        if let Some(note) = &outcome.note {
+            col = col.push(text(note.clone()).size(12).color(ERROR));
+        }
         for (i, r) in results.iter().enumerate() {
             let time = r
                 .time

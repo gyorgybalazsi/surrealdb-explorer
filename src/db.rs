@@ -65,6 +65,55 @@ async fn connect_to_server(config: &DatabaseConfig) -> Result<Database, Error> {
     Ok(db)
 }
 
+/// Where the queries a person types (in the query panel) or Claude Code sends
+/// (over MCP) run.
+#[derive(Clone, Debug)]
+pub enum Queries {
+    /// No viewer user is set: they run on the main connection, and the app
+    /// refuses the ones that look like writes before sending them.
+    Main,
+    /// Signed in as the read-only viewer user: the server refuses writes.
+    Viewer { db: Database, username: String },
+    /// A viewer user is set but couldn't sign in. Queries don't run at all,
+    /// rather than falling back to a user that can write.
+    Failed(String),
+}
+
+impl Queries {
+    /// Signs in as the viewer user `config` names, if any.
+    pub async fn connect(config: &DatabaseConfig) -> Queries {
+        let Some(viewer) = config.viewer() else { return Queries::Main };
+        match connect(&viewer).await {
+            Ok(db) => Queries::Viewer { db, username: viewer.username },
+            Err(e) => Queries::Failed(format!("could not sign in as the read-only viewer user: {e}")),
+        }
+    }
+
+    /// The connection to run a user's query on: the viewer's, or `main` when
+    /// none is set.
+    pub fn pick(&self, main: &Database) -> Result<Database, String> {
+        match self {
+            Queries::Main => Ok(main.clone()),
+            Queries::Viewer { db, .. } => Ok(db.clone()),
+            Queries::Failed(e) => Err(e.clone()),
+        }
+    }
+
+    /// Whether the server enforces read-only (a viewer user is signed in).
+    pub fn enforced(&self) -> bool {
+        matches!(self, Queries::Viewer { .. })
+    }
+
+    /// Closes the viewer's connection, if there is one.
+    pub async fn close(self) {
+        if let Queries::Viewer { db, .. } = self
+            && let Err(e) = db.shutdown().await
+        {
+            tracing::warn!(error = %e, "could not close the viewer connection");
+        }
+    }
+}
+
 /// Shuts the connection down. Other copies of the handle stop working.
 pub async fn close(db: Database) -> Result<(), Error> {
     db.shutdown().await?;
