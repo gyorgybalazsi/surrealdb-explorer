@@ -40,7 +40,7 @@ server. To try the app, [install SurrealDB](https://surrealdb.com/install) and
 start an in-memory server:
 
 ```sh
-surreal start --user root --pass secret memory
+surreal db start --user root --pass secret memory
 ```
 
 Then build and run the app:

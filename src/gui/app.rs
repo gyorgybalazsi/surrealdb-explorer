@@ -248,7 +248,6 @@ impl App {
     pub fn boot(config: Config, startup_error: Option<String>, log: Option<LogControl>) -> App {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
-            .thread_stack_size(10 * 1024 * 1024)
             .build()
             .expect("failed to start the async runtime");
 
@@ -1272,8 +1271,7 @@ impl App {
         }
         self.query_running = true;
         let changes_data = !query::is_read_only(&sql);
-        // Run on our runtime (big thread stacks, see `runtime`), and only
-        // wait for the result on iced's side, so the window stays responsive.
+        // Run on our runtime, and only wait for the result on iced's side, so the window stays responsive.
         let handle = self.runtime.spawn(async move { query::run(&db, sql).await });
         Task::perform(
             async move {

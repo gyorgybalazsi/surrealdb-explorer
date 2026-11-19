@@ -7,7 +7,6 @@
 
 #![allow(dead_code)]
 
-use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::OnceLock;
@@ -54,9 +53,7 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         // Closing stdin makes the wrapper shell stop the server.
-        if let Some(mut stdin) = self.stdin.take() {
-            let _ = stdin.flush();
-        }
+        drop(self.stdin.take());
         let _ = self.child.wait();
     }
 }
@@ -79,37 +76,52 @@ fn free_port() -> u16 {
 /// Starts a temporary in-memory server on a free port and waits until it
 /// accepts connections.
 ///
-/// The server runs under a small shell that stops it once its stdin closes.
-/// Our end of that pipe closes when the test process ends, however it ends,
-/// so no server is left behind, even for the shared one, which is never
-/// dropped.
+/// The server runs under a small shell that stops it once its stdin closes,
+/// and that itself exits if the server does. Our end of that pipe closes when
+/// the test process ends, however it ends, so no server is left behind, even
+/// for the shared one, which is never dropped.
+///
+/// The port is free when chosen but could be taken before the server binds
+/// it; the server then exits, and another port is tried.
 pub fn start_server() -> Server {
     let program = surreal_program();
-    let port = free_port();
+    // A background job's stdin is /dev/null, so the watcher reads the
+    // shell's stdin through fd 3.
     let script = r#"
-        "$0" start --user "$1" --pass "$2" --bind "127.0.0.1:$3" memory >/dev/null 2>&1 &
+        exec 3<&0
+        "$0" db start --user "$1" --pass "$2" --bind "127.0.0.1:$3" memory >"$4" 2>&1 &
         server=$!
-        cat >/dev/null
-        kill $server
+        (cat <&3 >/dev/null; kill $server 2>/dev/null) &
         wait $server
     "#;
-    let mut child = Command::new("sh")
-        .args(["-c", script, &program, USERNAME, PASSWORD, &port.to_string()])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("could not start the surreal program");
-    let stdin = child.stdin.take();
-    let server = Server { child, stdin, port };
-    for _ in 0..100 {
-        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return server;
+    let mut log = PathBuf::new();
+    for _attempt in 0..3 {
+        let port = free_port();
+        log = std::env::temp_dir().join(format!("surrealdb-explorer-test-server-{}-{port}.log", std::process::id()));
+        let mut child = Command::new("sh")
+            .args(["-c", script, &program, USERNAME, PASSWORD, &port.to_string()])
+            .arg(&log)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("could not start the surreal program");
+        let stdin = child.stdin.take();
+        let mut server = Server { child, stdin, port };
+        for _ in 0..100 {
+            if matches!(server.child.try_wait(), Ok(Some(_))) {
+                break;
+            }
+            if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                let _ = std::fs::remove_file(&log);
+                return server;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        drop(server);
     }
-    drop(server);
-    panic!("the surreal server on port {port} didn't start within 10 seconds");
+    let output = std::fs::read_to_string(&log).unwrap_or_default();
+    panic!("the surreal server didn't start. Its output ({}):\n{output}", log.display());
 }
 
 /// The server most tests share. Each test uses its own database on it.
