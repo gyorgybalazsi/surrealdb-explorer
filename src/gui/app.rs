@@ -134,6 +134,8 @@ pub enum Message {
     // Query panel
     ToggleQuery,
     QueryEdited(text_editor::Action),
+    /// Empties the query editor.
+    ClearQuery,
     RunQuery,
     /// The query's outcome.
     QueryDone(QueryOutcome),
@@ -714,6 +716,7 @@ impl App {
                 self.query_text.perform(action);
                 self.fit_panel();
             }
+            Message::ClearQuery => self.query_text = text_editor::Content::new(),
             Message::PanelDragStart => self.panel_drag = Some(None),
             Message::PanelDrag(y) => match self.panel_drag {
                 Some(None) => self.panel_drag = Some(Some((y, self.panel_height, self.panel_height + self.canvas_size.height))),
