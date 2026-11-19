@@ -87,7 +87,8 @@ fn sides((ax, _): (f32, f32), (bx, _): (f32, f32)) -> (bool, bool) {
 }
 
 /// The path of each relation in graph space, `None` for one not drawn: the
-/// points to draw through, ending at the tip.
+/// points to draw through, ending at the tip. The graph's edges come first,
+/// then its bridges (see `canton::bridges`), which are drawn as tree branches.
 ///
 /// A tree relation runs down the left of its column and into its child's left
 /// side; any other curves between the cards' nearer sides. Every relation
@@ -98,20 +99,28 @@ fn sides((ax, _): (f32, f32), (bx, _): (f32, f32)) -> (bool, bool) {
 pub fn routes(view: &GraphView) -> Vec<Option<Vec<Point>>> {
     let g = view.graph;
     let corners: Vec<(f32, f32)> = g.nodes.iter().map(|n| corner(n.pos)).collect();
+    // Every relation as (from, to, kind, drawn).
+    let shown = |i: usize| g.nodes[i].card.shown;
+    let rels: Vec<(usize, usize, &str, bool)> = g
+        .edges
+        .iter()
+        .map(|e| (e.from, e.to, e.kind.as_str(), edge_drawn(view, e)))
+        .chain(g.bridges.iter().map(|&(a, b)| (a, b, "ACTION", shown(a) && shown(b))))
+        .collect();
     // The relations at each side of each card: (node, right side) ->
     // (tree branch first, the other card's y, relation, at its end).
     let mut ports: HashMap<(usize, bool), Vec<(bool, f32, usize, bool)>> = HashMap::new();
-    for (i, e) in g.edges.iter().enumerate() {
-        if !edge_drawn(view, e) {
+    for (i, &(from, to, kind, drawn)) in rels.iter().enumerate() {
+        if !drawn {
             continue;
         }
-        let (a, b) = (corners[e.from], corners[e.to]);
-        if is_tree(&e.kind, a, b) {
-            ports.entry((e.to, false)).or_default().push((false, a.1, i, true));
+        let (a, b) = (corners[from], corners[to]);
+        if is_tree(kind, a, b) {
+            ports.entry((to, false)).or_default().push((false, a.1, i, true));
         } else {
             let (from_right, to_right) = sides(a, b);
-            ports.entry((e.from, from_right)).or_default().push((true, b.1, i, false));
-            ports.entry((e.to, to_right)).or_default().push((true, a.1, i, true));
+            ports.entry((from, from_right)).or_default().push((true, b.1, i, false));
+            ports.entry((to, to_right)).or_default().push((true, a.1, i, true));
         }
     }
     // The y of each relation's ends.
@@ -123,16 +132,15 @@ pub fn routes(view: &GraphView) -> Vec<Option<Vec<Point>>> {
             port_y.insert((edge, at_end), corners[node].1 + NODE_H * (k as f32 + 1.0) / (n + 1.0));
         }
     }
-    g.edges
-        .iter()
+    rels.iter()
         .enumerate()
-        .map(|(i, e)| {
-            if !edge_drawn(view, e) {
+        .map(|(i, &(from, to, kind, drawn))| {
+            if !drawn {
                 return None;
             }
-            let (a, b) = (corners[e.from], corners[e.to]);
+            let (a, b) = (corners[from], corners[to]);
             let ey = port_y[&(i, true)];
-            if is_tree(&e.kind, a, b) {
+            if is_tree(kind, a, b) {
                 let x = a.0 + 10.0;
                 return Some(vec![Point::new(x, a.1 + NODE_H), Point::new(x, ey), Point::new(b.0, ey)]);
             }
@@ -173,7 +181,8 @@ pub fn edge_drawn(view: &GraphView, e: &Edge) -> bool {
 
 /// The drawn relation passing within a few pixels of `point`.
 pub fn edge_at(view: &GraphView, bounds: Rectangle, point: Point) -> Option<usize> {
-    routes(view).into_iter().enumerate().find_map(|(i, pts)| {
+    let edges = view.graph.edges.len();
+    routes(view).into_iter().take(edges).enumerate().find_map(|(i, pts)| {
         let pts = to_screen(view, bounds, &pts?);
         pts.windows(2).any(|w| super::canvas::distance_to_segment(point, w[0], w[1]) <= 5.0).then_some(i)
     })
@@ -235,22 +244,40 @@ pub fn draw(view: &GraphView, frame: &mut Frame, bounds: Rectangle, lit: Option<
                 ..Stroke::default().with_color(color).with_width(width * s.clamp(0.6, 1.5))
             },
         );
-        // Arrowhead at the end, along the last segment.
-        let (tip, before) = (pts[pts.len() - 1], pts[pts.len() - 2]);
-        let d = tip - before;
-        let len = (d.x * d.x + d.y * d.y).sqrt();
-        if len > 0.01 {
-            let dir = d * (1.0 / len);
-            let normal = Vector::new(-dir.y, dir.x);
-            let size = 7.0 * s.clamp(0.6, 1.5);
-            let head = Path::new(|b| {
-                b.move_to(tip);
-                b.line_to(tip - dir * size + normal * (size * 0.5));
-                b.line_to(tip - dir * size - normal * (size * 0.5));
-                b.close();
-            });
-            frame.fill(&head, color);
-        }
+        arrowhead(frame, &pts, color, s);
+    }
+
+    // Branches past filtered-out events: dotted, as the events between are hidden.
+    for (k, &(a, b)) in g.bridges.iter().enumerate() {
+        let Some(route) = &routes[g.edges.len() + k] else {
+            continue;
+        };
+        let focus = view.hover.or(match view.selection {
+            Some(Selection::Node(n)) => Some(n),
+            _ => None,
+        });
+        let alpha = match focus {
+            Some(f) if f == a || f == b => 1.0,
+            Some(_) => 0.15,
+            None => 0.85,
+        };
+        let color = faded(edge_style("ACTION").0, alpha);
+        let pts = to_screen(view, bounds, route);
+        let path = Path::new(|p| {
+            p.move_to(pts[0]);
+            for q in &pts[1..] {
+                p.line_to(*q);
+            }
+        });
+        let dash = [3.0 * s, 3.0 * s];
+        frame.stroke(
+            &path,
+            Stroke {
+                line_dash: LineDash { segments: &dash, offset: 0 },
+                ..Stroke::default().with_color(color).with_width(1.4 * s.clamp(0.6, 1.5))
+            },
+        );
+        arrowhead(frame, &pts, color, s);
     }
 
     for (i, n) in g.nodes.iter().enumerate() {
@@ -337,6 +364,25 @@ pub fn draw(view: &GraphView, frame: &mut Frame, bounds: Rectangle, lit: Option<
     legend(frame, bounds, g);
 }
 
+/// An arrowhead at the end of `pts` (on screen), along the last segment.
+fn arrowhead(frame: &mut Frame, pts: &[Point], color: Color, s: f32) {
+    let (tip, before) = (pts[pts.len() - 1], pts[pts.len() - 2]);
+    let d = tip - before;
+    let len = (d.x * d.x + d.y * d.y).sqrt();
+    if len > 0.01 {
+        let dir = d * (1.0 / len);
+        let normal = Vector::new(-dir.y, dir.x);
+        let size = 7.0 * s.clamp(0.6, 1.5);
+        let head = Path::new(|b| {
+            b.move_to(tip);
+            b.line_to(tip - dir * size + normal * (size * 0.5));
+            b.line_to(tip - dir * size - normal * (size * 0.5));
+            b.close();
+        });
+        frame.fill(&head, color);
+    }
+}
+
 fn bold() -> Font {
     Font { weight: iced::font::Weight::Semibold, ..Font::default() }
 }
@@ -354,6 +400,9 @@ fn legend(frame: &mut Frame, bounds: Rectangle, g: &crate::gui::model::Graph) {
     }
     if g.edges.iter().any(|e| e.kind == "TARGET") {
         items.push((edge_style("TARGET").0, "target", Some(&[4.0, 3.0])));
+    }
+    if !g.bridges.is_empty() {
+        items.push((edge_style("ACTION").0, "via hidden events", Some(&[2.0, 2.0])));
     }
     if items.is_empty() {
         return;

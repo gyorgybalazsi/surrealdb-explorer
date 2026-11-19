@@ -105,7 +105,7 @@ fn is_permission_error(message: &str) -> bool {
 pub fn record_ids(outcome: &QueryOutcome) -> Vec<String> {
     fn walk(v: &serde_json::Value, out: &mut Vec<String>) {
         match v {
-            serde_json::Value::String(s) if s.contains(':') => out.push(s.clone()),
+            serde_json::Value::String(s) if looks_like_record_id(s) => out.push(s.clone()),
             serde_json::Value::Array(items) => items.iter().for_each(|i| walk(i, out)),
             serde_json::Value::Object(o) => o.values().for_each(|i| walk(i, out)),
             _ => {}
@@ -120,6 +120,18 @@ pub fn record_ids(outcome: &QueryOutcome) -> Vec<String> {
         }
     }
     ids
+}
+
+/// Whether `s` is shaped like a record id: a table name, a colon, and a key,
+/// as in `person:tom`, `created:⟨00a1⟩` or `⟨my-table⟩:1`. A Canton party id
+/// (`Alice::1220…`), a time (`12:30`) or a URL (`https://…`) is not.
+fn looks_like_record_id(s: &str) -> bool {
+    let Some((table, key)) = s.split_once(':') else { return false };
+    let plain_table = table.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    let escaped_table = (table.starts_with('⟨') && table.ends_with('⟩') && table.chars().count() > 2)
+        || (table.starts_with('`') && table.ends_with('`') && table.len() > 2);
+    (plain_table || escaped_table) && !key.is_empty() && !key.starts_with(':') && !key.starts_with('/')
 }
 
 /// Whether `query` only reads: it has none of the statements that change
@@ -168,7 +180,7 @@ fn has_word(query: &str, words: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_transaction_statements, is_read_only};
+    use super::{has_transaction_statements, is_read_only, looks_like_record_id};
 
     #[test]
     fn spots_transaction_statements() {
@@ -212,5 +224,15 @@ mod tests {
         assert!(!is_read_only("ACCESS account GRANT FOR USER tobie"));
         assert!(is_read_only("SELECT string::len(name), array::len(->knows) FROM person"));
         assert!(is_read_only("SELECT * FROM person WHERE myfn::x = 1"));
+    }
+
+    #[test]
+    fn record_ids_are_told_from_other_strings_with_colons() {
+        for id in ["person:tom", "created:⟨00a1⟩", "party:⟨Alice::1220⟩", "_t:1", "⟨my-table⟩:1", "`my-table`:1"] {
+            assert!(looks_like_record_id(id), "{id}");
+        }
+        for not_id in ["Alice::1220e604", "12:30", "https://example.com", "person:", ":tom", "my-table:1", "no colon"] {
+            assert!(!looks_like_record_id(not_id), "{not_id}");
+        }
     }
 }

@@ -77,7 +77,29 @@ cargo bundle --release
 reads it with the 1Password CLI (`op`), so the secret never has to be in the
 file. `config.toml` and `logs/` are in `.gitignore`.
 
-## Read-only queries
+## Queries
+
+**▸ Query** under the graph opens the query panel. Type SurrealQL and press
+**Run** (⌘↩). The result shows under the query: rows of fields as a table (long
+Canton party ids shortened; hover a value to see it whole), paths as paths, and
+anything else as JSON. Records in the result are also drawn in the graph above.
+The editor grows to fit the query, and dragging the line between the graph and
+the panel resizes the panel.
+
+### Saved queries
+
+The panel keeps named queries in `queries.toml` in the current folder. Pick one
+from **Choose a saved query…** to put it in the editor, then **Run** it. Type a name
+and press **Save query** to save the editor's query (an existing name is
+replaced), and **Delete** removes the picked one.
+
+A new `queries.toml` starts with the *Ticket purchase demo query*, which lists
+each ticket bought in the
+[canton-event-graph-demo](https://github.com/gyorgybalazsi/canton-event-graph-demo)
+ticket purchase flow with its buyer and price. It can be deleted like any other
+query and doesn't come back.
+
+### Read-only queries
 
 The queries you type in the query panel, and the ones Claude Code sends, are
 for reading. To have the server enforce that, define a user with the `VIEWER`

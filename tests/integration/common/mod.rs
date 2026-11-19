@@ -132,8 +132,28 @@ pub fn shared_server() -> &'static Server {
 
 /// A fresh, empty database named `name` on the shared server. Give each test
 /// its own name: the tests run in parallel.
+///
+/// The database is defined here, one test at a time. Left to the tests'
+/// first writes, parallel tests would define their databases in the shared
+/// namespace at the same moment, and SurrealDB can refuse one of those
+/// writes with "Transaction conflict: Write conflict".
 pub fn temp_database(name: &str) -> DatabaseConfig {
-    shared_server().config(name)
+    static DEFINING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let config = shared_server().config(name);
+    let _one_at_a_time = DEFINING.lock().unwrap_or_else(|e| e.into_inner());
+    let (namespace, database) = (config.namespace.clone(), config.database.clone());
+    let server = config.clone();
+    run(async move {
+        let db = surrealdb_explorer::db::connect(&server).await.unwrap();
+        db.query(format!(
+            "DEFINE NAMESPACE IF NOT EXISTS `{namespace}`; USE NS `{namespace}`; DEFINE DATABASE IF NOT EXISTS `{database}`;"
+        ))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    });
+    config
 }
 
 /// Runs `future` to completion on a multi-threaded runtime, like the app's.

@@ -16,6 +16,7 @@ use surrealdb_explorer::logging::LogControl;
 use surrealdb_explorer::mcp::{self, WindowCommand};
 use tokio::sync::{mpsc, oneshot};
 use surrealdb_explorer::query::{self, QueryOutcome};
+use surrealdb_explorer::saved_queries::SavedQueries;
 use tracing::{debug, error, info, warn};
 
 use crate::gui::canvas::{CANTON_MARGIN, Camera, GraphView, SCROLLBAR_WIDTH};
@@ -27,14 +28,6 @@ use crate::gui::settings::{SettingsField, SettingsForm};
 /// A query's result is shown as the graph (instead of the overview).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ResultView;
-
-/// What the main area shows: the graph, or the last result as a table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Tab {
-    #[default]
-    Graph,
-    Table,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Selection {
@@ -144,11 +137,25 @@ pub enum Message {
     RunQuery,
     /// The query's outcome.
     QueryDone(QueryOutcome),
-    ShowTab(Tab),
     /// The last query's result, read from the database as a graph.
     ResultLoaded(Result<ResultGraph, String>),
     /// Turns drawing every relation between a result's records on or off.
     ToggleConnectResults(bool),
+    /// The handle above the query panel was pressed: dragging starts.
+    PanelDragStart,
+    /// The pointer moved to this height in the window while dragging.
+    PanelDrag(f32),
+    PanelDragEnd,
+    /// Puts the saved query of this name in the editor.
+    PickSavedQuery(String),
+    /// The name typed for saving the query.
+    SavedQueryName(String),
+    /// Saves the editor's query under the typed name.
+    SaveQuery,
+    /// Asks whether to delete the picked saved query.
+    AskDeleteSavedQuery,
+    /// Deletes it (true) or keeps it (false).
+    ConfirmDeleteSavedQuery(bool),
 
     // Claude Code, through the MCP server
     /// A command from the MCP server (taken out of the cell once handled).
@@ -198,9 +205,29 @@ pub struct App {
     pub(super) query_text: text_editor::Content,
     pub(super) query_running: bool,
     pub(super) query_outcome: Option<QueryOutcome>,
+    /// The last result has record ids, so it can be shown in the graph.
+    pub(super) query_drawable: bool,
+    /// The query that gave `query_outcome`, as run.
+    pub(super) query_ran: String,
+    /// Height of the open query panel, in pixels. It grows to fit a longer
+    /// query, and the handle above it resizes it.
+    pub(super) panel_height: f32,
+    /// While the handle is dragged: where the pointer was first seen, and the
+    /// panel and graph heights together then.
+    panel_drag: Option<Option<(f32, f32, f32)>>,
+    /// Named queries from `queries.toml`.
+    pub(super) saved_queries: SavedQueries,
+    /// The saved query last picked or saved, if it still exists.
+    pub(super) saved_query: Option<String>,
+    /// The name typed for saving the query.
+    pub(super) saved_query_name: String,
+    /// Waiting for the user to confirm deleting `saved_query`.
+    pub(super) confirm_delete_query: bool,
+    /// `queries.toml` could not be read, so saving is refused: writing the
+    /// list the app has (empty) would wipe the user's queries.
+    pub(super) saved_queries_unreadable: bool,
     /// The last query result, shown as the graph.
     pub(super) result_view: Option<ResultView>,
-    pub(super) tab: Tab,
 
     /// Shared with the MCP server; `None` if it's turned off.
     pub(super) mcp: Option<mcp::Shared>,
@@ -283,6 +310,14 @@ impl App {
             *shared.limits.lock().unwrap() = (config.graph.max_result_records, config.graph.connect_results);
         }
 
+        let (saved_queries, queries_error) = match SavedQueries::load_or_create_at(&SavedQueries::path()) {
+            Ok(q) => (q, None),
+            Err(e) => {
+                warn!(error = %e, "could not read the saved queries");
+                (SavedQueries { queries: Vec::new() }, Some(format!("Could not read the saved queries: {e}")))
+            }
+        };
+
         let mut app = App {
             mcp,
             pending_write: None,
@@ -299,15 +334,23 @@ impl App {
             selection: None,
             menu: None,
             dragging: None,
-            error: startup_error.or(error),
+            error: startup_error.or(error).or(queries_error.clone()),
             notice: None,
             settings: None,
             query_open: false,
             query_text: text_editor::Content::with_text("SELECT * FROM person;"),
             query_running: false,
             query_outcome: None,
+            query_drawable: false,
+            query_ran: String::new(),
+            panel_height: crate::gui::query_panel::PANEL_HEIGHT,
+            panel_drag: None,
+            saved_queries,
+            saved_query: None,
+            saved_query_name: String::new(),
+            confirm_delete_query: false,
+            saved_queries_unreadable: queries_error.is_some(),
             result_view: None,
-            tab: Tab::Graph,
             pending_data_action: None,
             data_busy: false,
             canvas_size: iced::Size::new(880.0, 760.0),
@@ -351,7 +394,18 @@ impl App {
             Subscription::none()
         };
         let opened = window::open_events().map(|_| Message::WindowOpened);
-        Subscription::batch([frames, refresh, opened, Subscription::run(mcp_commands)])
+        let panel_drag = if self.panel_drag.is_some() {
+            iced::event::listen_with(|event, _, _| match event {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => Some(Message::PanelDrag(position.y)),
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
+                    Some(Message::PanelDragEnd)
+                }
+                _ => None,
+            })
+        } else {
+            Subscription::none()
+        };
+        Subscription::batch([frames, refresh, opened, panel_drag, Subscription::run(mcp_commands)])
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -588,6 +642,8 @@ impl App {
             Message::FitView => self.fit_view(),
             Message::CanvasResized(size) => {
                 self.canvas_size = size;
+                // A narrower window wraps the query onto more lines.
+                self.fit_panel();
                 if self.canton() {
                     self.relayout_canton();
                 }
@@ -650,13 +706,47 @@ impl App {
             }
             Message::SaveSettings => self.save_settings(),
 
-            Message::ToggleQuery => self.query_open = !self.query_open,
-            Message::QueryEdited(action) => self.query_text.perform(action),
+            Message::ToggleQuery => {
+                self.query_open = !self.query_open;
+                self.fit_panel();
+            }
+            Message::QueryEdited(action) => {
+                self.query_text.perform(action);
+                self.fit_panel();
+            }
+            Message::PanelDragStart => self.panel_drag = Some(None),
+            Message::PanelDrag(y) => match self.panel_drag {
+                Some(None) => self.panel_drag = Some(Some((y, self.panel_height, self.panel_height + self.canvas_size.height))),
+                Some(Some((start_y, start_height, total))) => {
+                    let max = (total - crate::gui::query_panel::MIN_GRAPH_HEIGHT).max(crate::gui::query_panel::MIN_PANEL_HEIGHT);
+                    self.panel_height = (start_height + start_y - y).clamp(crate::gui::query_panel::MIN_PANEL_HEIGHT, max);
+                }
+                None => {}
+            },
+            Message::PanelDragEnd => self.panel_drag = None,
             Message::RunQuery => return self.run_query(),
-            Message::ShowTab(tab) => self.tab = tab,
+            Message::PickSavedQuery(name) => {
+                if let Some(saved) = self.saved_queries.get(&name) {
+                    self.query_text = text_editor::Content::with_text(&saved.query);
+                    self.fit_panel();
+                    self.saved_query_name = name.clone();
+                    self.saved_query = Some(name);
+                    self.confirm_delete_query = false;
+                }
+            }
+            Message::SavedQueryName(name) => self.saved_query_name = name,
+            Message::SaveQuery => self.save_query(),
+            Message::AskDeleteSavedQuery => self.confirm_delete_query = self.saved_query.is_some(),
+            Message::ConfirmDeleteSavedQuery(delete) => {
+                self.confirm_delete_query = false;
+                if delete {
+                    self.delete_saved_query();
+                }
+            }
             Message::QueryDone(outcome) => {
                 self.query_running = false;
                 let has_records = !query::record_ids(&outcome).is_empty();
+                self.query_drawable = has_records;
                 self.query_outcome = Some(outcome);
                 // A result with records becomes the graph.
                 if has_records {
@@ -676,6 +766,9 @@ impl App {
                         info!("showing a result from Claude Code");
                         self.query_open = true;
                         self.query_text = text_editor::Content::with_text(&query);
+                        self.query_ran = query.clone();
+                        self.fit_panel();
+                        self.query_drawable = !query::record_ids(&outcome).is_empty();
                         self.query_outcome = Some(outcome);
                         self.apply_result(graph);
                     }
@@ -1284,9 +1377,62 @@ impl App {
         // A write Claude Code asked for was meant for the previous database.
         self.answer_write(false);
         self.query_outcome = None;
+        self.query_drawable = false;
         self.result_view = None;
         self.pending_data_action = None;
         Ok(())
+    }
+
+    /// Saves the editor's query under the typed name (replacing a saved
+    /// query of that name) and writes `queries.toml`.
+    fn save_query(&mut self) {
+        if self.refuse_unreadable_queries() {
+            return;
+        }
+        let name = self.saved_query_name.trim().to_string();
+        match self.saved_queries.put(&name, &self.query_text.text()) {
+            Ok(replaced) => {
+                if let Err(e) = self.saved_queries.save_to(&SavedQueries::path()) {
+                    warn!(error = %e, "could not save the queries");
+                    self.error = Some(format!("Could not save the queries: {e}"));
+                    return;
+                }
+                info!(query = %name, replaced, "saved a query");
+                self.notice = Some(format!("{} \"{name}\"", if replaced { "Updated" } else { "Saved" }));
+                self.saved_query_name = name.clone();
+                self.saved_query = Some(name);
+                self.confirm_delete_query = false;
+            }
+            Err(e) => self.notice = Some(format!("Not saved: {e}")),
+        }
+    }
+
+    /// Whether saving must be refused because `queries.toml` couldn't be read.
+    fn refuse_unreadable_queries(&mut self) -> bool {
+        if self.saved_queries_unreadable {
+            self.notice = Some(format!(
+                "Not saved: {} could not be read. Fix or remove it, then restart.",
+                SavedQueries::path().display()
+            ));
+        }
+        self.saved_queries_unreadable
+    }
+
+    fn delete_saved_query(&mut self) {
+        if self.refuse_unreadable_queries() {
+            return;
+        }
+        let Some(name) = self.saved_query.take() else { return };
+        if !self.saved_queries.remove(&name) {
+            return;
+        }
+        if let Err(e) = self.saved_queries.save_to(&SavedQueries::path()) {
+            warn!(error = %e, "could not save the queries");
+            self.error = Some(format!("Could not save the queries: {e}"));
+            return;
+        }
+        info!(query = %name, "deleted a saved query");
+        self.notice = Some(format!("Deleted \"{name}\""));
     }
 
     fn run_query(&mut self) -> Task<Message> {
@@ -1295,6 +1441,7 @@ impl App {
         if sql.trim().is_empty() || self.query_running {
             return Task::none();
         }
+        self.query_ran = sql.clone();
         // The query panel only reads. With a viewer user the server refuses
         // writes; without one, the app refuses what looks like a write.
         let refused = match self.queries.pick(main) {
@@ -1303,6 +1450,7 @@ impl App {
             Ok(_) => None,
         };
         if let Some(message) = refused {
+            self.query_drawable = false;
             self.query_outcome = Some(QueryOutcome::refused(message));
             return Task::none();
         }
@@ -1484,36 +1632,24 @@ impl App {
             None => self.sidebar(),
         };
 
-        let main: Element<'_, Message> = match self.tab {
-            Tab::Graph => layers.into(),
-            Tab::Table => self.table_view(),
-        };
-        // A pending write must be answered whichever tab is open.
-        let main: Element<'_, Message> = match (&self.pending_write, self.tab) {
-            (Some((query, _)), Tab::Table) => column![write_banner(query), main].into(),
-            _ => main,
+        let main: Element<'_, Message> = layers.into();
+
+        // The open query panel can be resized by dragging the line above it.
+        let divider: Element<'_, Message> = if self.query_open {
+            iced::widget::mouse_area(container(rule::horizontal(1)).height(7).center_y(7).width(Fill))
+                .on_press(Message::PanelDragStart)
+                .interaction(iced::mouse::Interaction::ResizingVertically)
+                .into()
+        } else {
+            rule::horizontal(1).into()
         };
 
         row![
-            column![self.tab_bar(), main, rule::horizontal(1), self.query_panel()].width(Fill),
+            column![main, divider, self.query_panel()].width(Fill),
             rule::vertical(1),
             side
         ]
         .into()
-    }
-
-    /// Switches the main area between the graph and the result table.
-    fn tab_bar(&self) -> Element<'_, Message> {
-        let tab = |label: &'static str, which: Tab| {
-            button(text(label).size(13))
-                .style(if self.tab == which { button::primary } else { button::text })
-                .padding([3, 12])
-                .on_press(Message::ShowTab(which))
-        };
-        container(row![tab("Graph", Tab::Graph), tab("Table", Tab::Table)].spacing(4))
-            .padding([4, 8])
-            .width(Fill)
-            .into()
     }
 
     fn record_menu(&self, node: usize) -> Element<'_, Message> {
