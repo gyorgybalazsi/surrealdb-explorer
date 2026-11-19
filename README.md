@@ -101,28 +101,35 @@ query and doesn't come back.
 
 ### Read-only queries
 
-The queries you type in the query panel, and the ones Claude Code sends, are
-for reading. To have the server enforce that, define a user with the `VIEWER`
-role and set it under **Settings → Read-only queries** (or `viewer_username`
-and `viewer_password` in `config.toml`):
+The queries you type in the query panel, and the ones Claude Code sends, only
+read. The app keeps them from changing data in one of two ways, depending on
+whether you set a read-only viewer user.
+
+**Without a viewer user (the default): the app checks.** Queries run as the main
+user, which can write. Before sending a query, the app looks for words that
+change data (`CREATE`, `UPDATE`, `DELETE`, `RELATE`, `DEFINE`, `REMOVE`, a custom
+`fn::…`, …) and doesn't run a query that has one. This needs no setup, but it
+reads words, not meaning: it is a best-effort guard, and it can also stop a
+harmless read, for example one that compares a field to `'create'`.
+
+**With a viewer user: the server checks.** Define a user with the `VIEWER` role
+and set it under **Settings → Read-only queries** (or `viewer_username` and
+`viewer_password` in `config.toml`):
 
 ```sql
 DEFINE USER viewer ON DATABASE PASSWORD 'viewer-secret' ROLES VIEWER;
 ```
 
-Those queries then run as that user, on a second connection. As a viewer,
-SurrealDB ignores `CREATE`, `UPDATE`, `DELETE` and `RELATE` (they return no
-records) and refuses `DEFINE` and `REMOVE`, so the query panel says so when a
-query looks like a write. If the viewer can't sign in, those queries don't run.
+Those queries then run as that user, on a second connection, and SurrealDB
+itself refuses to change anything, however the query is written. It refuses
+`DEFINE` and `REMOVE` with an error, but skips `CREATE`, `UPDATE`, `DELETE` and
+`RELATE` silently (they return no records), so the query panel adds a note
+that nothing was changed. If the viewer can't sign in, those queries don't run
+at all. They never fall back to the main user.
 
-The main user (`username`) is still used for drawing the graph, for
-Settings → Data (*Load sample data*, *Erase database*), and for a write
-Claude Code asks for after you click Allow.
-
-Without a viewer user, user queries run as the main user, and the app itself
-refuses the ones that look like writes before sending them. That check reads
-the query's words, so it is cautious rather than exact: a viewer user is the
-safer setup.
+Either way, the main user (`username`) still draws the graph, runs Settings →
+Data (*Load sample data*, *Erase database*), and runs a write Claude Code asks
+for after you click Allow.
 
 ## Using it from Claude Code
 
