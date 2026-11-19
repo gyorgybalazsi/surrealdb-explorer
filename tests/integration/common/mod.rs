@@ -7,20 +7,23 @@
 
 #![allow(dead_code)]
 
-use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::OnceLock;
+
+use tempfile::TempDir;
 
 use surrealdb_explorer::config::DatabaseConfig;
 
 pub const USERNAME: &str = "root";
 pub const PASSWORD: &str = "secret";
 
-pub fn temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("surrealdb-explorer-test-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A new, empty temporary folder. It is removed when the returned value is
+/// dropped, which also happens when the test fails or panics.
+pub fn temp_dir(name: &str) -> TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("surrealdb-explorer-test-{name}-"))
+        .tempdir()
+        .unwrap()
 }
 
 /// A temporary in-memory SurrealDB server, with root user `USERNAME` /
@@ -48,13 +51,18 @@ impl Server {
             ..DatabaseConfig::default()
         }
     }
+
+    /// Stops the server and waits for it to exit. Closing stdin makes the
+    /// wrapper shell stop the server.
+    fn stop(&mut self) {
+        drop(self.stdin.take());
+        let _ = self.child.wait();
+    }
 }
 
 impl Drop for Server {
     fn drop(&mut self) {
-        // Closing stdin makes the wrapper shell stop the server.
-        drop(self.stdin.take());
-        let _ = self.child.wait();
+        self.stop();
     }
 }
 
@@ -94,10 +102,11 @@ pub fn start_server() -> Server {
         (cat <&3 >/dev/null; kill $server 2>/dev/null) &
         wait $server
     "#;
-    let mut log = PathBuf::new();
+    let mut output = String::new();
     for _attempt in 0..3 {
         let port = free_port();
-        log = std::env::temp_dir().join(format!("surrealdb-explorer-test-server-{}-{port}.log", std::process::id()));
+        let log_dir = temp_dir("server");
+        let log = log_dir.path().join("server.log");
         let mut child = Command::new("sh")
             .args(["-c", script, &program, USERNAME, PASSWORD, &port.to_string()])
             .arg(&log)
@@ -113,15 +122,18 @@ pub fn start_server() -> Server {
                 break;
             }
             if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                let _ = std::fs::remove_file(&log);
+                // The log is only needed if the start fails. `log_dir` is
+                // removed here, as the shared server is never dropped.
                 return server;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        drop(server);
+        // Stop the server before its log folder is removed (when `log_dir`
+        // goes out of scope), keeping its output for the message below.
+        server.stop();
+        output = std::fs::read_to_string(&log).unwrap_or_default();
     }
-    let output = std::fs::read_to_string(&log).unwrap_or_default();
-    panic!("the surreal server didn't start. Its output ({}):\n{output}", log.display());
+    panic!("the surreal server didn't start. Its output:\n{output}");
 }
 
 /// The server most tests share. Each test uses its own database on it.
