@@ -69,9 +69,13 @@ impl App {
         let show = button(text("Show in graph").size(13))
             .style(button::secondary)
             .on_press_maybe(self.query_drawable.then_some(Message::ShowQueryInGraph));
+        let clear = button(text("Clear").size(13))
+            .style(button::secondary)
+            .on_press_maybe((!self.query_text.text().trim().is_empty()).then_some(Message::ClearQuery));
         let mut status = row![
             run,
             show,
+            clear,
             checkbox(self.config.graph.connect_results)
                 .label("Connect shown records")
                 .on_toggle(Message::ToggleConnectResults)
