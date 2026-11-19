@@ -116,9 +116,10 @@ impl App {
     fn saved_queries_row(&self) -> Element<'_, Message> {
         let names = self.saved_queries.names();
         let picked = self.saved_query.clone().filter(|n| names.contains(n));
-        let placeholder = if names.is_empty() { "No saved queries" } else { "Saved queries…" };
+        let placeholder = if names.is_empty() { "No saved queries" } else { "Choose a saved query…" };
         let picker = pick_list(names, picked.clone(), Message::PickSavedQuery)
             .placeholder(placeholder)
+            .style(saved_queries_style)
             .text_size(13)
             .width(Length::FillPortion(3));
 
@@ -270,6 +271,26 @@ impl App {
         container(col).padding(6).width(Fill).into()
     }
 
+}
+
+/// The saved queries list looks like a control to use, even before a query
+/// is picked: white like the editor, with dark placeholder text and an
+/// accent border and arrow (the default is grey, as if it were disabled).
+fn saved_queries_style(theme: &iced::Theme, status: pick_list::Status) -> pick_list::Style {
+    let palette = theme.extended_palette();
+    let default = pick_list::default(theme, status);
+    let hovered = !matches!(status, pick_list::Status::Active);
+    pick_list::Style {
+        background: Color::WHITE.into(),
+        placeholder_color: palette.background.base.text,
+        handle_color: palette.primary.base.color,
+        border: iced::Border {
+            color: if hovered { palette.primary.strong.color } else { palette.primary.base.color },
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        ..default
+    }
 }
 
 fn editor_height_for(lines: usize) -> f32 {

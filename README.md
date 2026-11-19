@@ -88,7 +88,7 @@ the panel resizes the panel.
 ### Saved queries
 
 The panel keeps named queries in `queries.toml` in the current folder. Pick one
-from **Saved queries…** to put it in the editor, then **Run** it. Type a name
+from **Choose a saved query…** to put it in the editor, then **Run** it. Type a name
 and press **Save query** to save the editor's query (an existing name is
 replaced), and **Delete** removes the picked one.
 
