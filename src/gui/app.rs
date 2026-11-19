@@ -205,6 +205,8 @@ pub struct App {
     pub(super) query_text: text_editor::Content,
     pub(super) query_running: bool,
     pub(super) query_outcome: Option<QueryOutcome>,
+    /// The last result has record ids, so it can be shown in the graph.
+    pub(super) query_drawable: bool,
     /// Named queries from `queries.toml`.
     pub(super) saved_queries: SavedQueries,
     /// The saved query last picked or saved, if it still exists.
@@ -328,6 +330,7 @@ impl App {
             query_text: text_editor::Content::with_text("SELECT * FROM person;"),
             query_running: false,
             query_outcome: None,
+            query_drawable: false,
             saved_queries,
             saved_query: None,
             saved_query_name: String::new(),
@@ -708,6 +711,7 @@ impl App {
                     self.tab = Tab::Graph;
                     self.table_by_itself = false;
                 }
+                self.query_drawable = has_records;
                 self.query_outcome = Some(outcome);
                 // A result with records becomes the graph. Otherwise, a query
                 // that changed data shows the current state of the database.
@@ -731,6 +735,7 @@ impl App {
                         info!("showing a result from Claude Code");
                         self.query_open = true;
                         self.query_text = text_editor::Content::with_text(&query);
+                        self.query_drawable = !query::record_ids(&outcome).is_empty();
                         self.query_outcome = Some(outcome);
                         self.apply_result(graph);
                     }
@@ -1326,6 +1331,7 @@ impl App {
         // A write Claude Code asked for was meant for the previous database.
         self.answer_write(false);
         self.query_outcome = None;
+        self.query_drawable = false;
         self.result_view = None;
         self.pending_data_action = None;
         Ok(())
@@ -1441,6 +1447,11 @@ impl App {
     fn apply_result(&mut self, result: ResultGraph) {
         if result.data.nodes.is_empty() {
             self.notice = Some("None of the returned records could be drawn.".into());
+            // Nothing new in the graph, so show the result as the table.
+            if self.tab == Tab::Graph && self.query_outcome.is_some() {
+                self.tab = Tab::Table;
+                self.table_by_itself = true;
+            }
             return;
         }
         let limit = self.config.graph.max_result_records;

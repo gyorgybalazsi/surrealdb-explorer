@@ -40,7 +40,7 @@ impl App {
             .on_press_maybe((!self.query_running && self.db.is_some()).then_some(Message::RunQuery));
         let show = button(text("Show in graph").size(13))
             .style(button::secondary)
-            .on_press_maybe(self.query_outcome.as_ref().map(|_| Message::ShowQueryInGraph));
+            .on_press_maybe(self.query_drawable.then_some(Message::ShowQueryInGraph));
         let mut status = row![
             run,
             show,
