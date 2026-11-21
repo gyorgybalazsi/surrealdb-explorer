@@ -11,7 +11,7 @@ use iced::widget::{
     tooltip,
 };
 use iced::{Alignment, Color, Element, Fill, Font, Length};
-use surrealdb_explorer::query::QueryOutcome;
+use crate::query::QueryOutcome;
 
 use crate::gui::app::{App, Message, plural};
 use crate::gui::sidebar::{ERROR, MUTED, SUCCESS, bold};

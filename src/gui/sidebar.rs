@@ -2,13 +2,13 @@
 
 use iced::widget::{Column, button, checkbox, column, container, pick_list, row, scrollable, text, text_input};
 use iced::{Color, Element, Fill, Font};
-use surrealdb_explorer::canton::{NodeKind, StatusFilter};
-use surrealdb_explorer::config::Visualization;
+use crate::canton::{NodeKind, StatusFilter};
+use crate::config::Visualization;
 
 use crate::gui::app::{App, CantonFilterChange as F, DataAction, Message, Selection, plural};
 use crate::gui::canton_draw;
-use surrealdb_explorer::canton;
-use surrealdb_explorer::graph;
+use crate::canton;
+use crate::graph;
 
 pub(super) const SIDEBAR_WIDTH: f32 = 320.0;
 /// The sidebar's scrollable, scrolled to the end to show a new selection.

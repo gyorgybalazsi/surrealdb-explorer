@@ -6,17 +6,17 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use iced::widget::{button, canvas, column, container, pin, row, rule, scrollable, stack, text, text_editor};
 use iced::{Color, Element, Fill, Font, Point, Subscription, Task, Theme, Vector, window};
-use surrealdb_explorer::canton::{Filters, NodeKind, StatusFilter};
-use surrealdb_explorer::config::{Config, UserLevel, Visualization};
-use surrealdb_explorer::db::{self, Database, Queries};
-use surrealdb_explorer::graph::{self, GraphData, ResultGraph};
-use surrealdb_explorer::config::DatabaseConfig;
-use surrealdb_explorer::data;
-use surrealdb_explorer::logging::LogControl;
-use surrealdb_explorer::mcp::{self, WindowCommand};
+use crate::canton::{Filters, NodeKind, StatusFilter};
+use crate::config::{Config, UserLevel, Visualization};
+use crate::db::{self, Database, Queries};
+use crate::graph::{self, GraphData, ResultGraph};
+use crate::config::DatabaseConfig;
+use crate::data;
+use crate::logging::LogControl;
+use crate::mcp::{self, WindowCommand};
 use tokio::sync::{mpsc, oneshot};
-use surrealdb_explorer::query::{self, QueryOutcome};
-use surrealdb_explorer::saved_queries::SavedQueries;
+use crate::query::{self, QueryOutcome};
+use crate::saved_queries::SavedQueries;
 use tracing::{debug, error, info, warn};
 
 use crate::gui::canvas::{CANTON_MARGIN, Camera, GraphView, SCROLLBAR_WIDTH};
@@ -24,6 +24,7 @@ use crate::gui::sidebar::SIDEBAR_SCROLL;
 use crate::gui::layout::Layout;
 use crate::gui::model::Graph;
 use crate::gui::settings::{SettingsField, SettingsForm};
+use crate::gui::Files;
 
 /// A query's result is shown as the graph (instead of the overview).
 #[derive(Debug, Clone, Copy, Default)]
@@ -231,6 +232,8 @@ pub struct App {
     /// The last query result, shown as the graph.
     pub(super) result_view: Option<ResultView>,
 
+    /// Where the settings and the saved queries are kept.
+    pub(super) files: Files,
     /// Shared with the MCP server; `None` if it's turned off.
     pub(super) mcp: Option<mcp::Shared>,
     /// A query Claude Code wants to run that changes data, waiting for the
@@ -278,7 +281,8 @@ impl App {
 
     /// `startup_error` is a problem found before the window opened (such as
     /// an invalid config file), shown in the sidebar.
-    pub fn boot(config: Config, startup_error: Option<String>, log: Option<LogControl>) -> App {
+    /// `files` says where the settings and saved queries are kept.
+    pub fn boot(config: Config, files: Files, startup_error: Option<String>, log: Option<LogControl>) -> App {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -312,7 +316,7 @@ impl App {
             *shared.limits.lock().unwrap() = (config.graph.max_result_records, config.graph.connect_results);
         }
 
-        let (saved_queries, queries_error) = match SavedQueries::load_or_create_at(&SavedQueries::path()) {
+        let (saved_queries, queries_error) = match SavedQueries::load_or_create_at(&files.queries) {
             Ok(q) => (q, None),
             Err(e) => {
                 warn!(error = %e, "could not read the saved queries");
@@ -321,6 +325,7 @@ impl App {
         };
 
         let mut app = App {
+            files,
             mcp,
             pending_write: None,
             synced_selection: None,
@@ -546,7 +551,7 @@ impl App {
                 info!(on, "auto refresh changed");
                 self.config.graph.auto_refresh = on;
                 self.change_marker = None;
-                if let Err(e) = self.config.save() {
+                if let Err(e) = self.config.save_to(&self.files.config) {
                     warn!(error = %e, "could not save the setting");
                 }
             }
@@ -573,7 +578,7 @@ impl App {
                 if v != self.config.graph.visualization {
                     info!(visualization = %v, "visualization changed");
                     self.config.graph.visualization = v;
-                    if let Err(e) = self.config.save() {
+                    if let Err(e) = self.config.save_to(&self.files.config) {
                         warn!(error = %e, "could not save the setting");
                     }
                     self.apply_visualization();
@@ -584,7 +589,7 @@ impl App {
             }
             Message::ToggleFollowNewest(on) => {
                 self.config.graph.canton_follow_newest = on;
-                if let Err(e) = self.config.save() {
+                if let Err(e) = self.config.save_to(&self.files.config) {
                     warn!(error = %e, "could not save the setting");
                 }
                 if on && self.canton() {
@@ -593,7 +598,7 @@ impl App {
             }
             Message::ToggleFitOnFilter(on) => {
                 self.config.graph.fit_on_filter = on;
-                if let Err(e) = self.config.save() {
+                if let Err(e) = self.config.save_to(&self.files.config) {
                     warn!(error = %e, "could not save the setting");
                 }
                 if on && self.canton() {
@@ -612,7 +617,7 @@ impl App {
                         self.canton_columns = text;
                         if n != self.config.graph.canton_columns {
                             self.config.graph.canton_columns = n;
-                            if let Err(e) = self.config.save() {
+                            if let Err(e) = self.config.save_to(&self.files.config) {
                                 warn!(error = %e, "could not save the setting");
                             }
                             self.relayout_canton();
@@ -832,7 +837,7 @@ impl App {
             Message::AnswerWrite(allow) => self.answer_write(allow),
             Message::ToggleConnectResults(on) => {
                 self.config.graph.connect_results = on;
-                if let Err(e) = self.config.save() {
+                if let Err(e) = self.config.save_to(&self.files.config) {
                     warn!(error = %e, "could not save the setting");
                 }
                 if self.result_view.is_some() {
@@ -856,7 +861,7 @@ impl App {
                         // a window of transactions rather than every table.
                         if action == DataAction::LoadCantonSample && !self.canton() {
                             self.config.graph.visualization = Visualization::Canton;
-                            if let Err(e) = self.config.save() {
+                            if let Err(e) = self.config.save_to(&self.files.config) {
                                 warn!(error = %e, "could not save the setting");
                             }
                             self.apply_visualization();
@@ -1281,7 +1286,7 @@ impl App {
         new.graph.canton_follow_newest = live.graph.canton_follow_newest;
         new.graph.visualization = live.graph.visualization;
         new.mcp = live.mcp.clone();
-        if let Err(e) = new.save() {
+        if let Err(e) = new.save_to(&self.files.config) {
             warn!(error = %e, "could not save settings");
             form.message = Some(Err(e.to_string()));
             return;
@@ -1395,7 +1400,7 @@ impl App {
         let name = self.saved_query_name.trim().to_string();
         match self.saved_queries.put(&name, &self.query_text.text()) {
             Ok(replaced) => {
-                if let Err(e) = self.saved_queries.save_to(&SavedQueries::path()) {
+                if let Err(e) = self.saved_queries.save_to(&self.files.queries) {
                     warn!(error = %e, "could not save the queries");
                     self.error = Some(format!("Could not save the queries: {e}"));
                     return;
@@ -1415,7 +1420,7 @@ impl App {
         if self.saved_queries_unreadable {
             self.notice = Some(format!(
                 "Not saved: {} could not be read. Fix or remove it, then restart.",
-                SavedQueries::path().display()
+                self.files.queries.display()
             ));
         }
         self.saved_queries_unreadable
@@ -1429,7 +1434,7 @@ impl App {
         if !self.saved_queries.remove(&name) {
             return;
         }
-        if let Err(e) = self.saved_queries.save_to(&SavedQueries::path()) {
+        if let Err(e) = self.saved_queries.save_to(&self.files.queries) {
             warn!(error = %e, "could not save the queries");
             self.error = Some(format!("Could not save the queries: {e}"));
             return;

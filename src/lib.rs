@@ -1,11 +1,13 @@
 //! Explores a SurrealDB database as a graph: opening the database
-//! and turning its records into nodes and edges. The desktop app is in `src/main.rs`.
+//! and turning its records into nodes and edges, and the desktop app ([`gui`]),
+//! which `src/main.rs` runs.
 
 pub mod canton;
 pub mod config;
 pub mod data;
 pub mod db;
 pub mod graph;
+pub mod gui;
 pub mod logging;
 pub mod mcp;
 pub mod query;
