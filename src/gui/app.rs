@@ -1630,7 +1630,8 @@ impl App {
     // What the canvas draws has no widget text that a test could find, so
     // these say what it shows. They only read the app's state.
 
-    /// The ids of the records drawn now, after hiding and the Canton filters.
+    /// The ids of the records kept by hiding and the Canton filters, whether
+    /// or not they are scrolled into view.
     pub fn shown_records(&self) -> Vec<String> {
         let canton = self.canton();
         self.graph

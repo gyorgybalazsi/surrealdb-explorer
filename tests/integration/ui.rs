@@ -1,6 +1,8 @@
 //! Tests of the window, with `iced_test`: the app is booted against a test
 //! database, widgets are found and clicked by their text with a
-//! `Simulator`, and the tasks the app starts are run to the end.
+//! `Simulator`, and the tasks the app starts are run to the end. Only
+//! the messages tasks produce are replayed: widget operations (such as
+//! scrolling), window and clipboard actions are dropped.
 //!
 //! The graph is a canvas, so its records have no widget text: tests pick
 //! them with messages and read what the canvas would draw from `App`.
@@ -61,13 +63,24 @@ impl Ui {
     }
 
     /// Clicks the widget showing `label`, as the user would, and handles
-    /// the messages that produces.
+    /// the messages that produces. Fails if the click does nothing (e.g.
+    /// the button is disabled).
     fn click(&mut self, label: &str) {
+        self.click_through(&[label]);
+    }
+
+    /// Clicks the widgets showing these labels one after the other in the
+    /// same window, e.g. a dropdown and then one of its entries, then
+    /// handles the messages that produces.
+    fn click_through(&mut self, labels: &[&str]) {
         let mut ui = simulator(self.app.view());
-        if let Err(e) = ui.click(label) {
-            panic!("no \"{label}\" to click: {e}");
+        for label in labels {
+            if let Err(e) = ui.click(*label) {
+                panic!("no \"{label}\" to click: {e}");
+            }
         }
         let messages: Vec<Message> = ui.into_messages().collect();
+        assert!(!messages.is_empty(), "clicking {labels:?} did nothing: disabled?");
         for message in messages {
             self.send(message);
         }
@@ -162,7 +175,7 @@ fn party_filter_keeps_the_contracts_the_party_witnesses() {
 }
 
 #[test]
-fn picking_a_saved_query_replaces_the_editor_text_and_clear_empties_it() {
+fn a_picked_saved_query_replaces_the_editor_text_and_clear_empties_it() {
     let saved = SavedQueries {
         queries: vec![
             SavedQuery { name: "People".into(), query: "SELECT * FROM person;".into() },
@@ -172,6 +185,8 @@ fn picking_a_saved_query_replaces_the_editor_text_and_clear_empties_it() {
     let mut ui = Ui::boot_with_queries(common::temp_database("ui_saved"), Visualization::Standard, Some(saved));
     ui.click("▸ Query");
 
+    // iced_test 0.14 can't find a pick_list by its text (it draws its
+    // label itself), so the pick is sent as the message the list sends.
     ui.send(Message::PickSavedQuery("Films".into()));
     assert_eq!(ui.app.query_text(), "SELECT title FROM movie;");
     ui.send(Message::PickSavedQuery("People".into()));
