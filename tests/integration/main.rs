@@ -17,3 +17,4 @@ mod result_graph;
 mod schema;
 mod server;
 mod typed_records;
+mod ui;

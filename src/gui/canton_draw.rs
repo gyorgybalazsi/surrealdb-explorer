@@ -188,6 +188,20 @@ pub fn edge_at(view: &GraphView, bounds: Rectangle, point: Point) -> Option<usiz
     })
 }
 
+/// How strongly record `i`'s card is drawn, from 0 to 1: dimmed when
+/// another record is hovered or selected and `i` isn't next to it, and
+/// faded when it is an archived (consumed) contract.
+pub(super) fn card_alpha(lit: Option<&HashSet<usize>>, i: usize, status: Option<Status>) -> f32 {
+    let mut alpha: f32 = 1.0;
+    if lit.is_some_and(|set| !set.contains(&i)) {
+        alpha *= 0.35;
+    }
+    if status == Some(Status::Archived) {
+        alpha *= 0.5;
+    }
+    alpha
+}
+
 /// Draws the whole graph. `lit` are the records to emphasise (a hovered or
 /// selected record and its neighbours); the rest are dimmed.
 pub fn draw(view: &GraphView, frame: &mut Frame, bounds: Rectangle, lit: Option<&HashSet<usize>>) {
@@ -290,14 +304,8 @@ pub fn draw(view: &GraphView, frame: &mut Frame, bounds: Rectangle, lit: Option<
         let color = kind_color(n.kind);
         let selected = view.selection == Some(Selection::Node(i));
         let hovered = view.hover == Some(i);
-        let mut alpha: f32 = 1.0;
-        if lit.is_some_and(|set| !set.contains(&i)) {
-            alpha *= 0.35;
-        }
+        let alpha = card_alpha(lit, i, n.card.status);
         let archived = n.card.status == Some(Status::Archived);
-        if archived {
-            alpha *= 0.5;
-        }
         let card = Path::rounded_rectangle(p, size, (8.0 * s).into());
         // A soft shadow, stronger under the hovered card.
         let lift = if hovered || selected { 2.0 } else { 1.0 };
