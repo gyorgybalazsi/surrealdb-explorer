@@ -264,6 +264,22 @@ fn selecting_a_record_dims_the_rest_and_deselecting_restores_the_view() {
 /// one checks the real wiring around it.
 #[test]
 fn the_app_boots_and_runs_a_query_in_the_emulator() {
+    // The emulator waits for every task, so one that never ends would hang
+    // the test: run it on its own thread and give up after a while.
+    let (done, finished) = std::sync::mpsc::channel();
+    let test = std::thread::spawn(move || {
+        boot_and_run_a_query_in_the_emulator();
+        let _ = done.send(());
+    });
+    match finished.recv_timeout(std::time::Duration::from_secs(120)) {
+        Ok(()) => test.join().unwrap(),
+        // The test panicked: report its panic.
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => std::panic::resume_unwind(test.join().unwrap_err()),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("the emulator didn't finish within 2 minutes"),
+    }
+}
+
+fn boot_and_run_a_query_in_the_emulator() {
     use iced_test::emulator::{Emulator, Event, Mode};
     use iced_test::futures::futures::{StreamExt, channel::mpsc, executor};
     use iced_test::Instruction;
@@ -291,7 +307,9 @@ fn the_app_boots_and_runs_a_query_in_the_emulator() {
     let (sender, mut receiver) = mpsc::channel(1);
     let mut emulator = Emulator::new(sender, &program, Mode::Zen, iced::Size::new(1200.0, 800.0));
     loop {
-        match executor::block_on(receiver.next()).expect("the emulator stopped") {
+        // The emulator keeps its sender, so this waits for its next event.
+        let Some(event) = executor::block_on(receiver.next()) else { unreachable!() };
+        match event {
             Event::Action(action) => emulator.perform(&program, action),
             Event::Failed(instruction) => panic!("failed: {instruction}"),
             Event::Ready => {
