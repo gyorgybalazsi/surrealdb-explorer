@@ -1,60 +1,19 @@
-//! Connecting to a SurrealDB server, as one client among others. Starts a
-//! temporary in-memory server with the `surreal` program; skipped (with a
-//! note) if that program isn't installed.
+//! Server features beyond a single root user: several clients at once, and
+//! users defined on a namespace or a database. Each test starts its own
+//! server, as they define users and namespaces of their own.
 
 use crate::common;
 
-use std::process::{Child, Command, Stdio};
-
-use surrealdb_explorer::config::{Connection, DatabaseConfig, UserLevel};
+use surrealdb_explorer::config::{DatabaseConfig, UserLevel};
 use surrealdb_explorer::{data, db, graph, query};
-
-struct Server(Child);
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-fn surreal_program() -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    [format!("{home}/.surrealdb/surreal"), "surreal".to_string()]
-        .into_iter()
-        .find(|p| Command::new(p).arg("--help").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok())
-}
-
-fn start_server(port: u16) -> Option<Server> {
-    let program = surreal_program()?;
-    let child = Command::new(program)
-        .args(["start", "--user", "root", "--pass", "secret", "--bind", &format!("127.0.0.1:{port}"), "memory"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    // Wait until it accepts connections.
-    for _ in 0..50 {
-        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return Some(Server(child));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    None
-}
 
 #[test]
 fn two_clients_share_a_server() {
-    let port = 18_765;
-    let Some(_server) = start_server(port) else {
-        eprintln!("skipped: the surreal program isn't installed");
-        return;
-    };
+    let server = common::start_server();
     let config = DatabaseConfig {
-        connection: Connection::Server,
-        server: format!("ws://127.0.0.1:{port}"),
-        username: "root".into(),
-        password: "secret".into(),
+        server: server.address(),
+        username: common::USERNAME.into(),
+        password: common::PASSWORD.into(),
         ..DatabaseConfig::default()
     };
     let wrong = DatabaseConfig { password: "wrong".into(), ..config.clone() };
@@ -83,16 +42,11 @@ fn two_clients_share_a_server() {
 /// (`DEFINE USER … ON DATABASE`), sign in to their own namespace or database.
 #[test]
 fn namespace_and_database_users_sign_in() {
-    let port = 18_766;
-    let Some(_server) = start_server(port) else {
-        eprintln!("skipped: the surreal program isn't installed");
-        return;
-    };
+    let server = common::start_server();
     let root = DatabaseConfig {
-        connection: Connection::Server,
-        server: format!("ws://127.0.0.1:{port}"),
-        username: "root".into(),
-        password: "secret".into(),
+        server: server.address(),
+        username: common::USERNAME.into(),
+        password: common::PASSWORD.into(),
         namespace: "canton".into(),
         database: "event_graph".into(),
         ..DatabaseConfig::default()
@@ -156,16 +110,11 @@ fn namespace_and_database_users_sign_in() {
 /// in it instead, and keeps the user it signed in with.
 #[test]
 fn a_database_user_erases_its_database() {
-    let port = 18_767;
-    let Some(_server) = start_server(port) else {
-        eprintln!("skipped: the surreal program isn't installed");
-        return;
-    };
+    let server = common::start_server();
     let root = DatabaseConfig {
-        connection: Connection::Server,
-        server: format!("ws://127.0.0.1:{port}"),
-        username: "root".into(),
-        password: "secret".into(),
+        server: server.address(),
+        username: common::USERNAME.into(),
+        password: common::PASSWORD.into(),
         namespace: "canton".into(),
         database: "event_graph".into(),
         ..DatabaseConfig::default()
@@ -210,5 +159,62 @@ fn a_database_user_erases_its_database() {
         for c in [admin, again] {
             db::close(c).await.unwrap();
         }
+    });
+}
+
+
+/// With a read-only viewer user set, the queries a person types or Claude
+/// Code sends run as that user: the server keeps them from changing data.
+#[test]
+fn queries_run_as_the_read_only_viewer() {
+    let mut config = common::temp_database("viewer_queries");
+    common::run(async move {
+        let main = db::connect(&config).await.unwrap();
+        main.query("DEFINE USER viewer ON DATABASE PASSWORD 'viewer-pass' ROLES VIEWER;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        data::load_sample_data(&main).await.unwrap();
+
+        // Without a viewer user, queries use the main connection.
+        assert!(matches!(db::Queries::connect(&config).await, db::Queries::Main));
+
+        config.viewer_username = "viewer".into();
+        config.viewer_password = "wrong".into();
+        let failed = db::Queries::connect(&config).await;
+        assert!(failed.pick(&main).is_err(), "a viewer that can't sign in runs nothing, rather than the main user");
+
+        config.viewer_password = "viewer-pass".into();
+        let queries = db::Queries::connect(&config).await;
+        assert!(queries.enforced());
+        let viewer = queries.pick(&main).unwrap();
+
+        let read = "SELECT VALUE id FROM person:alice;";
+        let outcome = query::run(&viewer, read.into()).await;
+        assert!(!query::record_ids(&outcome).is_empty(), "the viewer reads");
+
+        // Writes change nothing. The server skips data changes without an
+        // error and refuses definitions; the note says what happened.
+        let write = "DELETE person:alice; CREATE person:eve; DEFINE TABLE secret;";
+        let mut outcome = query::run(&viewer, write.into()).await;
+        query::explain_refused_writes(&mut outcome, write);
+        assert_eq!(outcome.note.as_deref(), Some(query::WRITES_IGNORED));
+        let statements = outcome.statements.unwrap();
+        let refused = statements[2].result.as_ref().unwrap_err();
+        assert!(refused.starts_with("Refused: queries run as a read-only user"), "{refused}");
+
+        let left = query::run(&main, "SELECT VALUE id FROM person:alice, person:eve; INFO FOR DB;".into()).await;
+        let left = left.statements.unwrap();
+        assert_eq!(left[0].result.as_ref().unwrap(), &serde_json::json!(["person:alice"]));
+        assert!(left[1].result.as_ref().unwrap()["tables"].get("secret").is_none());
+
+        // A read gets no note.
+        let mut outcome = query::run(&viewer, read.into()).await;
+        query::explain_refused_writes(&mut outcome, read);
+        assert!(outcome.note.is_none());
+
+        queries.close().await;
+        db::close(main).await.unwrap();
     });
 }

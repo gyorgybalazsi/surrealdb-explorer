@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
+use crate::secret;
 
 /// Where the configuration is read from and saved to.
 pub const CONFIG_FILE: &str = "config.toml";
@@ -40,15 +41,10 @@ impl Default for McpConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DatabaseConfig {
-    /// Open a database folder directly, or connect to a SurrealDB server.
-    pub connection: Connection,
-    /// Folder of the SurrealKV database, relative to the folder the app runs
-    /// from (folder connection).
-    pub path: String,
-    /// Address of the SurrealDB server, e.g. `ws://127.0.0.1:8000` (server connection).
+    /// Address of the SurrealDB server, e.g. `ws://127.0.0.1:8000`.
     pub server: String,
     /// User to sign in to the server with.
     pub username: String,
@@ -59,16 +55,15 @@ pub struct DatabaseConfig {
     pub password: String,
     pub namespace: String,
     pub database: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Connection {
-    /// The app opens the folder itself; nothing else can use it meanwhile.
-    Folder,
-    /// The app is one client of a SurrealDB server, which other programs
-    /// (Studio, an import job, …) can use at the same time.
-    Server,
+    /// A read-only user (`ROLES VIEWER`) for the queries typed in the query
+    /// panel or sent by Claude Code, so the server itself refuses any that
+    /// would change data. Empty: those queries use the user above, and the
+    /// app refuses the ones that look like writes.
+    pub viewer_username: String,
+    /// Where the viewer user is defined; usually on the database.
+    pub viewer_user_level: UserLevel,
+    /// The viewer's password, or a 1Password reference to it (`op://…`).
+    pub viewer_password: String,
 }
 
 /// Where a server user is defined (`DEFINE USER … ON ROOT | NAMESPACE | DATABASE`).
@@ -96,48 +91,58 @@ impl std::fmt::Display for UserLevel {
     }
 }
 
-impl Connection {
-    pub const ALL: [Connection; 2] = [Connection::Folder, Connection::Server];
-}
-
-impl std::fmt::Display for Connection {
+/// Leaves the passwords out (a 1Password reference is shown): settings are logged.
+impl std::fmt::Debug for DatabaseConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Connection::Folder => "Database folder",
-            Connection::Server => "SurrealDB server",
-        })
+        let hidden = |p: &str| if secret::is_1password_reference(p) { p.trim().to_string() } else { "…".to_string() };
+        f.debug_struct("DatabaseConfig")
+            .field("server", &self.server)
+            .field("username", &self.username)
+            .field("user_level", &self.user_level)
+            .field("password", &hidden(&self.password))
+            .field("namespace", &self.namespace)
+            .field("database", &self.database)
+            .field("viewer_username", &self.viewer_username)
+            .field("viewer_user_level", &self.viewer_user_level)
+            .field("viewer_password", &hidden(&self.viewer_password))
+            .finish()
     }
 }
 
 impl DatabaseConfig {
-    /// Whether `other` reaches the same folder or server (it may still use
-    /// another namespace or database).
+    /// Whether `other` reaches the same server as the same user (it may
+    /// still use another namespace or database).
     pub fn same_place(&self, other: &DatabaseConfig) -> bool {
-        self.connection == other.connection
-            && match self.connection {
-                Connection::Folder => self.path == other.path,
-                Connection::Server => {
-                    self.server == other.server
-                        && self.username == other.username
-                        && self.password == other.password
-                        && self.user_level == other.user_level
-                        // A namespace or database user signs in to its own
-                        // namespace or database, so another one needs a new sign-in.
-                        && match self.user_level {
-                            UserLevel::Root => true,
-                            UserLevel::Namespace => self.namespace == other.namespace,
-                            UserLevel::Database => self.namespace == other.namespace && self.database == other.database,
-                        }
-                }
+        self.server == other.server
+            && self.username == other.username
+            && self.password == other.password
+            && self.user_level == other.user_level
+            // A namespace or database user signs in to its own namespace or
+            // database, so another one needs a new sign-in.
+            && match self.user_level {
+                UserLevel::Root => true,
+                UserLevel::Namespace => self.namespace == other.namespace,
+                UserLevel::Database => self.namespace == other.namespace && self.database == other.database,
             }
+    }
+
+    /// The connection settings of the read-only viewer user, if one is set:
+    /// the same server, namespace and database, signed in as the viewer.
+    pub fn viewer(&self) -> Option<DatabaseConfig> {
+        let username = self.viewer_username.trim();
+        (!username.is_empty()).then(|| DatabaseConfig {
+            username: username.to_string(),
+            user_level: self.viewer_user_level,
+            password: self.viewer_password.clone(),
+            viewer_username: String::new(),
+            viewer_password: String::new(),
+            ..self.clone()
+        })
     }
 
     /// Where the database is, for messages and the log (never the password).
     pub fn location(&self) -> String {
-        match self.connection {
-            Connection::Folder => format!("folder {}", self.path),
-            Connection::Server => format!("server {}", self.server),
-        }
+        format!("server {}", self.server)
     }
 }
 
@@ -221,14 +226,15 @@ impl Default for Config {
 impl Default for DatabaseConfig {
     fn default() -> Self {
         DatabaseConfig {
-            connection: Connection::Folder,
-            path: "data".into(),
             server: "ws://127.0.0.1:8000".into(),
             username: "root".into(),
             user_level: UserLevel::Root,
             password: String::new(),
             namespace: "main".into(),
             database: "main".into(),
+            viewer_username: String::new(),
+            viewer_user_level: UserLevel::Database,
+            viewer_password: String::new(),
         }
     }
 }
@@ -302,14 +308,8 @@ impl Config {
         if d.namespace.trim().is_empty() || d.database.trim().is_empty() {
             return Err("namespace and database must not be empty".into());
         }
-        match d.connection {
-            Connection::Folder if d.path.trim().is_empty() => {
-                return Err("the database folder must not be empty".into());
-            }
-            Connection::Server if d.server.trim().is_empty() || d.username.trim().is_empty() => {
-                return Err("the server address and username must not be empty".into());
-            }
-            _ => {}
+        if d.server.trim().is_empty() || d.username.trim().is_empty() {
+            return Err("the server address and username must not be empty".into());
         }
         if self.graph.max_records_per_table == 0 || self.graph.max_result_records == 0 {
             return Err("the record limits must be at least 1".into());

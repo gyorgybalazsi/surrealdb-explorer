@@ -1,9 +1,8 @@
-//! All integration tests, as one test binary. Each binary links the whole of
-//! SurrealDB, so one binary instead of one per file saves most of the link
-//! time and disk space. Run one area with e.g. `cargo test --test integration canton::`.
+//! All integration tests, as one test binary: one binary instead of one per
+//! file saves link time and disk space. Run one area with e.g. `cargo test --test integration canton::`.
 //!
-//! Tests here run in parallel in one process: give each a unique temporary
-//! database name and port.
+//! The tests need the `surreal` program: see `common`. They run in parallel
+//! in one process: give each a unique database name.
 
 mod common;
 
@@ -18,3 +17,4 @@ mod result_graph;
 mod schema;
 mod server;
 mod typed_records;
+mod ui;

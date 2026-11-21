@@ -7,7 +7,7 @@ use iced::mouse::{self, Button, Cursor, ScrollDelta};
 use iced::widget::canvas::{self, Action, Event, Frame, Geometry, Path, Stroke, Text};
 use iced::widget::text::Alignment;
 use iced::{Color, Font, Point, Rectangle, Renderer, Theme, Vector};
-use surrealdb_explorer::config::Visualization;
+use crate::config::Visualization;
 
 use crate::gui::app::{Message, Selection};
 use crate::gui::canton_draw;
@@ -150,7 +150,7 @@ impl GraphView<'_> {
 
     /// Records (and their relations) to draw in full colour while hovering.
     /// In the Canton view a selected record lights up its neighbours too, as in alt-canton's explorer.
-    fn lit(&self) -> Option<HashSet<usize>> {
+    pub(super) fn lit(&self) -> Option<HashSet<usize>> {
         let selected = match self.selection {
             Some(Selection::Node(n)) if self.visualization == Visualization::Canton => Some(n),
             _ => None,
@@ -337,7 +337,7 @@ impl canvas::Program<Message> for GraphView<'_> {
             };
             let width = width * scale.clamp(0.7, 1.6);
             draw_curve(&mut frame, &c, color, width);
-            let overview = e.id.starts_with(surrealdb_explorer::graph::TABLE_NODE);
+            let overview = e.id.starts_with(crate::graph::TABLE_NODE);
             if selected || touches_focus || overview || (focus.is_none() && scale >= 2.5) {
                 edge_labels.push((c.at(0.5), e.label.clone()));
             }
@@ -446,7 +446,7 @@ fn radii(graph: &Graph, scale: f32) -> Vec<f32> {
         .map(|(d, n)| {
             // A table in the overview is sized by how many records it has.
             let base = match n.data["records"].as_i64() {
-                Some(records) if n.id.starts_with(surrealdb_explorer::graph::TABLE_NODE) => {
+                Some(records) if n.id.starts_with(crate::graph::TABLE_NODE) => {
                     10.0 + 5.0 * ((records.max(0) + 1) as f32).log10()
                 }
                 _ => (NODE_RADIUS + 2.2 * (d as f32).sqrt()).min(18.0),

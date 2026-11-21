@@ -1,16 +1,16 @@
 //! Tests for the configuration file and for running queries.
-//! They use a temporary database, so they never touch `./data`.
+//! They use a temporary config file and their own database.
 
 use crate::common;
 
 use common::temp_dir;
-use surrealdb_explorer::config::{Config, Connection, DatabaseConfig, UserLevel};
+use surrealdb_explorer::config::{Config, DatabaseConfig, UserLevel};
 use surrealdb_explorer::{db, graph, query};
 
 #[test]
 fn config_is_created_with_defaults_and_round_trips() {
     let dir = temp_dir("config");
-    let path = dir.join("config.toml");
+    let path = dir.path().join("config.toml");
 
     let (config, created) = Config::load_or_create_at(&path).unwrap();
     assert!(created);
@@ -29,7 +29,7 @@ fn config_is_created_with_defaults_and_round_trips() {
 #[test]
 fn missing_fields_take_defaults_and_bad_values_are_refused() {
     let dir = temp_dir("partial");
-    let path = dir.join("config.toml");
+    let path = dir.path().join("config.toml");
 
     std::fs::write(&path, "[graph]\nmax_records_per_table = 7\n").unwrap();
     let (config, _) = Config::load_or_create_at(&path).unwrap();
@@ -45,10 +45,16 @@ fn missing_fields_take_defaults_and_bad_values_are_refused() {
     assert!(!config.graph.connect_results);
 
     // Server user levels are read by name; files without one sign in as root.
-    std::fs::write(&path, "[database]\nconnection = \"server\"\nuser_level = \"database\"\n").unwrap();
+    std::fs::write(&path, "[database]\nuser_level = \"database\"\n").unwrap();
     let (config, _) = Config::load_or_create_at(&path).unwrap();
     assert_eq!(config.database.user_level, UserLevel::Database);
     assert_eq!(DatabaseConfig::default().user_level, UserLevel::Root);
+
+    // Files from when the app could also open a database folder still load;
+    // the old keys are ignored.
+    std::fs::write(&path, "[database]\nconnection = \"folder\"\npath = \"data\"\nnamespace = \"ns\"\n").unwrap();
+    let (config, _) = Config::load_or_create_at(&path).unwrap();
+    assert_eq!(config.database.namespace, "ns");
 
     std::fs::write(&path, "[logging]\nlevel = \"loud\"\n").unwrap();
     assert!(Config::load_or_create_at(&path).is_err());
@@ -102,7 +108,7 @@ fn queries_report_each_statement_and_the_graph_sees_the_changes() {
 
 #[test]
 fn a_namespace_or_database_user_reconnects_for_another_namespace_or_database() {
-    let root = DatabaseConfig { connection: Connection::Server, ..DatabaseConfig::default() };
+    let root = DatabaseConfig::default();
     let other_db = DatabaseConfig { database: "other".into(), ..root.clone() };
     let other_ns = DatabaseConfig { namespace: "other".into(), ..root.clone() };
     // A root user switches namespace and database on the same connection.

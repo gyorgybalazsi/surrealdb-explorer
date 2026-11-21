@@ -164,6 +164,7 @@ pub struct Model {
 
 /// `alice::1220ab…` reads as `alice`.
 pub fn short_party(p: &str) -> &str {
+    let p = party_of(p);
     p.split_once("::").map(|(n, _)| n).unwrap_or(p)
 }
 
@@ -190,12 +191,25 @@ fn parties_in(v: &serde_json::Value) -> Vec<String> {
     match v {
         serde_json::Value::String(s) if s.contains("::") => s
             .split(',')
-            .map(|p| p.trim().trim_matches('\'').to_string())
+            .map(|p| party_of(p.trim().trim_matches('\'')).to_string())
             .filter(|p| !p.is_empty())
             .collect(),
         serde_json::Value::Array(items) => items.iter().flat_map(parties_in).collect(),
         _ => Vec::new(),
     }
+}
+
+/// A party id, also when it comes as a link to its `party` record: the
+/// syncer's topology events hold `` party:`Alice::1220…` ``, which must count as
+/// the same party as the plain `Alice::1220…` on events.
+fn party_of(s: &str) -> &str {
+    s.strip_prefix("party:")
+        .and_then(|key| {
+            key.strip_prefix('`')
+                .and_then(|k| k.strip_suffix('`'))
+                .or_else(|| key.strip_prefix('⟨').and_then(|k| k.strip_suffix('⟩')))
+        })
+        .unwrap_or(s)
 }
 
 impl Model {
@@ -550,6 +564,34 @@ pub fn visible(m: &Model, filters: &Filters) -> Vec<bool> {
         }
     }
     keep
+}
+
+/// The tree branches that stand in for hidden events: for each shown event
+/// whose parent (or, for a root's own event, root) is filtered out, a link
+/// from its nearest shown ancestor, as `(ancestor, event)`. Without them an
+/// event a party sees only part of the transaction above would hang under
+/// its transaction with nothing joining the two.
+pub fn bridges(m: &Model, keep: &[bool]) -> Vec<(usize, usize)> {
+    let mut links = Vec::new();
+    for (j, f) in m.facts.iter().enumerate() {
+        let Some(r) = f.root else { continue };
+        if !keep[j] || r == j || keep[f.parent.unwrap_or(r)] {
+            continue;
+        }
+        let mut up = f.parent;
+        let mut found = None;
+        while let Some(a) = up {
+            if keep[a] {
+                found = Some(a);
+                break;
+            }
+            up = m.facts[a].parent;
+        }
+        if let Some(a) = found.or(keep[r].then_some(r)) {
+            links.push((a, j));
+        }
+    }
+    links
 }
 
 pub const NODE_W: f32 = 168.0;
