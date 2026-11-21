@@ -23,6 +23,15 @@ pub struct QueryOutcome {
     pub statements: Result<Vec<StatementResult>, String>,
     /// Wall-clock time of the whole query.
     pub elapsed: Duration,
+    /// A warning about the query as a whole, shown above its result.
+    pub note: Option<String>,
+}
+
+impl QueryOutcome {
+    /// A query that didn't run, and why.
+    pub fn refused(message: impl Into<String>) -> QueryOutcome {
+        QueryOutcome { statements: Err(message.into()), elapsed: Duration::ZERO, note: None }
+    }
 }
 
 /// Runs `sql` and collects every statement's result.
@@ -54,7 +63,40 @@ pub async fn run(db: &Database, sql: String) -> QueryOutcome {
     }
     tracing::debug!(%sql, "query text");
 
-    QueryOutcome { statements, elapsed }
+    QueryOutcome { statements, elapsed, note: None }
+}
+
+/// Shown when no viewer user is set and a query in the query panel looks
+/// like it would change data.
+pub const WRITE_REFUSED_HERE: &str = "The query panel only reads, and this query looks like it would change \
+    data (CREATE, UPDATE, DELETE, RELATE, DEFINE, a custom fn::…), so it didn't run. Set a read-only viewer \
+    user in Settings to have the server check every query instead.";
+
+/// Shown with the result of a query that looks like a write, run as the
+/// read-only viewer user.
+pub const WRITES_IGNORED: &str = "Nothing was changed: queries run as a read-only user. The server ignores \
+    CREATE, UPDATE, DELETE and RELATE for it (they return no records) and refuses DEFINE and REMOVE.";
+
+/// Explains a result of `sql` run as the read-only viewer user: why the
+/// server refused a statement, and, for a query that looks like a write,
+/// that nothing was changed (the server skips most writes without an error).
+pub fn explain_refused_writes(outcome: &mut QueryOutcome, sql: &str) {
+    if !is_read_only(sql) {
+        outcome.note = Some(WRITES_IGNORED.to_string());
+    }
+    let explain = |e: &mut String| {
+        if is_permission_error(e) {
+            *e = format!("Refused: queries run as a read-only user, so they can't change data. ({e})");
+        }
+    };
+    match &mut outcome.statements {
+        Err(e) => explain(e),
+        Ok(statements) => statements.iter_mut().filter_map(|s| s.result.as_mut().err()).for_each(explain),
+    }
+}
+
+fn is_permission_error(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("not enough permissions")
 }
 
 /// Every string in the results that looks like a record id (`table:key`).
@@ -63,7 +105,7 @@ pub async fn run(db: &Database, sql: String) -> QueryOutcome {
 pub fn record_ids(outcome: &QueryOutcome) -> Vec<String> {
     fn walk(v: &serde_json::Value, out: &mut Vec<String>) {
         match v {
-            serde_json::Value::String(s) if s.contains(':') => out.push(s.clone()),
+            serde_json::Value::String(s) if looks_like_record_id(s) => out.push(s.clone()),
             serde_json::Value::Array(items) => items.iter().for_each(|i| walk(i, out)),
             serde_json::Value::Object(o) => o.values().for_each(|i| walk(i, out)),
             _ => {}
@@ -78,6 +120,18 @@ pub fn record_ids(outcome: &QueryOutcome) -> Vec<String> {
         }
     }
     ids
+}
+
+/// Whether `s` is shaped like a record id: a table name, a colon, and a key,
+/// as in `person:tom`, `created:⟨00a1⟩` or `⟨my-table⟩:1`. A Canton party id
+/// (`Alice::1220…`), a time (`12:30`) or a URL (`https://…`) is not.
+fn looks_like_record_id(s: &str) -> bool {
+    let Some((table, key)) = s.split_once(':') else { return false };
+    let plain_table = table.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    let escaped_table = (table.starts_with('⟨') && table.ends_with('⟩') && table.chars().count() > 2)
+        || (table.starts_with('`') && table.ends_with('`') && table.len() > 2);
+    (plain_table || escaped_table) && !key.is_empty() && !key.starts_with(':') && !key.starts_with('/')
 }
 
 /// Whether `query` only reads: it has none of the statements that change
@@ -118,15 +172,17 @@ fn has_transaction_statements(query: &str) -> bool {
     has_word(query, &["BEGIN", "COMMIT", "CANCEL"])
 }
 
+/// Whether `query` has one of `words` as a whole word. `_` is part of a
+/// word, so a field such as `create_arguments` isn't the word CREATE.
 fn has_word(query: &str, words: &[&str]) -> bool {
     query
-        .split(|c: char| !c.is_ascii_alphanumeric())
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .any(|word| words.contains(&word.to_ascii_uppercase().as_str()))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{has_transaction_statements, is_read_only};
+    use super::{has_transaction_statements, is_read_only, looks_like_record_id};
 
     #[test]
     fn spots_transaction_statements() {
@@ -143,6 +199,35 @@ mod tests {
     }
 
     #[test]
+    fn explains_what_a_viewer_was_refused() {
+        use super::{QueryOutcome, StatementResult, WRITES_IGNORED, explain_refused_writes};
+        let statement = |result| StatementResult { time: None, result };
+        let mut outcome = QueryOutcome {
+            statements: Ok(vec![
+                statement(Ok(serde_json::json!([]))),
+                statement(Err("IAM error: Not enough permissions to perform this action".into())),
+                statement(Err("Parse error".into())),
+            ]),
+            elapsed: Default::default(),
+            note: None,
+        };
+        explain_refused_writes(&mut outcome, "DELETE a; DEFINE TABLE b; SELECT (");
+        assert_eq!(outcome.note.as_deref(), Some(WRITES_IGNORED));
+        let statements = outcome.statements.unwrap();
+        assert!(statements[1].result.as_ref().unwrap_err().starts_with("Refused: queries run as a read-only user"));
+        assert_eq!(statements[2].result.as_ref().unwrap_err(), "Parse error");
+    }
+
+    #[test]
+    fn field_names_with_keywords_in_them_only_read() {
+        assert!(is_read_only(crate::saved_queries::TICKET_DEMO_QUERY));
+        assert!(is_read_only("SELECT create_arguments FROM created"));
+        assert!(is_read_only("SELECT delete_at, update_count FROM person"));
+        assert!(!is_read_only("DELETE created;"));
+        assert!(!is_read_only("SELECT * FROM a; UPDATE created SET x = 1"));
+    }
+
+    #[test]
     fn custom_functions_may_change_data() {
         assert!(!is_read_only("RETURN fn::wipe()"));
         assert!(!is_read_only("SELECT fn::wipe() FROM ONLY {}"));
@@ -150,5 +235,15 @@ mod tests {
         assert!(!is_read_only("ACCESS account GRANT FOR USER tobie"));
         assert!(is_read_only("SELECT string::len(name), array::len(->knows) FROM person"));
         assert!(is_read_only("SELECT * FROM person WHERE myfn::x = 1"));
+    }
+
+    #[test]
+    fn record_ids_are_told_from_other_strings_with_colons() {
+        for id in ["person:tom", "created:⟨00a1⟩", "party:⟨Alice::1220⟩", "_t:1", "⟨my-table⟩:1", "`my-table`:1"] {
+            assert!(looks_like_record_id(id), "{id}");
+        }
+        for not_id in ["Alice::1220e604", "12:30", "https://example.com", "person:", ":tom", "my-table:1", "no colon"] {
+            assert!(!looks_like_record_id(not_id), "{not_id}");
+        }
     }
 }

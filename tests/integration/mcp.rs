@@ -1,7 +1,7 @@
 //! The MCP server, spoken to over HTTP the way Claude Code does. A stand-in
 //! for the window answers write approvals and records what it was told.
 
-mod common;
+use crate::common;
 
 use std::sync::{Arc, Mutex};
 
@@ -102,13 +102,21 @@ fn claude_code_can_read_draw_and_ask_to_write() {
                         WindowCommand::Show { query, graph, .. } => {
                             shown.lock().unwrap().push((query, graph.data.nodes.len()));
                         }
+                        // The window answers for person:alice only, as if only she were drawn.
+                        WindowCommand::Select { id, reply } | WindowCommand::Scroll { to: id, reply } => {
+                            let _ = reply.send(if id == "person:alice" || id.is_empty() || id == "bottom" {
+                                Ok(json!({ "id": id }))
+                            } else {
+                                Err(format!("no record {id} is drawn in the window"))
+                            });
+                        }
                         _ => {}
                     }
                 }
             });
         }
 
-        let port = 18_766;
+        let port = 18_768;
         tokio::spawn(mcp::serve(shared.clone(), port));
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         let mut session = Session::open(format!("http://127.0.0.1:{port}/mcp")).await;
@@ -117,7 +125,7 @@ fn claude_code_can_read_draw_and_ask_to_write() {
         let mut names: Vec<&str> =
             tools["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
         names.sort();
-        assert_eq!(names, ["get_schema", "get_selection", "overview", "query", "show"]);
+        assert_eq!(names, ["get_schema", "get_selection", "overview", "query", "scroll_graph", "select_record", "show"]);
 
         let (schema, _) = session.call("get_schema", json!({})).await;
         assert!(schema.contains("connects: person ->knows-> person"), "{schema}");
@@ -154,5 +162,65 @@ fn claude_code_can_read_draw_and_ask_to_write() {
         shared.window.lock().unwrap().selection = Some(json!({"id": "person:alice"}));
         let (selection, _) = session.call("get_selection", json!({})).await;
         assert!(selection.contains("person:alice"));
+
+        // select_record and scroll_graph pass the window's answer on.
+        let (picked, failed) = session.call("select_record", json!({"id": "person:alice"})).await;
+        assert!(!failed && picked.contains("person:alice"), "{picked}");
+        let (missing, failed) = session.call("select_record", json!({"id": "person:nobody"})).await;
+        assert!(failed && missing.contains("no record person:nobody"), "{missing}");
+        let (_, failed) = session.call("scroll_graph", json!({"to": "bottom"})).await;
+        assert!(!failed);
+    });
+}
+
+/// With a viewer user set, Claude Code's reads run as that user, and a write
+/// the user allowed runs as the main user.
+#[test]
+fn claude_code_reads_as_the_viewer() {
+    let mut config = common::temp_database("mcp_viewer");
+    common::run(async move {
+        let database = db::connect(&config).await.unwrap();
+        database
+            .query("DEFINE USER viewer ON DATABASE PASSWORD 'viewer-pass' ROLES VIEWER;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        data::load_sample_data(&database).await.unwrap();
+
+        let (to_window, mut window) = mpsc::unbounded_channel();
+        let shared = Shared::new(to_window);
+        *shared.db.lock().unwrap() = Some(database.clone());
+        // The stand-in window allows every write.
+        tokio::spawn(async move {
+            while let Some(command) = window.recv().await {
+                if let WindowCommand::ApproveWrite { reply, .. } = command {
+                    let _ = reply.send(true);
+                }
+            }
+        });
+
+        let port = 18_769;
+        tokio::spawn(mcp::serve(shared.clone(), port));
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let mut session = Session::open(format!("http://127.0.0.1:{port}/mcp")).await;
+
+        // A viewer that can't sign in: reads don't run at all.
+        config.viewer_username = "viewer".into();
+        config.viewer_password = "wrong".into();
+        *shared.queries.lock().unwrap() = db::Queries::connect(&config).await;
+        let (refused, failed) = session.call("query", json!({"query": "SELECT VALUE id FROM person;"})).await;
+        assert!(failed && refused.contains("viewer"), "{refused}");
+
+        config.viewer_password = "viewer-pass".into();
+        *shared.queries.lock().unwrap() = db::Queries::connect(&config).await;
+        let (people, failed) = session.call("query", json!({"query": "SELECT VALUE id FROM person;"})).await;
+        assert!(!failed && people.contains("person:alice"), "{people}");
+
+        // An allowed write runs as the main user.
+        let (_, failed) = session.call("query", json!({"query": "DELETE person:bob;"})).await;
+        assert!(!failed);
+        let (count, _) = session.call("query", json!({"query": "SELECT VALUE count() FROM person GROUP ALL;"})).await;
+        assert!(count.contains('5'), "bob is gone: {count}");
     });
 }

@@ -1,25 +1,21 @@
-//! Database connection: a database folder opened by the app itself, or a
-//! SurrealDB server the app connects to as one client among others.
+//! Database connection: the app is one client of a SurrealDB server, which
+//! other programs (Studio, an import job, …) can use at the same time.
 
 use surrealdb::Surreal;
 use surrealdb::engine::any::{self, Any};
 use surrealdb::opt::auth::{Database as DatabaseUser, Namespace as NamespaceUser, Root};
 
 use crate::Error;
-use crate::config::{Connection, DatabaseConfig, UserLevel};
+use crate::config::{DatabaseConfig, UserLevel};
 use crate::secret;
 
-/// The database handle used throughout the program, for either connection.
+/// The database handle used throughout the program.
 pub type Database = Surreal<Any>;
 
-/// Opens the configured folder or connects to the configured server, and
-/// selects the configured namespace and database.
+/// Connects and signs in to the configured server, and selects the
+/// configured namespace and database.
 pub async fn connect(config: &DatabaseConfig) -> Result<Database, Error> {
-    let opened = match config.connection {
-        Connection::Folder => any::connect(format!("surrealkv://{}", config.path)).await.map_err(Error::from),
-        Connection::Server => connect_to_server(config).await,
-    };
-    let db = opened.map_err(|e| {
+    let db = connect_to_server(config).await.map_err(|e| {
         tracing::error!(location = %config.location(), error = %e, "could not open the database");
         e
     })?;
@@ -69,9 +65,56 @@ async fn connect_to_server(config: &DatabaseConfig) -> Result<Database, Error> {
     Ok(db)
 }
 
-/// Shuts the connection down. For a folder this releases it, so it can be
-/// opened again in this process; just dropping the handle keeps it locked.
-/// Other copies of the handle stop working.
+/// Where the queries a person types (in the query panel) or Claude Code sends
+/// (over MCP) run.
+#[derive(Clone, Debug)]
+pub enum Queries {
+    /// No viewer user is set: they run on the main connection, and the app
+    /// refuses the ones that look like writes before sending them.
+    Main,
+    /// Signed in as the read-only viewer user: the server refuses writes.
+    Viewer { db: Database, username: String },
+    /// A viewer user is set but couldn't sign in. Queries don't run at all,
+    /// rather than falling back to a user that can write.
+    Failed(String),
+}
+
+impl Queries {
+    /// Signs in as the viewer user `config` names, if any.
+    pub async fn connect(config: &DatabaseConfig) -> Queries {
+        let Some(viewer) = config.viewer() else { return Queries::Main };
+        match connect(&viewer).await {
+            Ok(db) => Queries::Viewer { db, username: viewer.username },
+            Err(e) => Queries::Failed(format!("could not sign in as the read-only viewer user: {e}")),
+        }
+    }
+
+    /// The connection to run a user's query on: the viewer's, or `main` when
+    /// none is set.
+    pub fn pick(&self, main: &Database) -> Result<Database, String> {
+        match self {
+            Queries::Main => Ok(main.clone()),
+            Queries::Viewer { db, .. } => Ok(db.clone()),
+            Queries::Failed(e) => Err(e.clone()),
+        }
+    }
+
+    /// Whether the server enforces read-only (a viewer user is signed in).
+    pub fn enforced(&self) -> bool {
+        matches!(self, Queries::Viewer { .. })
+    }
+
+    /// Closes the viewer's connection, if there is one.
+    pub async fn close(self) {
+        if let Queries::Viewer { db, .. } = self
+            && let Err(e) = db.shutdown().await
+        {
+            tracing::warn!(error = %e, "could not close the viewer connection");
+        }
+    }
+}
+
+/// Shuts the connection down. Other copies of the handle stop working.
 pub async fn close(db: Database) -> Result<(), Error> {
     db.shutdown().await?;
     drop(db);

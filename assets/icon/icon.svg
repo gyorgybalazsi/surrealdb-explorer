@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- SurrealDB Explorer app icon: a dark rounded square with a magenta frame
+       and "SurrealDB / Explorer" in two rows, in SurrealDB magenta (#FF00A0).
+       The PNGs next to this file are rendered from it. -->
+  <rect x="0" y="0" width="1024" height="1024" rx="200" fill="#17141F"/>
+  <rect x="72" y="72" width="880" height="880" rx="140" fill="none" stroke="#FF00A0" stroke-width="40"/>
+  <g fill="#FF00A0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-weight="800" text-anchor="middle">
+    <text x="512" y="478" font-size="168" textLength="720" lengthAdjust="spacingAndGlyphs">SurrealDB</text>
+    <text x="512" y="690" font-size="168" textLength="720" lengthAdjust="spacingAndGlyphs">Explorer</text>
+  </g>
+</svg>

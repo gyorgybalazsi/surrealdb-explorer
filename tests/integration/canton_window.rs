@@ -1,6 +1,6 @@
 //! Loading a window of a Canton ledger: the latest transactions, or a range, with their events.
 
-mod common;
+use crate::common;
 
 use surrealdb_explorer::graph::{CantonWindow, load_canton_window};
 use surrealdb_explorer::{data, db};

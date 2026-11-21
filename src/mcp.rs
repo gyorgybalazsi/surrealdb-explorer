@@ -1,8 +1,10 @@
 //! The app's MCP server: tools that let Claude Code (or any MCP client) read
 //! the database and draw in the app's window.
 //!
-//! It listens on `127.0.0.1` only. Queries that would change data run only
-//! after the user allows them in the window.
+//! It listens on `127.0.0.1` only. Queries run as the read-only viewer user
+//! when one is set, so the server refuses writes. A query that would change
+//! data runs only after the user allows it in the window, and then as the
+//! app's main user.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -16,7 +18,7 @@ use rmcp::{ErrorData as McpError, ServerHandler, schemars, tool, tool_handler, t
 use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::db::Database;
+use crate::db::{Database, Queries};
 use crate::graph::{self, ResultGraph};
 use crate::query::{self, QueryOutcome, is_read_only};
 use crate::schema::describe;
@@ -38,6 +40,11 @@ pub enum WindowCommand {
     ApproveWrite { query: String, reply: oneshot::Sender<bool> },
     /// Data was changed through a tool; the window should show the current state.
     DataChanged,
+    /// Select a record, as a click on it does, and scroll it into view.
+    /// Answers with where its card is drawn, or why it couldn't.
+    Select { id: String, reply: oneshot::Sender<Result<serde_json::Value, String>> },
+    /// Scroll the graph: `top`, `bottom`, or to a record's id.
+    Scroll { to: String, reply: oneshot::Sender<Result<serde_json::Value, String>> },
 }
 
 /// What the window tells the MCP server: kept up to date by the window.
@@ -54,6 +61,8 @@ pub struct WindowState {
 pub struct Shared {
     /// The open database; replaced when the user switches in Settings.
     pub db: Arc<Mutex<Option<Database>>>,
+    /// Where queries run: as the read-only viewer user, if one is set.
+    pub queries: Arc<Mutex<Queries>>,
     /// Most records drawn for a result, and whether to connect them.
     pub limits: Arc<Mutex<(usize, bool)>>,
     pub window: Arc<Mutex<WindowState>>,
@@ -64,6 +73,7 @@ impl Shared {
     pub fn new(to_window: mpsc::UnboundedSender<WindowCommand>) -> Shared {
         Shared {
             db: Arc::new(Mutex::new(None)),
+            queries: Arc::new(Mutex::new(Queries::Main)),
             limits: Arc::new(Mutex::new((2000, false))),
             window: Arc::new(Mutex::new(WindowState::default())),
             to_window,
@@ -76,6 +86,15 @@ impl Shared {
             .ok()
             .and_then(|db| db.clone())
             .ok_or_else(|| McpError::internal_error("the app has no database open", None))
+    }
+
+    /// The connection to run a read on (the viewer's, if one is set), and
+    /// whether the server enforces read-only on it.
+    fn reader(&self) -> Result<(Database, bool), McpError> {
+        let main = self.database()?;
+        let queries = self.queries.lock().map_err(|_| internal("queries lock"))?.clone();
+        let db = queries.pick(&main).map_err(|e| McpError::internal_error(e, None))?;
+        Ok((db, queries.enforced()))
     }
 }
 
@@ -107,6 +126,18 @@ pub struct ShowRequest {
         drawn; relations bring the records at both ends. To get path rows in the window's Table \
         view (like Neo4j), return one array per path: [record, relation, record, ...].")]
     pub query: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SelectRequest {
+    #[schemars(description = "The id of a record drawn in the window, e.g. created:abc or exercised:xyz; empty to clear the selection.")]
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ScrollRequest {
+    #[schemars(description = "Where to scroll the graph: \"top\", \"bottom\", or the id of a drawn record to bring into view.")]
+    pub to: String,
 }
 
 #[derive(Clone)]
@@ -146,8 +177,13 @@ impl Explorer {
         }
         // Taken after the approval: the user may have switched databases while
         // deciding, and the write goes where they were looking when they allowed it.
-        let db = self.shared.database()?;
-        let outcome = query::run(&db, query).await;
+        // An allowed write runs as the main user; everything else as the
+        // viewer, so the server refuses a write the check above missed.
+        let (db, enforced) = if writes { (self.shared.database()?, false) } else { self.shared.reader()? };
+        let mut outcome = query::run(&db, query.clone()).await;
+        if enforced {
+            query::explain_refused_writes(&mut outcome, &query);
+        }
         if writes {
             let _ = self.shared.to_window.send(WindowCommand::DataChanged);
         }
@@ -162,8 +198,11 @@ impl Explorer {
         if !is_read_only(&query) {
             return Err(McpError::invalid_params("show only runs read-only queries; use the query tool to change data", None));
         }
-        let db = self.shared.database()?;
-        let outcome = query::run(&db, query.clone()).await;
+        let (db, enforced) = self.shared.reader()?;
+        let mut outcome = query::run(&db, query.clone()).await;
+        if enforced {
+            query::explain_refused_writes(&mut outcome, &query);
+        }
         if let Err(e) = &outcome.statements {
             return Ok(CallToolResult::error(vec![ContentBlock::text(format!("The query failed: {e}"))]));
         }
@@ -201,6 +240,22 @@ impl Explorer {
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 
+    #[tool(description = "Select a record in the app window, as clicking it does: it is \
+        highlighted, scrolled into view, and its fields appear under Selected in the sidebar. \
+        Returns the centre of its card in the graph canvas, in pixels.")]
+    async fn select_record(&self, Parameters(SelectRequest { id }): Parameters<SelectRequest>) -> Result<CallToolResult, McpError> {
+        let (reply, answer) = oneshot::channel();
+        self.window_request(WindowCommand::Select { id, reply }, answer).await
+    }
+
+    #[tool(description = "Scroll the graph in the app window to the top, to the bottom, or so \
+        that a given record is in view. The Canton event graph view scrolls; in the standard \
+        view only a record id is accepted, and the camera centres on it.")]
+    async fn scroll_graph(&self, Parameters(ScrollRequest { to }): Parameters<ScrollRequest>) -> Result<CallToolResult, McpError> {
+        let (reply, answer) = oneshot::channel();
+        self.window_request(WindowCommand::Scroll { to, reply }, answer).await
+    }
+
     #[tool(description = "Go back to the overview of the whole database in the app window.")]
     async fn overview(&self) -> Result<CallToolResult, McpError> {
         self.shared.to_window.send(WindowCommand::Overview).map_err(|_| internal("the window is closed"))?;
@@ -209,6 +264,20 @@ impl Explorer {
 }
 
 impl Explorer {
+    /// Sends the window a command and waits for its answer.
+    async fn window_request(
+        &self,
+        command: WindowCommand,
+        answer: oneshot::Receiver<Result<serde_json::Value, String>>,
+    ) -> Result<CallToolResult, McpError> {
+        self.shared.to_window.send(command).map_err(|_| internal("the window is closed"))?;
+        match tokio::time::timeout(Duration::from_secs(10), answer).await {
+            Ok(Ok(Ok(v))) => Ok(CallToolResult::success(vec![ContentBlock::text(v.to_string())])),
+            Ok(Ok(Err(e))) => Ok(CallToolResult::error(vec![ContentBlock::text(e)])),
+            _ => Err(internal("the window didn't answer")),
+        }
+    }
+
     /// Asks the user in the window; `false` if they decline or don't answer in time.
     async fn approved(&self, query: &str) -> bool {
         let (reply, answer) = oneshot::channel();
@@ -253,7 +322,7 @@ fn outcome_text(outcome: &QueryOutcome) -> String {
         Err(e) => return format!("The query failed: {e}"),
         Ok(statements) => statements,
     };
-    let mut text = String::new();
+    let mut text = outcome.note.as_ref().map(|n| format!("{n}\n\n")).unwrap_or_default();
     for (i, s) in statements.iter().enumerate() {
         match &s.result {
             Ok(v) => text.push_str(&format!(

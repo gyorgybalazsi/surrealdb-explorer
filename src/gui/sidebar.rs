@@ -2,15 +2,17 @@
 
 use iced::widget::{Column, button, checkbox, column, container, pick_list, row, scrollable, text, text_input};
 use iced::{Color, Element, Fill, Font};
-use surrealdb_explorer::canton::{NodeKind, StatusFilter};
-use surrealdb_explorer::config::Visualization;
+use crate::canton::{NodeKind, StatusFilter};
+use crate::config::Visualization;
 
 use crate::gui::app::{App, CantonFilterChange as F, DataAction, Message, Selection, plural};
 use crate::gui::canton_draw;
-use surrealdb_explorer::canton;
-use surrealdb_explorer::graph;
+use crate::canton;
+use crate::graph;
 
 pub(super) const SIDEBAR_WIDTH: f32 = 320.0;
+/// The sidebar's scrollable, scrolled to the end to show a new selection.
+pub(super) const SIDEBAR_SCROLL: &str = "sidebar";
 pub(super) const MUTED: Color = Color::from_rgb(0.47, 0.47, 0.47);
 pub(super) const WARNING: Color = Color::from_rgb(0.67, 0.4, 0.0);
 pub(super) const ERROR: Color = Color::from_rgb(0.7, 0.0, 0.0);
@@ -24,8 +26,12 @@ impl App {
         col = col.push(
             row![
                 text("SurrealDB Explorer").size(18).width(Fill),
+                button(text(if self.dashboard_open { "Graph" } else { "Dashboard" }).size(12))
+                    .style(button::secondary)
+                    .on_press(Message::ToggleDashboard),
                 button(text("Settings").size(12)).style(button::secondary).on_press(Message::OpenSettings),
             ]
+            .spacing(6)
             .align_y(iced::Alignment::Center),
         );
         let summary = if self.overview {
@@ -118,7 +124,7 @@ impl App {
         col = col.push(heading("Selected"));
         col = col.push(self.details());
 
-        scrollable(col).height(Fill).into()
+        scrollable(col).id(SIDEBAR_SCROLL).height(Fill).into()
     }
 
     /// Options that apply whichever view is chosen: reloading, the table
@@ -182,8 +188,13 @@ impl App {
         if let Some(notice) = &self.notice {
             col = col.push(text(notice).size(12).color(MUTED));
         }
+        let hint = if self.canton() {
+            "Hover a record to highlight its neighbours. Click for details; right-click for more actions. Scroll, drag the background or use the scrollbar to move up and down."
+        } else {
+            "Hover a record to highlight its neighbours. Click for details; right-click for more actions. Drag to move, scroll to zoom, drag the background to pan."
+        };
         col = col.push(
-            text("Hover a record to highlight its neighbours. Click for details; right-click for more actions. Drag to move, scroll to zoom, drag the background to pan.")
+            text(hint)
                 .size(12)
                 .color(MUTED),
         );
@@ -341,6 +352,22 @@ impl App {
         let summary = &self.graph.canton_summary;
         let counts = &summary.counts;
         let mut col = Column::new().spacing(5);
+
+        col = col.push(heading("Layout"));
+        col = col.push(
+            row![
+                text("Transactions side by side").size(13).width(Fill),
+                text_input("3", &self.canton_columns).on_input(Message::CantonColumns).width(56).size(13),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center),
+        );
+        col = col.push(
+            checkbox(self.config.graph.canton_follow_newest)
+                .label("Follow the newest transactions")
+                .on_toggle(Message::ToggleFollowNewest)
+                .text_size(12),
+        );
 
         col = col.push(heading("Node kinds"));
         for kind in NodeKind::ALL {
@@ -506,7 +533,7 @@ impl App {
         );
         col = col.push(
             checkbox(self.config.graph.fit_on_filter)
-                .label("Zoom to fit when filtering")
+                .label("Back to the top when filtering")
                 .on_toggle(Message::ToggleFitOnFilter)
                 .text_size(12),
         );

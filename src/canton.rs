@@ -135,6 +135,8 @@ pub struct Facts {
     /// under, itself for a root. `None` for a party, and for an event whose
     /// root isn't loaded.
     pub root: Option<usize>,
+    /// The event it is a consequence of, `None` for a root's own events.
+    pub parent: Option<usize>,
     pub depth: usize,
     /// Its place in its root's preorder walk; 0 for the root.
     pub order: usize,
@@ -143,6 +145,8 @@ pub struct Facts {
     /// Only on `Created`.
     pub status: Option<Status>,
     /// Every party joined to the record, and for a root every party in its tree.
+    /// For an event that records `witness_parties` (as the syncer writes
+    /// them), exactly those: the parties whose projection holds it.
     pub parties: BTreeSet<String>,
     pub title: String,
     pub subtitle: String,
@@ -160,6 +164,7 @@ pub struct Model {
 
 /// `alice::1220ab…` reads as `alice`.
 pub fn short_party(p: &str) -> &str {
+    let p = party_of(p);
     p.split_once("::").map(|(n, _)| n).unwrap_or(p)
 }
 
@@ -186,12 +191,25 @@ fn parties_in(v: &serde_json::Value) -> Vec<String> {
     match v {
         serde_json::Value::String(s) if s.contains("::") => s
             .split(',')
-            .map(|p| p.trim().trim_matches('\'').to_string())
+            .map(|p| party_of(p.trim().trim_matches('\'')).to_string())
             .filter(|p| !p.is_empty())
             .collect(),
         serde_json::Value::Array(items) => items.iter().flat_map(parties_in).collect(),
         _ => Vec::new(),
     }
+}
+
+/// A party id, also when it comes as a link to its `party` record: the
+/// syncer's topology events hold `` party:`Alice::1220…` ``, which must count as
+/// the same party as the plain `Alice::1220…` on events.
+fn party_of(s: &str) -> &str {
+    s.strip_prefix("party:")
+        .and_then(|key| {
+            key.strip_prefix('`')
+                .and_then(|k| k.strip_suffix('`'))
+                .or_else(|| key.strip_prefix('⟨').and_then(|k| k.strip_suffix('⟩')))
+        })
+        .unwrap_or(s)
 }
 
 impl Model {
@@ -266,9 +284,18 @@ impl Model {
             .filter(|&o| self.kinds[o] == NodeKind::Party)
             .filter_map(|o| self.str_prop(o, "party_id").map(str::to_string))
             .collect();
-        for field in PARTY_FIELDS {
-            if let Some(v) = data.get(*field) {
-                parties.extend(parties_in(v));
+        // The Ledger API's witnesses say who sees an event; without them,
+        // fall back to the parties named on the record.
+        match data.get("witness_parties") {
+            Some(w) if matches!(kind, NodeKind::Created | NodeKind::Exercised | NodeKind::Fetched) => {
+                parties = parties_in(w).into_iter().collect();
+            }
+            _ => {
+                for field in PARTY_FIELDS {
+                    if let Some(v) = data.get(*field) {
+                        parties.extend(parties_in(v));
+                    }
+                }
             }
         }
         let mut f = Facts {
@@ -305,8 +332,8 @@ impl Model {
                 } else {
                     Status::Active
                 });
-                let t = self.str_prop(i, "template_name").unwrap_or("Created");
-                f.title = t.rsplit('.').next().unwrap_or(t).to_string();
+                // The same `Module:Entity` form as an exercised card's template line.
+                f.title = f.template.clone().unwrap_or_else(|| "Created".into());
                 f.subtitle = ellipsize(self.str_prop(i, "contract_id").unwrap_or(""), 14);
             }
             NodeKind::Exercised | NodeKind::Fetched => {
@@ -349,8 +376,9 @@ impl Model {
         for r in roots {
             self.facts[r].root = Some(r);
             let mut order = 0;
-            let mut stack: Vec<(usize, usize)> = self.children(r).into_iter().rev().map(|c| (c, 1)).collect();
-            while let Some((i, depth)) = stack.pop() {
+            let mut stack: Vec<(usize, usize, Option<usize>)> =
+                self.children(r).into_iter().rev().map(|c| (c, 1, None)).collect();
+            while let Some((i, depth, parent)) = stack.pop() {
                 // Already under an earlier root (or a root itself): it stays there.
                 if self.facts[i].root.is_some() {
                     continue;
@@ -359,12 +387,13 @@ impl Model {
                 let (domain, offset) = (self.facts[r].domain.clone(), self.facts[r].offset);
                 let f = &mut self.facts[i];
                 f.root = Some(r);
+                f.parent = parent;
                 f.depth = depth;
                 f.order = order;
                 f.domain = f.domain.clone().or(domain);
                 f.offset = f.offset.or(offset);
                 for c in self.children(i).into_iter().rev() {
-                    stack.push((c, depth + 1));
+                    stack.push((c, depth + 1, Some(i)));
                 }
             }
         }
@@ -537,6 +566,34 @@ pub fn visible(m: &Model, filters: &Filters) -> Vec<bool> {
     keep
 }
 
+/// The tree branches that stand in for hidden events: for each shown event
+/// whose parent (or, for a root's own event, root) is filtered out, a link
+/// from its nearest shown ancestor, as `(ancestor, event)`. Without them an
+/// event a party sees only part of the transaction above would hang under
+/// its transaction with nothing joining the two.
+pub fn bridges(m: &Model, keep: &[bool]) -> Vec<(usize, usize)> {
+    let mut links = Vec::new();
+    for (j, f) in m.facts.iter().enumerate() {
+        let Some(r) = f.root else { continue };
+        if !keep[j] || r == j || keep[f.parent.unwrap_or(r)] {
+            continue;
+        }
+        let mut up = f.parent;
+        let mut found = None;
+        while let Some(a) = up {
+            if keep[a] {
+                found = Some(a);
+                break;
+            }
+            up = m.facts[a].parent;
+        }
+        if let Some(a) = found.or(keep[r].then_some(r)) {
+            links.push((a, j));
+        }
+    }
+    links
+}
+
 pub const NODE_W: f32 = 168.0;
 pub const NODE_H: f32 = 40.0;
 const INDENT: f32 = 22.0;
@@ -559,13 +616,13 @@ pub struct Layout {
 
 /// One column per transaction, reassignment or run of topology transactions,
 /// left to right in each domain's order, and each tree drawn down its column.
-/// Columns wrap into a new line past `wrap` units, as text does, so a long
-/// ledger fills the screen rather than a thin strip. Parties sit in a column
+/// `columns` columns sit side by side on each line, on a grid that is at
+/// least `fill` units wide, so the columns stretch to fill the canvas; later
+/// columns go on further lines below, as text wraps. Parties sit in a column
 /// of their own on the left, and records with no root in a band at the end.
-pub fn layout(m: &Model, keep: &[bool], wrap: f32) -> Layout {
+pub fn layout(m: &Model, keep: &[bool], columns: usize, fill: f32) -> Layout {
     let mut pos = vec![None; keep.len()];
     let mut height: f32 = TOP;
-    let mut right: f32 = 0.0;
     let parties: Vec<usize> = (0..keep.len()).filter(|&i| keep[i] && m.kinds[i] == NodeKind::Party).collect();
     for (row, &i) in parties.iter().enumerate() {
         let y = TOP + row as f32 * ROW_H;
@@ -583,8 +640,8 @@ pub fn layout(m: &Model, keep: &[bool], wrap: f32) -> Layout {
             members.entry(r).or_default().push(j);
         }
     }
-    // Columns: (domain, offset, kind rank) -> roots.
-    let mut columns: BTreeMap<(String, i64, u8), Vec<usize>> = BTreeMap::new();
+    // Roots by (domain, offset, kind rank).
+    let mut groups: BTreeMap<(String, i64, u8), Vec<usize>> = BTreeMap::new();
     for (i, &kept) in keep.iter().enumerate() {
         let rank = match m.kinds[i] {
             NodeKind::Topology => 0,
@@ -596,60 +653,72 @@ pub fn layout(m: &Model, keep: &[bool], wrap: f32) -> Layout {
             continue;
         }
         let f = &m.facts[i];
-        columns.entry((f.domain.clone().unwrap_or_default(), f.offset.unwrap_or(-1), rank)).or_default().push(i);
+        groups.entry((f.domain.clone().unwrap_or_default(), f.offset.unwrap_or(-1), rank)).or_default().push(i);
     }
-    let mut bands = Vec::new();
-    let mut x = left;
-    let (mut line_top, mut line_bottom) = (TOP, TOP);
-    let mut last_domain: Option<String> = None;
-    // The column being filled: its next free row, its width, and whether it
-    // holds only topology transactions (consecutive ones share a column).
-    let mut open: Option<(f32, f32, bool)> = None;
-    for ((domain, _, rank), mut roots) in columns {
+    // The columns: each one's domain and its cards as (record, indent),
+    // top to bottom. Consecutive topology transactions share a column.
+    let mut cols: Vec<(String, Vec<(usize, f32)>)> = Vec::new();
+    let mut last_topology = false;
+    for ((domain, _, rank), mut roots) in groups {
         let topology = rank == 0;
-        let new_domain = last_domain.as_ref() != Some(&domain);
-        let (mut y, mut width) = match open {
-            Some((y, w, true)) if topology && !new_domain => (y, w),
-            Some((_, w, _)) => {
-                x += w + COL_GAP;
-                (line_top, NODE_W)
+        let same_domain = cols.last().is_some_and(|(d, _)| *d == domain);
+        if !(topology && last_topology && same_domain) {
+            cols.push((domain, Vec::new()));
+        }
+        last_topology = topology;
+        let cards = &mut cols.last_mut().expect("a column was just pushed").1;
+        roots.sort_by_key(|&r| int_of(&m.data[r], "position").unwrap_or(0));
+        for r in roots {
+            if keep[r] {
+                cards.push((r, 0.0));
             }
-            None => (line_top, NODE_W),
-        };
-        if new_domain && last_domain.is_some() {
-            x += DOMAIN_GAP - COL_GAP;
+            let mut tree = members.remove(&r).unwrap_or_default();
+            tree.sort_by_key(|&j| m.facts[j].order);
+            for j in tree {
+                // Indented under its nearest shown ancestor: an event whose
+                // parent is filtered out (a party that sees only part of a
+                // transaction) hangs straight under the transaction.
+                let mut depth = 1;
+                let mut up = m.facts[j].parent;
+                while let Some(a) = up {
+                    if keep[a] {
+                        depth += 1;
+                    }
+                    up = m.facts[a].parent;
+                }
+                let indent = (depth - 1) as f32 * INDENT + if keep[r] { INDENT } else { 0.0 };
+                cards.push((j, indent));
+            }
         }
-        // Wrap, unless this column would open the line anyway.
-        if x > left && x + NODE_W > wrap && y == line_top {
-            x = left;
+    }
+    // Every column gets the same slot: as wide as the widest column, or
+    // wider when that leaves the line short of `fill`.
+    let per_line = columns.max(1).min(cols.len().max(1));
+    let widest = cols.iter().flat_map(|(_, cards)| cards.iter().map(|&(_, indent)| indent + NODE_W)).fold(NODE_W, f32::max);
+    let pitch = (widest + COL_GAP).max((fill - left + COL_GAP) / per_line as f32);
+    let mut bands = Vec::new();
+    let mut line_top = TOP;
+    let mut line_bottom = TOP;
+    let mut last_domain: Option<&str> = None;
+    for (k, (domain, cards)) in cols.iter().enumerate() {
+        if k > 0 && k % per_line == 0 {
             line_top = line_bottom + LINE_GAP;
-            y = line_top;
         }
-        if new_domain {
+        let x = left + (k % per_line) as f32 * pitch;
+        if last_domain != Some(domain.as_str()) {
             if !domain.is_empty() {
                 bands.push((format!("domain {domain}"), x, line_top - 24.0));
             }
             last_domain = Some(domain);
         }
-        roots.sort_by_key(|&r| int_of(&m.data[r], "position").unwrap_or(0));
-        for r in roots {
-            if keep[r] {
-                pos[r] = Some((x, y));
-                y += ROW_H;
-            }
-            let mut tree = members.remove(&r).unwrap_or_default();
-            tree.sort_by_key(|&j| m.facts[j].order);
-            for j in tree {
-                let indent = m.facts[j].depth.saturating_sub(1) as f32 * INDENT + if keep[r] { INDENT } else { 0.0 };
-                pos[j] = Some((x + indent, y));
-                width = width.max(indent + NODE_W);
-                y += ROW_H;
-            }
+        let mut y = line_top;
+        for &(i, indent) in cards {
+            pos[i] = Some((x + indent, y));
+            y += ROW_H;
         }
         line_bottom = line_bottom.max(y);
-        right = right.max(x + width);
-        open = Some((y, width, topology));
     }
+    let mut right = if cols.is_empty() { left + NODE_W } else { left + per_line as f32 * pitch - COL_GAP };
     height = height.max(line_bottom);
     // Records with no root: events whose transaction isn't loaded, and other tables.
     let orphans: Vec<usize> = (0..keep.len()).filter(|&i| keep[i] && pos[i].is_none()).collect();
@@ -657,7 +726,7 @@ pub fn layout(m: &Model, keep: &[bool], wrap: f32) -> Layout {
         let top = line_bottom + LINE_GAP;
         let all_other = orphans.iter().all(|&i| m.kinds[i] == NodeKind::Other);
         bands.push((if all_other { "other records" } else { "no root loaded" }.to_string(), left, top - 24.0));
-        let per_row = (((wrap - left) / (NODE_W + COL_GAP)).floor() as usize).max(1);
+        let per_row = (((right.max(fill) - left + COL_GAP) / (NODE_W + COL_GAP)).floor() as usize).max(1);
         for (k, &i) in orphans.iter().enumerate() {
             let (cx, cy) = (left + (k % per_row) as f32 * (NODE_W + COL_GAP), top + (k / per_row) as f32 * ROW_H);
             pos[i] = Some((cx, cy));
@@ -665,7 +734,7 @@ pub fn layout(m: &Model, keep: &[bool], wrap: f32) -> Layout {
             height = height.max(cy + NODE_H);
         }
     }
-    Layout { pos, bands, width: right.max(left + NODE_W), height: height + ROW_H }
+    Layout { pos, bands, width: right, height: height + ROW_H }
 }
 
 /// Whether the graph has the event graph's tables: transactions and at

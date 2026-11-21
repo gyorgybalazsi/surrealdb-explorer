@@ -1,6 +1,6 @@
 //! Exploring a big database: the table overview, one table's records, and a record's neighbours.
 
-mod common;
+use crate::common;
 
 use surrealdb_explorer::{data, db, graph};
 

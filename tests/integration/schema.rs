@@ -1,6 +1,6 @@
 //! The schema description Claude Code gets from the get_schema tool.
 
-mod common;
+use crate::common;
 
 use surrealdb_explorer::{data, db, schema};
 

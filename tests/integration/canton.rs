@@ -2,7 +2,7 @@
 //! shape, and the model, filters and layout treat it as alt-canton's ledger
 //! explorer does.
 
-mod common;
+use crate::common;
 
 use std::collections::HashMap;
 
@@ -79,7 +79,7 @@ fn facts_match_the_explorer() {
     let f = |id: &str| &m.facts[at(id)];
 
     assert_eq!((f("transaction:3").title.as_str(), f("transaction:3").subtitle.as_str()), ("Tx 3", "by Bob"));
-    assert_eq!(f("created:00c1a5b2").title, "Cash");
+    assert_eq!(f("created:00c1a5b2").title, "Main:Cash");
     assert_eq!(f("created:00c1a5b2").template.as_deref(), Some("Main:Cash"));
     assert_eq!(f("exercised:[3, 1]").subtitle, "Main:Cash");
     // Consumed contracts are archived; the rest are active.
@@ -106,29 +106,39 @@ fn layout_matches_the_explorer() {
     // Parties start hidden, so the columns start at the left edge.
     let keep = canton::visible(&m, &Filters::default());
     assert!(ids.iter().enumerate().all(|(i, id)| keep[i] != id.starts_with("party:")));
-    let l = canton::layout(&m, &keep, 1000.0);
+    let l = canton::layout(&m, &keep, 4, 0.0);
     let pos = |id: &str| l.pos[at(id)].unwrap_or_else(|| panic!("{id} not placed"));
     assert_eq!(pos("transaction:1"), (0.0, 40.0));
-    // One column per transaction, in offset order, each as wide as its indented tree, plus a gap.
-    assert_eq!(pos("transaction:2").0 - pos("transaction:1").0, 22.0 + NODE_W + 40.0);
+    // One column per transaction, in offset order, each as wide as the most indented tree, plus a gap.
+    let pitch = 66.0 + NODE_W + 40.0;
+    assert_eq!(pos("transaction:2").0 - pos("transaction:1").0, pitch);
+    assert_eq!(l.width, 4.0 * pitch - 40.0);
     // The tree goes down its column, each level indented further.
     let tx3 = pos("transaction:3");
     assert_eq!(pos("exercised:[3, 0]"), (tx3.0 + 22.0, tx3.1 + 56.0));
     assert_eq!(pos("exercised:[3, 1]"), (tx3.0 + 44.0, tx3.1 + 112.0));
     assert_eq!(pos("created:00c3c7d4"), (tx3.0 + 66.0, tx3.1 + 168.0));
     assert_eq!(pos("created:00c4d8e5"), (tx3.0 + 44.0, tx3.1 + 224.0));
-    // Columns wrap like text: the fifth starts a new line under the deepest column.
+    // Four columns side by side: the fifth starts a new line under the deepest column.
     let tx5 = pos("transaction:5");
     assert_eq!(tx5.0, 0.0);
     assert!(tx5.1 > pos("created:00c4d8e5").1 + NODE_H);
     // The band header names the domain.
     assert_eq!(l.bands[0].0, "domain global-domain::1220ab");
 
+    // Asked to fill a wider canvas, the columns spread out to its full width.
+    let wide = canton::layout(&m, &keep, 2, 2000.0);
+    let wpos = |id: &str| wide.pos[at(id)].unwrap();
+    assert_eq!(wpos("transaction:2").0, (2000.0 + 40.0) / 2.0);
+    assert_eq!(wide.width, 2000.0);
+    assert!(wpos("transaction:3").1 > wpos("transaction:1").1);
+    assert_eq!(wpos("transaction:3").0, 0.0);
+
     // Turning parties on puts them in a column of their own on the left.
     let mut with_parties = Filters::default();
     with_parties.kinds.insert(NodeKind::Party);
     let keep = canton::visible(&m, &with_parties);
-    let l = canton::layout(&m, &keep, 1000.0);
+    let l = canton::layout(&m, &keep, 4, 0.0);
     assert_eq!(l.pos[at("party:`Bank::1220f3a9c1d2`")].unwrap().0, 0.0);
     assert_eq!(l.pos[at("transaction:1")].unwrap().0, NODE_W + 70.0);
 }
@@ -193,7 +203,7 @@ fn records_outside_the_event_graph_go_in_a_band_underneath() {
     ];
     let m = Model::new(&nodes, Vec::new());
     assert_eq!(m.facts[1].title, "Alice");
-    let l = canton::layout(&m, &[true, true, true], 1000.0);
+    let l = canton::layout(&m, &[true, true, true], 3, 1000.0);
     let (a, b) = (l.pos[1].unwrap(), l.pos[2].unwrap());
     assert!(a.1 > l.pos[0].unwrap().1 && a.1 == b.1);
     assert_eq!(b.0 - a.0, NODE_W + 40.0);
@@ -216,4 +226,124 @@ fn contracts_from_the_active_set_have_no_offset() {
     assert_eq!(m.facts[1].offset, None);
     let range = Filters { offset_from: Some(5), ..Filters::default() };
     assert_eq!(canton::visible(&m, &range), [true, true]);
+}
+
+/// The Accept transaction of the ticket purchase demo, with the witnesses the
+/// syncer records: Accept (consuming the offer) and the ticket agreement are
+/// seen by Alice and TicketWizard; the cash Transfer under Accept, the new
+/// cash and the archive are also seen by ScroogeBank, the cash issuer.
+#[test]
+fn witness_parties_give_each_party_its_projection() {
+    let all = ["Alice::1220", "TicketWizard::1220"];
+    let bank = ["Alice::1220", "TicketWizard::1220", "ScroogeBank::1220"];
+    let data = [
+        serde_json::json!({ "offset": 9 }),
+        serde_json::json!({ "offset": 9, "node_id": 0, "choice_name": "Accept", "consuming": true,
+            "acting_parties": ["Alice::1220"], "witness_parties": all }),
+        serde_json::json!({ "offset": 9, "node_id": 2, "choice_name": "Transfer", "consuming": false,
+            "acting_parties": ["Alice::1220"], "witness_parties": bank }),
+        serde_json::json!({ "offset": 9, "node_id": 3, "signatories": ["ScroogeBank::1220"],
+            "observers": ["TicketWizard::1220"], "witness_parties": bank }),
+        serde_json::json!({ "offset": 9, "node_id": 4, "choice_name": "Archive", "consuming": true,
+            "acting_parties": ["Alice::1220"], "witness_parties": bank }),
+        serde_json::json!({ "offset": 9, "node_id": 5, "signatories": ["TicketWizard::1220", "Alice::1220"],
+            "witness_parties": all }),
+    ];
+    let names = ["transaction:9", "accept", "transfer", "cash", "archive", "agreement"];
+    let kinds = [
+        NodeKind::Transaction,
+        NodeKind::Exercised,
+        NodeKind::Exercised,
+        NodeKind::Created,
+        NodeKind::Exercised,
+        NodeKind::Created,
+    ];
+    let nodes: Vec<ModelNode> =
+        (0..6).map(|i| ModelNode { kind: kinds[i], data: &data[i], name: names[i] }).collect();
+    let edge = |from, to, kind: &str, index| ModelEdge { from, to, kind: kind.into(), index: Some(index) };
+    let edges = vec![
+        edge(0, 1, "ACTION", 0),
+        edge(1, 2, "CONSEQUENCE", 0),
+        edge(1, 5, "CONSEQUENCE", 1),
+        edge(2, 3, "CONSEQUENCE", 0),
+        edge(2, 4, "CONSEQUENCE", 1),
+    ];
+    let m = Model::new(&nodes, edges);
+    let for_party = |p: &str| {
+        let keep = canton::visible(&m, &Filters { party: Some(p.into()), ..Filters::default() });
+        let shown: Vec<&str> = (0..6).filter(|&i| keep[i]).map(|i| names[i]).collect();
+        let at = canton::layout(&m, &keep, 1, 0.0).pos;
+        let Some((tx, _)) = at[0] else { return (shown, Vec::new()) };
+        let indent: Vec<f32> = (0..6).filter(|&i| keep[i]).map(|i| at[i].unwrap().0 - tx).collect();
+        (shown, indent)
+    };
+
+    for p in ["Alice::1220", "TicketWizard::1220"] {
+        let (shown, indent) = for_party(p);
+        assert_eq!(shown, names, "{p}");
+        // Accept under the transaction, Transfer under Accept, its events under it.
+        assert!(indent[1] > 0.0 && indent[2] > indent[1] && indent[3] > indent[2], "{p}: {indent:?}");
+        assert_eq!(indent[3], indent[4]);
+    }
+
+    // The bank sees only the Transfer subtree; signatories and actors on the
+    // hidden events don't count, and Transfer hangs straight under the
+    // transaction rather than at Accept's child depth.
+    let (shown, indent) = for_party("ScroogeBank::1220");
+    assert_eq!(shown, ["transaction:9", "transfer", "cash", "archive"]);
+    let (_, alice) = for_party("Alice::1220");
+    assert_eq!(indent[1], alice[1], "Transfer takes Accept's place: {indent:?}");
+    assert_eq!(indent[2], alice[2]);
+    assert_eq!(indent[3], alice[2]);
+    // Transfer's parent, Accept, is hidden, so a bridge joins it to the
+    // transaction; its own events keep their real CONSEQUENCE edges.
+    let keep = canton::visible(&m, &Filters { party: Some("ScroogeBank::1220".into()), ..Filters::default() });
+    assert_eq!(canton::bridges(&m, &keep), [(0, 2)]);
+    // Nothing is bridged when every parent is shown.
+    let keep = canton::visible(&m, &Filters { party: Some("Alice::1220".into()), ..Filters::default() });
+    assert!(canton::bridges(&m, &keep).is_empty());
+    // With the transaction hidden too, Transfer has no shown ancestor.
+    let only_exercised = Filters {
+        party: Some("ScroogeBank::1220".into()),
+        kinds: [NodeKind::Exercised, NodeKind::Created].into(),
+        ..Filters::default()
+    };
+    assert!(canton::bridges(&m, &canton::visible(&m, &only_exercised)).is_empty());
+
+    // Records without witnesses keep matching on the parties named on them.
+    let (none, _) = for_party("Nobody::1220");
+    assert!(none.is_empty());
+}
+
+/// The syncer's topology events link to their party record
+/// (`party: party:⟨Alice::1220⟩`). That link names the same party as the plain
+/// ids on events, so the party list has each party once and filtering by it
+/// keeps both.
+#[test]
+fn a_link_to_a_party_record_is_that_party() {
+    let config = common::temp_database("party-links");
+    let g = common::run(async move {
+        let db = db::connect(&config).await.unwrap();
+        db.query(
+            "UPSERT party:⟨Alice::1220⟩ MERGE { party_id: 'Alice::1220' }; \
+             UPSERT topology_event:1 MERGE { mapping: 'party_key', op: 'added', party: party:⟨Alice::1220⟩ }; \
+             UPSERT transaction:1 MERGE { offset: 1 }; \
+             UPSERT created:⟨00a1⟩ MERGE { offset: 1, node_id: 0, signatories: ['Alice::1220'], witness_parties: ['Alice::1220'] }; \
+             RELATE transaction:1->action->created:⟨00a1⟩ SET index = 0;",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        graph::load(&db, 1000).await.unwrap()
+    });
+    let (m, ids) = model_of(&g);
+    assert_eq!(m.parties().into_iter().collect::<Vec<_>>(), ["Alice::1220"]);
+
+    let alice = Filters { party: Some("Alice::1220".into()), ..Filters::default() };
+    let keep = canton::visible(&m, &alice);
+    for id in ["topology_event:1", "transaction:1", "created:⟨00a1⟩"] {
+        let i = ids.iter().position(|x| x.as_str() == id || x.replace('`', "") == id.replace(['⟨', '⟩'], "")).unwrap();
+        assert!(keep[i], "{id} is kept for Alice");
+    }
 }

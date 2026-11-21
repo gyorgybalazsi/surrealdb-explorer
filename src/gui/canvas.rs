@@ -7,7 +7,7 @@ use iced::mouse::{self, Button, Cursor, ScrollDelta};
 use iced::widget::canvas::{self, Action, Event, Frame, Geometry, Path, Stroke, Text};
 use iced::widget::text::Alignment;
 use iced::{Color, Font, Point, Rectangle, Renderer, Theme, Vector};
-use surrealdb_explorer::config::Visualization;
+use crate::config::Visualization;
 
 use crate::gui::app::{Message, Selection};
 use crate::gui::canton_draw;
@@ -21,6 +21,13 @@ const ARROW_WIDTH: f32 = 3.6;
 const BEND: f32 = 26.0;
 /// How the mouse must move before a press becomes a drag.
 const DRAG_THRESHOLD: f32 = 4.0;
+
+/// The Canton view's room around its layout, in pixels: left and right, top and bottom.
+pub const CANTON_MARGIN: (f32, f32) = (20.0, 10.0);
+/// The Canton view's scrollbar, along the canvas's right edge.
+pub const SCROLLBAR_WIDTH: f32 = 12.0;
+const SCROLLBAR_TRACK: Color = rgb(0xe5, 0xe7, 0xeb);
+const SCROLLBAR_THUMB: Color = rgb(0x9c, 0xa3, 0xaf);
 
 const BACKGROUND: Color = rgb(0xf7, 0xf8, 0xfa);
 const GRID_DOT: Color = rgb(0xdd, 0xe1, 0xe7);
@@ -69,6 +76,9 @@ pub struct GraphView<'a> {
     pub visualization: Visualization,
     /// The canvas size the app last heard of, so a change can be reported.
     pub known_size: iced::Size,
+    /// In the Canton view: how far it is scrolled down and how tall its
+    /// content is, in pixels.
+    pub scroll: Option<(f32, f32)>,
 }
 
 /// Mouse state kept by the canvas between events.
@@ -80,9 +90,30 @@ pub enum Interaction {
     PressedNode { node: usize, start: Point, dragging: bool },
     /// Left button down on the background; drags pan the view.
     Panning { start: Point, last: Point },
+    /// Dragging the scrollbar's thumb, held `grab` pixels below its top.
+    Scrolling { grab: f32 },
 }
 
 impl GraphView<'_> {
+    /// The scrollbar's thumb, when the Canton view is taller than the canvas.
+    fn thumb(&self, bounds: Rectangle) -> Option<Rectangle> {
+        let (scroll, content) = self.scroll?;
+        let h = bounds.height;
+        if content <= h + 0.5 {
+            return None;
+        }
+        let height = (h * h / content).max(30.0).min(h);
+        let top = scroll / (content - h) * (h - height);
+        Some(Rectangle { x: bounds.width - SCROLLBAR_WIDTH, y: top, width: SCROLLBAR_WIDTH, height })
+    }
+
+    /// The scroll position that puts the thumb's top at `top` pixels.
+    fn scroll_for(&self, bounds: Rectangle, thumb: Rectangle, top: f32) -> f32 {
+        let content = self.scroll.map_or(0.0, |(_, c)| c);
+        let room = (bounds.height - thumb.height).max(1.0);
+        top.clamp(0.0, room) / room * (content - bounds.height)
+    }
+
     /// The visible record under `point`, topmost first.
     fn node_at(&self, bounds: Rectangle, point: Point) -> Option<usize> {
         if self.visualization == Visualization::Canton {
@@ -119,7 +150,7 @@ impl GraphView<'_> {
 
     /// Records (and their relations) to draw in full colour while hovering.
     /// In the Canton view a selected record lights up its neighbours too, as in alt-canton's explorer.
-    fn lit(&self) -> Option<HashSet<usize>> {
+    pub(super) fn lit(&self) -> Option<HashSet<usize>> {
         let selected = match self.selection {
             Some(Selection::Node(n)) if self.visualization == Visualization::Canton => Some(n),
             _ => None,
@@ -164,6 +195,16 @@ impl canvas::Program<Message> for GraphView<'_> {
                 *last = point;
                 return Some(Action::publish(Message::Pan(delta)).and_capture());
             }
+            (mouse::Event::CursorMoved { .. }, Interaction::Scrolling { grab }) => {
+                let point = cursor.position().map(|p| Point::new(p.x - bounds.x, p.y - bounds.y))?;
+                let thumb = self.thumb(bounds)?;
+                let to = self.scroll_for(bounds, thumb, point.y - *grab);
+                return Some(Action::publish(Message::CantonScrollTo(to)).and_capture());
+            }
+            (mouse::Event::ButtonReleased(Button::Left), Interaction::Scrolling { .. }) => {
+                *state = Interaction::Idle;
+                return Some(Action::capture());
+            }
             (mouse::Event::ButtonReleased(Button::Left), Interaction::PressedNode { node, dragging, .. }) => {
                 let message = if *dragging {
                     Message::DragEnd
@@ -193,6 +234,19 @@ impl canvas::Program<Message> for GraphView<'_> {
                 let hover = self.node_at(bounds, point);
                 (hover != self.hover).then(|| Action::publish(Message::Hover(hover)))
             }
+            mouse::Event::ButtonPressed(Button::Left)
+                if self.thumb(bounds).is_some() && point.x >= bounds.width - SCROLLBAR_WIDTH =>
+            {
+                // On the thumb, drag it; elsewhere on the track, jump there.
+                let thumb = self.thumb(bounds)?;
+                if thumb.contains(point) {
+                    *state = Interaction::Scrolling { grab: point.y - thumb.y };
+                    return Some(Action::publish(Message::CloseMenu).and_capture());
+                }
+                *state = Interaction::Scrolling { grab: thumb.height / 2.0 };
+                let to = self.scroll_for(bounds, thumb, point.y - thumb.height / 2.0);
+                Some(Action::publish(Message::CantonScrollTo(to)).and_capture())
+            }
             mouse::Event::ButtonPressed(Button::Left) => {
                 *state = match self.node_at(bounds, point) {
                     Some(node) => Interaction::PressedNode { node, start: point, dragging: false },
@@ -212,6 +266,9 @@ impl canvas::Program<Message> for GraphView<'_> {
                     ScrollDelta::Lines { y, .. } => *y,
                     ScrollDelta::Pixels { y, .. } => *y / 40.0,
                 };
+                if self.scroll.is_some() {
+                    return Some(Action::publish(Message::CantonScroll(-lines * 40.0)).and_capture());
+                }
                 let factor = 1.1_f32.powf(lines);
                 let anchor = self.camera.to_graph(bounds, point);
                 let from_centre = point - Point::new(bounds.width / 2.0, bounds.height / 2.0);
@@ -236,6 +293,16 @@ impl canvas::Program<Message> for GraphView<'_> {
         let lit = self.lit();
         if self.visualization == Visualization::Canton {
             canton_draw::draw(self, &mut frame, bounds, lit.as_ref());
+            if let Some(thumb) = self.thumb(bounds) {
+                let track = Point::new(thumb.x, 0.0);
+                frame.fill_rectangle(track, iced::Size::new(SCROLLBAR_WIDTH, bounds.height), SCROLLBAR_TRACK);
+                let pill = Path::rounded_rectangle(
+                    Point::new(thumb.x + 2.0, thumb.y + 2.0),
+                    iced::Size::new(thumb.width - 4.0, thumb.height - 4.0),
+                    4.0.into(),
+                );
+                frame.fill(&pill, SCROLLBAR_THUMB);
+            }
             return vec![frame.into_geometry()];
         }
         draw_grid(&mut frame, bounds, self.camera);
@@ -270,7 +337,7 @@ impl canvas::Program<Message> for GraphView<'_> {
             };
             let width = width * scale.clamp(0.7, 1.6);
             draw_curve(&mut frame, &c, color, width);
-            let overview = e.id.starts_with(surrealdb_explorer::graph::TABLE_NODE);
+            let overview = e.id.starts_with(crate::graph::TABLE_NODE);
             if selected || touches_focus || overview || (focus.is_none() && scale >= 2.5) {
                 edge_labels.push((c.at(0.5), e.label.clone()));
             }
@@ -379,7 +446,7 @@ fn radii(graph: &Graph, scale: f32) -> Vec<f32> {
         .map(|(d, n)| {
             // A table in the overview is sized by how many records it has.
             let base = match n.data["records"].as_i64() {
-                Some(records) if n.id.starts_with(surrealdb_explorer::graph::TABLE_NODE) => {
+                Some(records) if n.id.starts_with(crate::graph::TABLE_NODE) => {
                     10.0 + 5.0 * ((records.max(0) + 1) as f32).log10()
                 }
                 _ => (NODE_RADIUS + 2.2 * (d as f32).sqrt()).min(18.0),
