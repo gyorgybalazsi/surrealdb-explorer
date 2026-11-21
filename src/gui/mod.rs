@@ -15,7 +15,7 @@ mod sidebar;
 
 use std::path::PathBuf;
 
-pub use app::{App, Message};
+pub use app::{App, CantonFilterChange, Message, Selection};
 use crate::config::{CONFIG_FILE, Config};
 use crate::logging::LogControl;
 use crate::saved_queries::QUERIES_FILE;

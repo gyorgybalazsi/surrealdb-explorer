@@ -150,7 +150,7 @@ impl GraphView<'_> {
 
     /// Records (and their relations) to draw in full colour while hovering.
     /// In the Canton view a selected record lights up its neighbours too, as in alt-canton's explorer.
-    fn lit(&self) -> Option<HashSet<usize>> {
+    pub(super) fn lit(&self) -> Option<HashSet<usize>> {
         let selected = match self.selection {
             Some(Selection::Node(n)) if self.visualization == Visualization::Canton => Some(n),
             _ => None,

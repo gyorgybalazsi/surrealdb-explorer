@@ -1614,8 +1614,9 @@ impl App {
         )
     }
 
-    pub fn view(&self) -> Element<'_, Message> {
-        let graph = canvas(GraphView {
+    /// The graph canvas's view of the app.
+    fn graph_view(&self) -> GraphView<'_> {
+        GraphView {
             graph: &self.graph,
             camera: self.camera,
             hover: self.hover,
@@ -1623,7 +1624,47 @@ impl App {
             visualization: self.config.graph.visualization,
             known_size: self.canvas_size,
             scroll: self.canton().then(|| (self.canton_scroll, self.canton_content_height())),
-        })
+        }
+    }
+
+    // What the canvas draws has no widget text that a test could find, so
+    // these say what it shows. They only read the app's state.
+
+    /// The ids of the records kept by hiding and the Canton filters, whether
+    /// or not they are scrolled into view.
+    pub fn shown_records(&self) -> Vec<String> {
+        let canton = self.canton();
+        self.graph
+            .nodes
+            .iter()
+            .filter(|n| if canton { n.card.shown } else { !n.hidden })
+            .map(|n| n.id.clone())
+            .collect()
+    }
+
+    /// The index of the record with this id, as [`Selection::Node`] takes it.
+    pub fn record_index(&self, id: &str) -> Option<usize> {
+        self.graph.nodes.iter().position(|n| n.id == id)
+    }
+
+    /// How strongly the Canton view draws this record's card, from 0 to 1
+    /// (1 is full strength). `None` if the card isn't drawn.
+    pub fn card_alpha(&self, id: &str) -> Option<f32> {
+        let i = self.record_index(id)?;
+        let node = &self.graph.nodes[i];
+        if !(self.canton() && node.card.shown) {
+            return None;
+        }
+        Some(crate::gui::canton_draw::card_alpha(self.graph_view().lit().as_ref(), i, node.card.status))
+    }
+
+    /// The text in the query editor.
+    pub fn query_text(&self) -> String {
+        self.query_text.text()
+    }
+
+    pub fn view(&self) -> Element<'_, Message> {
+        let graph = canvas(self.graph_view())
         .width(Fill)
         .height(Fill);
 
