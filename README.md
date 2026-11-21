@@ -31,6 +31,9 @@ draw in the app's window.
   queries, draw results in the window, and read, set or scroll to the current
   selection. Queries that would change data run only after you click Allow in
   the window; the others run as the read-only viewer user, if one is set.
+- **Analytics dashboard** (optional, see [Dashboard](#dashboard)). Charts
+  and tables over the Delta Lake tables that the canton-analytics daemon
+  writes, one dashboard per plugin.
 - **Sample data.** Settings → Data → *Load sample data* or *Load Canton sample*.
   There is a larger Canton demo in [`demo/canton_demo.surql`](demo/canton_demo.surql).
 
@@ -72,10 +75,45 @@ cargo bundle --release
 | `[graph]`    | Record limits, auto refresh, the visualization (`standard` or `canton`) and Canton view options |
 | `[logging]`  | Log level and folder |
 | `[mcp]`      | `enabled` and `port` (default 8765) |
+| `[analytics]` | The Dashboard: `location` of the tables, `storage_options` and the `selected` table |
 
 `password` and `viewer_password` can be a 1Password reference (`op://vault/item/field`). The app then
 reads it with the 1Password CLI (`op`), so the secret never has to be in the
 file. `config.toml` and `logs/` are in `.gitignore`.
+
+## Dashboard
+
+The [canton-analytics daemon](https://github.com/gyorgybalazsi/canton-event-graph-syncer/tree/main/analytics)
+runs WebAssembly analytics plugins over the syncer's SurrealDB and writes
+Delta Lake tables. The Dashboard reads them; it never writes, and the
+daemon doesn't need the explorer to be open.
+
+It is an opt-in feature, because it pulls in DataFusion:
+
+```sh
+cargo run --release --features dashboard            # tables in a local folder
+cargo run --release --features dashboard-s3         # …or in S3 (also -azure, -gcs)
+```
+
+Click **Dashboard** next to Settings. Type where the tables are (the
+daemon's `--tables`: a folder, or `s3://`, `az://` or `gs://`) and press
+Enter, then pick a table. Each table shows its plugin's panels: number
+cards, time series, bar charts and sortable tables. A table without panels
+gets some made from its columns. A line under the header shows the daemon's
+heartbeat: up to date, catching up, stopped, not heard from, or failing.
+The dashboard checks for new commits every two seconds while it is open;
+**Refresh now** looks again at once, and also finds new tables.
+
+Cloud credentials come from the usual environment variables
+(`AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AZURE_STORAGE_ACCOUNT_NAME`,
+`GOOGLE_APPLICATION_CREDENTIALS`…). Other object store options go in
+`config.toml`:
+
+```toml
+[analytics]
+location = "s3://my-bucket/canton-analytics"
+storage_options = ["aws_endpoint=http://localhost:9000", "aws_allow_http=true"]
+```
 
 ## Queries
 

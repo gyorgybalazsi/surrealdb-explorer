@@ -1,8 +1,0 @@
-[workspace]
-resolver = "3"
-members = ["reader", "runner"]
-# Plugins build for wasm32-wasip2, so they are separate workspaces.
-exclude = ["plugins"]
-
-[profile.dev]
-debug = 0

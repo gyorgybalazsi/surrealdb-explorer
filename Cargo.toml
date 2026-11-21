@@ -7,8 +7,9 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/gyorgybalazsi/surrealdb-explorer"
 
 [dependencies]
-# The analytics dashboard (the `dashboard` feature).
-canton-analytics-reader = { path = "analytics/reader", optional = true }
+# The analytics dashboard (the `dashboard` feature). The reader lives with
+# the canton-analytics daemon in the syncer repo.
+canton-analytics-reader = { git = "https://github.com/gyorgybalazsi/canton-event-graph-syncer", branch = "claude/project-thread-n2zx85", optional = true }
 iced_plot = { version = "0.5", optional = true }
 iced_table2 = { version = "0.14", optional = true }
 plotters = { version = "0.3", default-features = false, optional = true }
@@ -28,10 +29,15 @@ axum = "0.8.9"
 png = "0.18"
 
 [features]
-default = ["dashboard"]
-# The Dashboard over analytics tables. It pulls in Polars, which is slow to
-# build: `--no-default-features` builds the explorer without it.
+default = []
+# The Dashboard over the Delta Lake tables the canton-analytics daemon
+# writes. Off by default: it pulls in DataFusion, which is slow to build.
+# `--features dashboard` reads local folders; add a cloud to read tables
+# from object storage.
 dashboard = ["dep:canton-analytics-reader", "dep:iced_plot", "dep:iced_table2", "dep:plotters", "dep:plotters-iced2"]
+dashboard-s3 = ["dashboard", "canton-analytics-reader/s3"]
+dashboard-azure = ["dashboard", "canton-analytics-reader/azure"]
+dashboard-gcs = ["dashboard", "canton-analytics-reader/gcs"]
 
 # The Dock icon on macOS: a window icon does nothing there, so the app sets
 # its icon image directly (the same objc2 versions winit already uses).

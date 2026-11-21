@@ -303,7 +303,7 @@ impl App {
         let config_canton_transactions = config.graph.canton_transactions;
         let config_canton_columns = config.graph.canton_columns;
         #[cfg(feature = "dashboard")]
-        let dashboard_table = config.analytics.table.clone();
+        let dashboard_settings = config.analytics.clone();
         let (db, data, error) = match runtime.block_on(db::connect(&config.database)) {
             // The Canton view loads its own window of transactions below.
             Ok(db) if config.graph.visualization == Visualization::Canton => (Some(db), GraphData::default(), None),
@@ -374,7 +374,11 @@ impl App {
             #[cfg(feature = "dashboard")]
             dashboard_open: false,
             #[cfg(feature = "dashboard")]
-            dashboard: crate::gui::dashboard::Dashboard::new(dashboard_table),
+            dashboard: crate::gui::dashboard::Dashboard::new(
+                dashboard_settings.location,
+                dashboard_settings.storage_options,
+                dashboard_settings.selected,
+            ),
             pending_data_action: None,
             data_busy: false,
             canvas_size: iced::Size::new(880.0, 760.0),
@@ -769,13 +773,18 @@ impl App {
             }
             #[cfg(feature = "dashboard")]
             Message::Dashboard(m) => {
-                if let crate::gui::dashboard::Msg::PathSubmitted = m {
-                    self.config.analytics.table = self.dashboard.path.trim().to_string();
+                use crate::gui::dashboard::Msg;
+                let save = matches!(m, Msg::LocationSubmitted | Msg::Select(_));
+                let task = self.dashboard.update(m).map(Message::Dashboard);
+                // Remember where the tables are and which one was shown.
+                if save {
+                    self.config.analytics.location = self.dashboard.location.trim().to_string();
+                    self.config.analytics.selected = self.dashboard.selected.clone();
                     if let Err(e) = self.config.save_to(&self.files.config) {
-                        warn!(error = %e, "could not save the dashboard's table folder");
+                        warn!(error = %e, "could not save the dashboard's settings");
                     }
                 }
-                return self.dashboard.update(m).map(Message::Dashboard);
+                return task;
             }
             Message::PickSavedQuery(name) => {
                 if let Some(saved) = self.saved_queries.get(&name) {

@@ -213,17 +213,25 @@ pub struct LoggingConfig {
     pub directory: String,
 }
 
-/// The Dashboard tab, over a table the canton-analytics runner writes.
+/// The Dashboard, over the tables the canton-analytics daemon writes. Set
+/// on its own, so the explorer can read a local folder while testing and a
+/// bucket in production.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AnalyticsConfig {
-    /// Folder of the Delta table, relative to the folder the app runs from.
-    pub table: String,
+    /// Where the tables are: a folder (relative to the folder the app runs
+    /// from), or an `s3://`, `az://` or `gs://` URL.
+    pub location: String,
+    /// Object store options as `key=value`, e.g. `aws_region=eu-central-1`.
+    /// Credentials usually come from the cloud's environment variables.
+    pub storage_options: Vec<String>,
+    /// The table last shown.
+    pub selected: Option<String>,
 }
 
 impl Default for AnalyticsConfig {
     fn default() -> Self {
-        AnalyticsConfig { table: "tables/contract_lifetimes".into() }
+        AnalyticsConfig { location: "tables".into(), storage_options: Vec::new(), selected: None }
     }
 }
 
