@@ -138,6 +138,12 @@ pub enum Message {
     /// Empties the query editor.
     ClearQuery,
     RunQuery,
+    /// Shows the analytics dashboard in the main area, or the graph again.
+    #[cfg(feature = "dashboard")]
+    ToggleDashboard,
+    /// Anything in the dashboard.
+    #[cfg(feature = "dashboard")]
+    Dashboard(crate::gui::dashboard::Msg),
     /// The query's outcome.
     QueryDone(QueryOutcome),
     /// The last query's result, read from the database as a graph.
@@ -231,6 +237,11 @@ pub struct App {
     pub(super) saved_queries_unreadable: bool,
     /// The last query result, shown as the graph.
     pub(super) result_view: Option<ResultView>,
+    /// The main area shows the analytics dashboard instead of the graph.
+    #[cfg(feature = "dashboard")]
+    pub(super) dashboard_open: bool,
+    #[cfg(feature = "dashboard")]
+    pub(super) dashboard: crate::gui::dashboard::Dashboard,
 
     /// Where the settings and the saved queries are kept.
     pub(super) files: Files,
@@ -291,6 +302,8 @@ impl App {
         let limit = config.graph.max_records_per_table;
         let config_canton_transactions = config.graph.canton_transactions;
         let config_canton_columns = config.graph.canton_columns;
+        #[cfg(feature = "dashboard")]
+        let dashboard_table = config.analytics.table.clone();
         let (db, data, error) = match runtime.block_on(db::connect(&config.database)) {
             // The Canton view loads its own window of transactions below.
             Ok(db) if config.graph.visualization == Visualization::Canton => (Some(db), GraphData::default(), None),
@@ -358,6 +371,10 @@ impl App {
             confirm_delete_query: false,
             saved_queries_unreadable: queries_error.is_some(),
             result_view: None,
+            #[cfg(feature = "dashboard")]
+            dashboard_open: false,
+            #[cfg(feature = "dashboard")]
+            dashboard: crate::gui::dashboard::Dashboard::new(dashboard_table),
             pending_data_action: None,
             data_busy: false,
             canvas_size: iced::Size::new(880.0, 760.0),
@@ -412,7 +429,17 @@ impl App {
         } else {
             Subscription::none()
         };
-        Subscription::batch([frames, refresh, opened, panel_drag, Subscription::run(mcp_commands)])
+        // Reload the dashboard when the analytics runner commits.
+        #[cfg(feature = "dashboard")]
+        let dashboard = if self.dashboard_open {
+            iced::time::every(std::time::Duration::from_secs(2))
+                .map(|_| Message::Dashboard(crate::gui::dashboard::Msg::Check))
+        } else {
+            Subscription::none()
+        };
+        #[cfg(not(feature = "dashboard"))]
+        let dashboard = Subscription::none();
+        Subscription::batch([frames, refresh, opened, panel_drag, dashboard, Subscription::run(mcp_commands)])
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -733,6 +760,23 @@ impl App {
             },
             Message::PanelDragEnd => self.panel_drag = None,
             Message::RunQuery => return self.run_query(),
+            #[cfg(feature = "dashboard")]
+            Message::ToggleDashboard => {
+                self.dashboard_open = !self.dashboard_open;
+                if self.dashboard_open {
+                    return self.dashboard.reload().map(Message::Dashboard);
+                }
+            }
+            #[cfg(feature = "dashboard")]
+            Message::Dashboard(m) => {
+                if let crate::gui::dashboard::Msg::PathSubmitted = m {
+                    self.config.analytics.table = self.dashboard.path.trim().to_string();
+                    if let Err(e) = self.config.save_to(&self.files.config) {
+                        warn!(error = %e, "could not save the dashboard's table folder");
+                    }
+                }
+                return self.dashboard.update(m).map(Message::Dashboard);
+            }
             Message::PickSavedQuery(name) => {
                 if let Some(saved) = self.saved_queries.get(&name) {
                     self.query_text = text_editor::Content::with_text(&saved.query);
@@ -1681,6 +1725,17 @@ impl App {
             None => self.sidebar(),
         };
 
+        #[cfg(feature = "dashboard")]
+        let main: Element<'_, Message> = if self.dashboard_open {
+            // A pending write must be answered whichever view is open.
+            match &self.pending_write {
+                Some((query, _)) => column![write_banner(query), self.dashboard.view().map(Message::Dashboard)].into(),
+                None => self.dashboard.view().map(Message::Dashboard),
+            }
+        } else {
+            layers.into()
+        };
+        #[cfg(not(feature = "dashboard"))]
         let main: Element<'_, Message> = layers.into();
 
         // The open query panel can be resized by dragging the line above it.

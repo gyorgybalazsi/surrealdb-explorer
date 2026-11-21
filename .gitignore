@@ -4,4 +4,7 @@
 /logs
 /config.toml
 /data-encrypted-backup
+/analytics/target
+/analytics/plugins/*/target
+/tables
 /queries.toml

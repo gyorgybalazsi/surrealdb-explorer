@@ -23,6 +23,7 @@ pub struct Config {
     pub graph: GraphConfig,
     pub logging: LoggingConfig,
     pub mcp: McpConfig,
+    pub analytics: AnalyticsConfig,
 }
 
 /// The app's MCP server, through which Claude Code reads the database and
@@ -212,6 +213,20 @@ pub struct LoggingConfig {
     pub directory: String,
 }
 
+/// The Dashboard tab, over a table the canton-analytics runner writes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AnalyticsConfig {
+    /// Folder of the Delta table, relative to the folder the app runs from.
+    pub table: String,
+}
+
+impl Default for AnalyticsConfig {
+    fn default() -> Self {
+        AnalyticsConfig { table: "tables/contract_lifetimes".into() }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -219,6 +234,7 @@ impl Default for Config {
             graph: GraphConfig::default(),
             logging: LoggingConfig::default(),
             mcp: McpConfig::default(),
+            analytics: AnalyticsConfig::default(),
         }
     }
 }
