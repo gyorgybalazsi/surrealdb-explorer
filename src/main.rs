@@ -5,9 +5,8 @@
 //! The app keeps the database open while running, so only one copy can run
 //! at a time. Sample data can be loaded from the app (Settings → Data).
 
-mod gui;
-
 use surrealdb_explorer::config::Config;
+use surrealdb_explorer::gui;
 use surrealdb_explorer::logging;
 
 fn main() -> iced::Result {

@@ -10,7 +10,7 @@ use iced::alignment;
 use iced::widget::canvas::{Frame, LineDash, Path, Stroke, Text};
 use iced::widget::text::Alignment;
 use iced::{Color, Font, Point, Rectangle, Size, Vector};
-use surrealdb_explorer::canton::{self, NODE_H, NODE_W, NodeKind, Status};
+use crate::canton::{self, NODE_H, NODE_W, NodeKind, Status};
 
 use crate::gui::app::Selection;
 use crate::gui::canvas::GraphView;

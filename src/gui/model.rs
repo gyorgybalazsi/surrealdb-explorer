@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use iced::{Color, Vector};
-use surrealdb_explorer::canton::{self, Filters, Model, ModelEdge, ModelNode, NodeKind, Status};
-use surrealdb_explorer::graph::GraphData;
+use crate::canton::{self, Filters, Model, ModelEdge, ModelNode, NodeKind, Status};
+use crate::graph::GraphData;
 
 const PALETTE: [Color; 10] = [
     rgb(0x3b, 0x82, 0xf6),
@@ -102,12 +102,12 @@ impl Graph {
         data.nodes = self
             .nodes
             .iter()
-            .map(|n| surrealdb_explorer::graph::GraphNode { id: n.id.clone(), table: n.table.clone(), data: n.data.clone() })
+            .map(|n| crate::graph::GraphNode { id: n.id.clone(), table: n.table.clone(), data: n.data.clone() })
             .collect();
         data.edges = self
             .edges
             .iter()
-            .map(|e| surrealdb_explorer::graph::GraphEdge {
+            .map(|e| crate::graph::GraphEdge {
                 id: e.id.clone(),
                 from: self.nodes[e.from].id.clone(),
                 to: self.nodes[e.to].id.clone(),
