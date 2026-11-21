@@ -16,6 +16,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # No debug info: much faster linking and a cache a fraction of the size.
+  # Panics still name the functions, just without line numbers.
+  CARGO_PROFILE_DEV_DEBUG: 0
 
 jobs:
   build-test:
@@ -30,8 +33,12 @@ jobs:
         with:
           components: clippy
 
+      # Only main saves the cache; pull requests restore it. The repository
+      # gets 10 GB of cache, and each PR saving its own copy evicted main's.
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build
         run: cargo build --all-targets --locked
