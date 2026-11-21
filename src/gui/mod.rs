@@ -40,8 +40,19 @@ impl Default for Files {
 /// the sidebar, e.g. when the config file was invalid and defaults are used.
 /// `log` lets saved settings change the log level (`None` if logging is off).
 pub fn run(config: Config, startup_error: Option<String>, log: Option<LogControl>) -> iced::Result {
+    program(config, Files::default(), startup_error, log).run()
+}
+
+/// The app as an iced program: what [`run`] opens in a window, and what a
+/// test can run headless in `iced_test`'s `Emulator`.
+pub fn program(
+    config: Config,
+    files: Files,
+    startup_error: Option<String>,
+    log: Option<LogControl>,
+) -> iced::application::Application<impl iced::Program<State = App, Message = Message, Theme = iced::Theme>> {
     iced::application(
-        move || App::boot(config.clone(), Files::default(), startup_error.clone(), log.clone()),
+        move || App::boot(config.clone(), files.clone(), startup_error.clone(), log.clone()),
         App::update,
         App::view,
     )
@@ -54,5 +65,4 @@ pub fn run(config: Config, startup_error: Option<String>, log: Option<LogControl
         ..Default::default()
     })
     .antialiasing(true)
-    .run()
 }
