@@ -35,16 +35,11 @@ impl Ui {
 
     /// Boots with these saved queries (`None`: the defaults the app writes).
     fn boot_with_queries(database: DatabaseConfig, visualization: Visualization, queries: Option<SavedQueries>) -> Ui {
-        let dir = common::temp_dir("ui");
-        let files = Files { config: dir.path().join("config.toml"), queries: dir.path().join("queries.toml") };
+        let (dir, files) = test_files();
         if let Some(queries) = queries {
             queries.save_to(&files.queries).unwrap();
         }
-        let mut config = Config { database, ..Config::default() };
-        config.mcp.enabled = false;
-        config.graph.auto_refresh = false;
-        config.graph.visualization = visualization;
-        let app = App::boot(config, files, None, None);
+        let app = App::boot(test_config(database, visualization), files, None, None);
         Ui { app, _files: dir }
     }
 
@@ -104,6 +99,23 @@ impl Ui {
     fn is_shown(&self, part: &str) -> bool {
         self.app.shown_records().iter().any(|id| id.contains(part))
     }
+}
+
+/// A temporary folder for the settings and saved queries (removed when the
+/// folder value is dropped).
+fn test_files() -> (TempDir, Files) {
+    let dir = common::temp_dir("ui");
+    let files = Files { config: dir.path().join("config.toml"), queries: dir.path().join("queries.toml") };
+    (dir, files)
+}
+
+/// The settings the tests boot with: MCP and auto refresh off.
+fn test_config(database: DatabaseConfig, visualization: Visualization) -> Config {
+    let mut config = Config { database, ..Config::default() };
+    config.mcp.enabled = false;
+    config.graph.auto_refresh = false;
+    config.graph.visualization = visualization;
+    config
 }
 
 /// A database with the Canton sample, then `extra` run on it.
@@ -244,4 +256,71 @@ fn selecting_a_record_dims_the_rest_and_deselecting_restores_the_view() {
     for id in ui.app.shown_records() {
         assert_eq!(ui.app.card_alpha(&id), Some(normal_alpha(&id)), "{id} after deselecting");
     }
+}
+
+/// Runs the app the way the window does, but headless: `iced_test`'s
+/// `Emulator` boots the program `gui::run` opens, with its subscriptions
+/// and tasks on its own runtime. The tests above call `App` directly; this
+/// one checks the real wiring around it.
+#[test]
+fn the_app_boots_and_runs_a_query_in_the_emulator() {
+    // The emulator waits for every task, so one that never ends would hang
+    // the test: run it on its own thread and give up after a while.
+    let (done, finished) = std::sync::mpsc::channel();
+    let test = std::thread::spawn(move || {
+        boot_and_run_a_query_in_the_emulator();
+        let _ = done.send(());
+    });
+    match finished.recv_timeout(std::time::Duration::from_secs(120)) {
+        Ok(()) => test.join().unwrap(),
+        // The test panicked: report its panic.
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => std::panic::resume_unwind(test.join().unwrap_err()),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("the emulator didn't finish within 2 minutes"),
+    }
+}
+
+fn boot_and_run_a_query_in_the_emulator() {
+    use iced_test::emulator::{Emulator, Event, Mode};
+    use iced_test::futures::futures::{StreamExt, channel::mpsc, executor};
+    use iced_test::Instruction;
+
+    let database = common::temp_database("ui_emulator");
+    let server = database.clone();
+    common::run(async move {
+        let db = db::connect(&server).await.unwrap();
+        data::load_sample_data(&db).await.unwrap();
+        db.query("CREATE note:1 SET text = 'not a person';").await.unwrap().check().unwrap();
+    });
+    let (_dir, files) = test_files();
+    let program = surrealdb_explorer::gui::program(test_config(database, Visualization::Standard), files, None, None);
+
+    // The query panel's default query, SELECT * FROM person, replaces the
+    // graph with its result: the note goes.
+    let steps = [
+        r#"click "▸ Query""#,
+        r#"expect "▾ Query""#,
+        r#"expect "Run a query to see its result here.""#,
+        r#"click "Run  ⌘↩""#,
+    ];
+    let mut steps = steps.iter().map(|line| Instruction::parse(line).unwrap());
+
+    let (sender, mut receiver) = mpsc::channel(1);
+    let mut emulator = Emulator::new(sender, &program, Mode::Zen, iced::Size::new(1200.0, 800.0));
+    loop {
+        // The emulator keeps its sender, so this waits for its next event.
+        let Some(event) = executor::block_on(receiver.next()) else { unreachable!() };
+        match event {
+            Event::Action(action) => emulator.perform(&program, action),
+            Event::Failed(instruction) => panic!("failed: {instruction}"),
+            Event::Ready => {
+                let Some(step) = steps.next() else { break };
+                emulator.run(&program, step);
+            }
+        }
+    }
+
+    let (app, _window) = emulator.into_state();
+    let shown = app.shown_records();
+    assert!(shown.iter().any(|id| id == "person:tobie"), "the result is drawn: {shown:?}");
+    assert!(shown.iter().all(|id| id.starts_with("person:")), "only the query's records are drawn: {shown:?}");
 }
