@@ -19,20 +19,29 @@ pub(super) const ERROR: Color = Color::from_rgb(0.7, 0.0, 0.0);
 pub(super) const SUCCESS: Color = Color::from_rgb(0.1, 0.5, 0.2);
 
 impl App {
+    /// Switches the main area between the graph and the analytics dashboard.
+    #[cfg(feature = "dashboard")]
+    fn dashboard_button(&self) -> Element<'_, Message> {
+        button(text(if self.dashboard_open { "Graph" } else { "Dashboard" }).size(12))
+            .style(button::secondary)
+            .on_press(Message::ToggleDashboard)
+            .into()
+    }
+
+    #[cfg(not(feature = "dashboard"))]
+    fn dashboard_button(&self) -> Element<'_, Message> {
+        iced::widget::Row::new().into()
+    }
+
     pub(super) fn sidebar(&self) -> Element<'_, Message> {
         let g = &self.graph;
         let mut col = Column::new().spacing(6).padding(16).width(SIDEBAR_WIDTH);
 
         col = col.push(
-            row![
-                text("SurrealDB Explorer").size(18).width(Fill),
-                button(text(if self.dashboard_open { "Graph" } else { "Dashboard" }).size(12))
-                    .style(button::secondary)
-                    .on_press(Message::ToggleDashboard),
-                button(text("Settings").size(12)).style(button::secondary).on_press(Message::OpenSettings),
-            ]
-            .spacing(6)
-            .align_y(iced::Alignment::Center),
+            row![text("SurrealDB Explorer").size(18).width(Fill), self.dashboard_button()]
+                .push(button(text("Settings").size(12)).style(button::secondary).on_press(Message::OpenSettings))
+                .spacing(6)
+                .align_y(iced::Alignment::Center),
         );
         let summary = if self.overview {
             let records: i64 = g.nodes.iter().filter_map(|n| n.data["records"].as_i64()).sum();

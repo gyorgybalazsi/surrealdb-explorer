@@ -7,11 +7,12 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/gyorgybalazsi/surrealdb-explorer"
 
 [dependencies]
-canton-analytics-reader = { path = "analytics/reader" }
-iced_plot = "0.5"
-iced_table2 = "0.14"
-plotters = { version = "0.3", default-features = false }
-plotters-iced2 = "0.14"
+# The analytics dashboard (the `dashboard` feature).
+canton-analytics-reader = { path = "analytics/reader", optional = true }
+iced_plot = { version = "0.5", optional = true }
+iced_table2 = { version = "0.14", optional = true }
+plotters = { version = "0.3", default-features = false, optional = true }
+plotters-iced2 = { version = "0.14", optional = true }
 iced = { version = "0.14", features = ["canvas", "tokio"] }
 csv = "1.4"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -25,6 +26,12 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 rmcp = { version = "3.9", features = ["server", "macros", "transport-streamable-http-server"] }
 axum = "0.8.9"
 png = "0.18"
+
+[features]
+default = ["dashboard"]
+# The Dashboard over analytics tables. It pulls in Polars, which is slow to
+# build: `--no-default-features` builds the explorer without it.
+dashboard = ["dep:canton-analytics-reader", "dep:iced_plot", "dep:iced_table2", "dep:plotters", "dep:plotters-iced2"]
 
 # The Dock icon on macOS: a window icon does nothing there, so the app sets
 # its icon image directly (the same objc2 versions winit already uses).

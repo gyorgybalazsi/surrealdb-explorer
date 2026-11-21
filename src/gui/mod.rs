@@ -6,6 +6,7 @@
 mod app;
 mod canton_draw;
 mod canvas;
+#[cfg(feature = "dashboard")]
 mod dashboard;
 pub(crate) mod icon;
 mod layout;

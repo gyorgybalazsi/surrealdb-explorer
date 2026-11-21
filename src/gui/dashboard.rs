@@ -40,7 +40,8 @@ pub enum Msg {
     /// Time to look for a new commit.
     Check,
     Version(Result<Option<i64>, String>),
-    Loaded(Result<Arc<Data>, String>),
+    /// A load finished; the number says which `reload` started it.
+    Loaded(u64, Result<Arc<Data>, String>),
     Plot(PlotUiMessage),
     PaneResized(pane_grid::ResizeEvent),
     PaneDragged(pane_grid::DragEvent),
@@ -56,6 +57,11 @@ pub struct Dashboard {
     data: Option<Arc<Data>>,
     error: Option<String>,
     loading: bool,
+    /// Counts loads, so a load that a newer one replaced is ignored.
+    load_id: u64,
+    /// The table version last loaded or tried, so a version that fails to
+    /// load isn't retried every check.
+    tried: Option<i64>,
     panes: pane_grid::State<Pane>,
     plot: Option<PlotWidget>,
     /// The longest-lived contracts, in the table's sort order.
@@ -86,6 +92,8 @@ impl Dashboard {
             data: None,
             error: None,
             loading: false,
+            load_id: 0,
+            tried: None,
             panes: pane_grid::State::with_configuration(config),
             plot: None,
             rows: Vec::new(),
@@ -103,10 +111,12 @@ impl Dashboard {
     /// Reloads the dashboard from the table.
     pub fn reload(&mut self) -> Task<Msg> {
         self.loading = true;
+        self.load_id += 1;
+        let id = self.load_id;
         let path = self.table_path();
         Task::perform(
             async move { lifetimes::load(&path).await.map(Arc::new).map_err(|e| format!("{e:#}")) },
-            Msg::Loaded,
+            move |result| Msg::Loaded(id, result),
         )
     }
 
@@ -115,6 +125,7 @@ impl Dashboard {
             Msg::PathEdited(path) => self.path = path,
             Msg::PathSubmitted | Msg::Reload => {
                 self.data = None;
+                self.tried = None;
                 return self.reload();
             }
             Msg::Check => {
@@ -128,17 +139,19 @@ impl Dashboard {
                 );
             }
             Msg::Version(Ok(version)) => {
-                let shown = self.data.as_ref().and_then(|d| d.version);
-                if version.is_some() && version != shown {
+                if version.is_some() && version != self.tried {
+                    self.tried = version;
                     return self.reload();
                 }
             }
             Msg::Version(Err(e)) => self.error = Some(e),
-            Msg::Loaded(result) => {
+            Msg::Loaded(id, _) if id != self.load_id => {}
+            Msg::Loaded(_, result) => {
                 self.loading = false;
                 match result {
                     Ok(data) => {
                         self.error = None;
+                        self.tried = data.version;
                         self.plot = timeline_plot(&data);
                         self.rows = data.longest.clone();
                         self.sort_rows();
@@ -554,6 +567,35 @@ impl<'a> table::Column<'a, Msg, Theme, iced::Renderer> for TableColumn {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_replaced_load_is_ignored() {
+        let mut d = Dashboard::new("a".into());
+        let _ = d.reload();
+        d.path = "b".into();
+        let _ = d.update(Msg::PathSubmitted);
+        // The first load, for "a", finishes after the second one started.
+        let _ = d.update(Msg::Loaded(1, Err("old table".into())));
+        assert!(d.loading);
+        assert_eq!(d.error, None);
+        let _ = d.update(Msg::Loaded(2, Err("new table".into())));
+        assert!(!d.loading);
+        assert_eq!(d.error.as_deref(), Some("new table"));
+    }
+
+    #[test]
+    fn a_version_that_fails_to_load_is_tried_once() {
+        let mut d = Dashboard::new("t".into());
+        let _ = d.update(Msg::Version(Ok(Some(3))));
+        assert!(d.loading);
+        let _ = d.update(Msg::Loaded(d.load_id, Err("broken".into())));
+        // The same version again: no new load.
+        let _ = d.update(Msg::Version(Ok(Some(3))));
+        assert!(!d.loading);
+        // A new commit is tried.
+        let _ = d.update(Msg::Version(Ok(Some(4))));
+        assert!(d.loading);
+    }
 
     #[test]
     fn labels_and_durations() {
