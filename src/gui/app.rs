@@ -46,6 +46,60 @@ pub enum DataAction {
     EraseDatabase,
 }
 
+/// What a background load of the graph is for, which decides how its
+/// result is shown.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LoadPurpose {
+    /// Show what was read in place of the graph, with `notice` in the
+    /// sidebar; `fit` also fits it in view.
+    Reload { notice: Option<&'static str>, fit: bool },
+    /// Auto refresh saw a change: keep the camera, the selection and the
+    /// records the user hid.
+    Refresh,
+    /// Another window of transactions in the Canton view.
+    Page(graph::CantonWindow),
+}
+
+/// What a background load reads.
+#[derive(Debug, Clone, Copy)]
+enum LoadWhat {
+    /// The tables, as a graph.
+    Overview,
+    /// The records: in the Canton view the window of transactions, otherwise
+    /// every table's records up to the per-table limit.
+    Records,
+    /// The records, or the overview when there are more than this many.
+    RecordsOrOverview(usize),
+}
+
+/// What a background load read from the database.
+#[derive(Debug, Clone)]
+pub enum Loaded {
+    Overview(GraphData),
+    /// `offsets` and `left_out` are only known in the Canton view.
+    Records { data: GraphData, offsets: Option<(i64, i64)>, left_out: usize },
+}
+
+/// A database opened in the background after the settings changed.
+#[derive(Debug, Clone)]
+pub struct Opened {
+    /// The new connection, or `None` when the current one only switched
+    /// namespace and database.
+    db: Option<Database>,
+    queries: Queries,
+}
+
+/// What saving the settings found so far, finished once the new database
+/// is open.
+#[derive(Debug, Clone, Default)]
+pub struct SettingsReport {
+    problems: Vec<String>,
+    notes: Vec<&'static str>,
+    /// The graph settings changed, so the graph is read again even if the
+    /// new database can't be opened.
+    graph_changed: bool,
+}
+
 /// One change to the Canton view's filters.
 #[derive(Debug, Clone)]
 pub enum CantonFilterChange {
@@ -103,6 +157,9 @@ pub enum Message {
     ToggleFollowNewest(bool),
     /// Draws the whole database even though it's bigger than `overview_above`.
     LoadEverything,
+    /// A background load of the graph has finished. Only the latest load
+    /// (by its number) is shown.
+    GraphLoaded(u64, LoadPurpose, Result<Loaded, String>),
     /// From an overview table's menu: draws that table's records.
     MenuShowRecords,
     /// From a record's menu: adds its neighbours to the graph.
@@ -131,6 +188,8 @@ pub enum Message {
     UserLevelChanged(UserLevel),
     ViewerUserLevelChanged(UserLevel),
     SaveSettings,
+    /// The database the saved settings name has been opened (or not).
+    DatabaseOpened(DatabaseConfig, Result<Opened, String>, SettingsReport),
 
     // Query panel
     ToggleQuery,
@@ -271,6 +330,13 @@ pub struct App {
     pub(super) canton_columns: String,
     /// How far the Canton view is scrolled down, in pixels.
     pub(super) canton_scroll: f32,
+    /// The number of the latest background load of the graph: an older
+    /// one's result is dropped when it arrives.
+    load_generation: u64,
+    /// The latest load hasn't finished yet.
+    loading: bool,
+    /// The database the saved settings name is being opened.
+    pub(super) switching: bool,
 }
 
 impl App {
@@ -288,20 +354,13 @@ impl App {
             .build()
             .expect("failed to start the async runtime");
 
-        let limit = config.graph.max_records_per_table;
         let config_canton_transactions = config.graph.canton_transactions;
         let config_canton_columns = config.graph.canton_columns;
-        let (db, data, error) = match runtime.block_on(db::connect(&config.database)) {
-            // The Canton view loads its own window of transactions below.
-            Ok(db) if config.graph.visualization == Visualization::Canton => (Some(db), GraphData::default(), None),
-            Ok(db) => match runtime.block_on(graph::load(&db, limit)) {
-                Ok(data) => (Some(db), data, None),
-                Err(e) => {
-                    error!(error = %e, "could not load the graph");
-                    (Some(db), GraphData::default(), Some(e.to_string()))
-                }
-            },
-            Err(e) => (None, GraphData::default(), Some(format!("Could not open the database: {e}"))),
+        // Before the window opens, so it waits for the database here: the
+        // first graph is read below, once the app is set up.
+        let (db, connect_error) = match runtime.block_on(db::connect(&config.database)) {
+            Ok(db) => (Some(db), None),
+            Err(e) => (None, Some(format!("Could not open the database: {e}"))),
         };
 
         let queries = runtime.block_on(Queries::connect(&config.database));
@@ -334,14 +393,14 @@ impl App {
             queries,
             config,
             log,
-            graph: Graph::new(data, None),
+            graph: Graph::new(GraphData::default(), None),
             layout: Layout::new(),
             camera: Camera::default(),
             hover: None,
             selection: None,
             menu: None,
             dragging: None,
-            error: startup_error.or(error).or(queries_error.clone()),
+            error: None,
             notice: None,
             settings: None,
             query_open: false,
@@ -372,15 +431,17 @@ impl App {
             canton_count: config_canton_transactions.to_string(),
             canton_columns: config_canton_columns.to_string(),
             canton_scroll: 0.0,
+            load_generation: 0,
+            loading: false,
+            switching: false,
         };
         app.apply_visualization();
-        if app.canton() {
-            // The Canton view loads a window of transactions, not the first records of each table.
-            app.load_everything();
-            app.relayout_canton();
-        } else if app.too_big().is_some() {
-            app.show_overview();
+        if let Some(db) = app.db.clone() {
+            let what = app.reload_what();
+            let loaded = app.runtime.block_on(app.fetch(db, what, app.canton_window));
+            app.show_loaded(LoadPurpose::Reload { notice: None, fit: true }, loaded);
         }
+        app.error = startup_error.or(connect_error).or(app.error.take()).or(queries_error);
         app
     }
 
@@ -495,8 +556,7 @@ impl App {
             Message::ShowAll => {
                 if self.result_view.is_some() {
                     // Back from a query result to the whole-database view.
-                    self.reload();
-                    self.notice = None;
+                    return self.reload(LoadPurpose::Reload { notice: None, fit: true });
                 } else {
                     for n in &mut self.graph.nodes {
                         n.hidden = false;
@@ -506,13 +566,16 @@ impl App {
                 }
                 self.relayout_canton();
             }
-            Message::Reload => self.reload(),
-            Message::ShowOverview => self.show_overview(),
-            Message::LoadEverything => {
-                self.load_everything();
-                self.layout.reheat(0.5);
-                self.following = true;
-                self.presettle();
+            Message::Reload => return self.reload(RELOADED),
+            Message::ShowOverview => return self.start_load(LoadPurpose::Reload { notice: None, fit: false }, LoadWhat::Overview),
+            Message::LoadEverything => return self.start_load(RELOADED, LoadWhat::Records),
+            Message::GraphLoaded(generation, purpose, result) => {
+                if generation != self.load_generation {
+                    debug!(generation, "dropped the result of an older load");
+                    return Task::none();
+                }
+                self.loading = false;
+                self.show_loaded(purpose, result);
             }
             Message::MenuShowRecords => {
                 let Some((node, _)) = self.menu.take() else { return Task::none() };
@@ -561,11 +624,13 @@ impl App {
                 match result {
                     // Only act on the answer if auto refresh is still wanted:
                     // a query result may have been drawn meanwhile.
+                    // A load started meanwhile reads the current state anyway.
+                    Ok(_) if self.loading => {}
                     Ok(marker) if self.auto_refresh_running() => match &self.change_marker {
                         Some(previous) if *previous != marker => {
                             debug!("the database changed; refreshing the graph");
-                            self.refresh();
                             self.change_marker = Some(marker);
+                            return self.start_load(LoadPurpose::Refresh, LoadWhat::Records);
                         }
                         Some(_) => {}
                         None => self.change_marker = Some(marker),
@@ -583,8 +648,7 @@ impl App {
                     }
                     self.apply_visualization();
                     // The views load different records: a window of transactions, or every table.
-                    self.reload();
-                    self.relayout_canton();
+                    return self.reload(LoadPurpose::Reload { notice: Some("Reloaded"), fit: true });
                 }
             }
             Message::ToggleFollowNewest(on) => {
@@ -629,23 +693,8 @@ impl App {
             }
             Message::CantonScroll(delta) => self.scroll_canton(self.canton_scroll + delta),
             Message::CantonScrollTo(to) => self.scroll_canton(to),
-            Message::CantonPage(window) => {
-                let previous = std::mem::replace(&mut self.canton_window, window);
-                let loaded_before = self.canton_offsets.is_some();
-                self.load_everything();
-                // Paging past either end would leave an empty view with both
-                // paging buttons off: stay on the transactions shown instead.
-                let paging = matches!(window, graph::CantonWindow::Before(..) | graph::CantonWindow::After(..));
-                if paging && loaded_before && self.canton_offsets.is_none() && self.error.is_none() {
-                    self.canton_window = previous;
-                    self.load_everything();
-                    self.notice = Some(match window {
-                        graph::CantonWindow::Before(..) => "There are no older transactions.".into(),
-                        _ => "There are no newer transactions yet.".into(),
-                    });
-                }
-                self.relayout_canton();
-            }
+            // The window changes when its transactions arrive (see `show_loaded`).
+            Message::CantonPage(window) => return self.start_load(LoadPurpose::Page(window), LoadWhat::Records),
             Message::FitView => self.fit_view(),
             Message::CanvasResized(size) => {
                 self.canvas_size = size;
@@ -711,7 +760,8 @@ impl App {
                     form.message = None;
                 }
             }
-            Message::SaveSettings => self.save_settings(),
+            Message::SaveSettings => return self.save_settings(),
+            Message::DatabaseOpened(config, result, report) => return self.database_opened(config, result, report),
 
             Message::ToggleQuery => {
                 self.query_open = !self.query_open;
@@ -781,12 +831,11 @@ impl App {
                         self.apply_result(graph);
                     }
                     WindowCommand::Overview => {
-                        self.reload();
-                        self.notice = None;
+                        return self.reload(LoadPurpose::Reload { notice: None, fit: false });
                     }
                     WindowCommand::DataChanged => {
                         if self.result_view.is_none() {
-                            self.reload();
+                            return self.reload(RELOADED);
                         } else {
                             self.notice = Some("Claude Code changed data. Show the whole graph to see it.".into());
                         }
@@ -866,13 +915,12 @@ impl App {
                             }
                             self.apply_visualization();
                         }
-                        self.reload();
-                        self.relayout_canton();
-                        self.notice = Some(match action {
-                            DataAction::LoadSampleData => "Sample data loaded.".into(),
-                            DataAction::LoadCantonSample => "Canton sample loaded.".into(),
-                            DataAction::EraseDatabase => "Database erased.".into(),
-                        });
+                        let notice = match action {
+                            DataAction::LoadSampleData => "Sample data loaded.",
+                            DataAction::LoadCantonSample => "Canton sample loaded.",
+                            DataAction::EraseDatabase => "Database erased.",
+                        };
+                        return self.reload(LoadPurpose::Reload { notice: Some(notice), fit: true });
                     }
                     Err(e) => {
                         error!(?action, error = %e, "data action failed");
@@ -905,47 +953,147 @@ impl App {
         }
     }
 
-    /// Reads the database again; records already on screen keep their place.
-    fn reload(&mut self) {
-        if !self.canton() && self.too_big().is_some() {
-            self.show_overview();
-            return;
-        }
-        self.load_everything();
+    /// Reads the database again in the background; records already on
+    /// screen keep their place. A big database is shown as the overview.
+    fn reload(&mut self, purpose: LoadPurpose) -> Task<Message> {
+        let what = self.reload_what();
+        self.start_load(purpose, what)
     }
 
-    /// How many records the database has, if more than `overview_above`.
-    fn too_big(&self) -> Option<usize> {
-        let db = self.db.as_ref()?;
-        match self.runtime.block_on(graph::record_count(db)) {
-            Ok(n) if n > self.config.graph.overview_above => Some(n),
-            Ok(_) => None,
-            Err(e) => {
-                warn!(error = %e, "could not count the records");
-                None
+    /// What Reload reads: the Canton view always loads its window of
+    /// transactions; otherwise a database bigger than `overview_above` is
+    /// shown as the overview.
+    fn reload_what(&self) -> LoadWhat {
+        if self.canton() { LoadWhat::Records } else { LoadWhat::RecordsOrOverview(self.config.graph.overview_above) }
+    }
+
+    /// Reads the graph on our runtime, so the window stays responsive, and
+    /// shows it when it arrives (see `show_loaded`). A newer load replaces
+    /// one still running.
+    fn start_load(&mut self, purpose: LoadPurpose, what: LoadWhat) -> Task<Message> {
+        let Some(db) = self.db.clone() else { return Task::none() };
+        self.load_generation += 1;
+        let generation = self.load_generation;
+        self.loading = true;
+        if purpose != LoadPurpose::Refresh {
+            self.notice = Some("Loading…".into());
+        }
+        let window = match purpose {
+            LoadPurpose::Page(window) => window,
+            _ => self.canton_window,
+        };
+        let handle = self.runtime.spawn(self.fetch(db, what, window));
+        Task::perform(
+            async move { handle.await.unwrap_or_else(|e| Err(format!("the task failed: {e}"))) },
+            move |result| Message::GraphLoaded(generation, purpose, result),
+        )
+    }
+
+    /// Reads `what` from the database (in the Canton view, transactions in
+    /// `window`). It owns what it needs, so it can run on another thread.
+    fn fetch(
+        &self,
+        db: Database,
+        what: LoadWhat,
+        window: graph::CantonWindow,
+    ) -> impl std::future::Future<Output = Result<Loaded, String>> + Send + 'static {
+        let canton = self.canton();
+        let per_table = self.config.graph.max_records_per_table;
+        let limit = self.config.graph.max_result_records;
+        async move {
+            let overview = match what {
+                LoadWhat::Overview => true,
+                LoadWhat::Records => false,
+                LoadWhat::RecordsOrOverview(above) => match graph::record_count(&db).await {
+                    Ok(n) => n > above,
+                    Err(e) => {
+                        warn!(error = %e, "could not count the records");
+                        false
+                    }
+                },
+            };
+            if overview {
+                return graph::overview(&db).await.map(Loaded::Overview).map_err(|e| e.to_string());
             }
+            if canton {
+                let loaded =
+                    graph::load_canton_window(&db, window, per_table, limit).await.map_err(|e| e.to_string())?;
+                return Ok(Loaded::Records { data: loaded.data, offsets: loaded.offsets, left_out: loaded.left_out });
+            }
+            let data = graph::load(&db, per_table).await.map_err(|e| e.to_string())?;
+            Ok(Loaded::Records { data, offsets: None, left_out: 0 })
+        }
+    }
+
+    /// Shows what a load read, as `purpose` says.
+    fn show_loaded(&mut self, purpose: LoadPurpose, result: Result<Loaded, String>) {
+        let loaded = match result {
+            Ok(loaded) => loaded,
+            Err(e) if purpose == LoadPurpose::Refresh => {
+                warn!(error = %e, "auto refresh could not load the graph");
+                return;
+            }
+            Err(e) => {
+                error!(error = %e, "could not load the graph");
+                self.error = Some(e);
+                self.notice = None;
+                return;
+            }
+        };
+        match (purpose, loaded) {
+            (LoadPurpose::Refresh, Loaded::Overview(_)) => {}
+            (_, Loaded::Overview(data)) => self.show_overview(data, notice_of(purpose)),
+            (LoadPurpose::Refresh, Loaded::Records { data, offsets, left_out }) => {
+                self.note_window(offsets, left_out);
+                self.refresh(data);
+            }
+            (LoadPurpose::Page(window), Loaded::Records { data, offsets, left_out }) => {
+                // Paging past either end would leave an empty view with both
+                // paging buttons off: stay on the transactions shown instead.
+                let paging = matches!(window, graph::CantonWindow::Before(..) | graph::CantonWindow::After(..));
+                if paging && self.canton_offsets.is_some() && offsets.is_none() {
+                    self.notice = Some(match window {
+                        graph::CantonWindow::Before(..) => "There are no older transactions.".into(),
+                        _ => "There are no newer transactions yet.".into(),
+                    });
+                    return;
+                }
+                self.canton_window = window;
+                self.note_window(offsets, left_out);
+                self.show_records(data, notice_of(purpose));
+                self.relayout_canton();
+            }
+            (LoadPurpose::Reload { notice, fit }, Loaded::Records { data, offsets, left_out }) => {
+                self.note_window(offsets, left_out);
+                self.show_records(data, notice);
+                if fit {
+                    self.relayout_canton();
+                }
+            }
+        }
+    }
+
+    /// In the Canton view, remembers which offsets the loaded window covers.
+    fn note_window(&mut self, offsets: Option<(i64, i64)>, left_out: usize) {
+        if !self.canton() {
+            return;
+        }
+        self.canton_offsets = offsets;
+        self.canton_left_out = left_out;
+        if left_out > 0 {
+            warn!(left_out, "the Canton window had more records than max_result_records");
         }
     }
 
     /// Draws the tables as a graph: dots sized by their records, arrows for
     /// the relations between them.
-    fn show_overview(&mut self) {
-        let Some(db) = &self.db else { return };
-        match self.runtime.block_on(graph::overview(db)) {
-            Ok(data) => {
-                info!(tables = data.nodes.len(), "showing the table overview");
-                self.graph = Graph::new(data, None);
-                self.overview = true;
-                self.result_view = None;
-                self.error = None;
-                self.notice = None;
-            }
-            Err(e) => {
-                error!(error = %e, "could not load the table overview");
-                self.error = Some(e.to_string());
-                return;
-            }
-        }
+    fn show_overview(&mut self, data: GraphData, notice: Option<&str>) {
+        info!(tables = data.nodes.len(), "showing the table overview");
+        self.graph = Graph::new(data, None);
+        self.overview = true;
+        self.result_view = None;
+        self.error = None;
+        self.notice = notice.map(Into::into);
         self.camera = Camera::default();
         self.hover = None;
         self.selection = None;
@@ -955,49 +1103,18 @@ impl App {
         self.following = true;
     }
 
-    /// Reads the graph to draw: in the Canton view the current window of
-    /// transactions, otherwise every table's records up to the per-table limit.
-    fn fetch_graph(&mut self) -> Result<GraphData, String> {
-        let Some(db) = &self.db else { return Err("not connected".into()) };
-        let per_table = self.config.graph.max_records_per_table;
-        if self.canton() {
-            let loaded = self
-                .runtime
-                .block_on(graph::load_canton_window(db, self.canton_window, per_table, self.config.graph.max_result_records))
-                .map_err(|e| e.to_string())?;
-            self.canton_offsets = loaded.offsets;
-            self.canton_left_out = loaded.left_out;
-            if loaded.left_out > 0 {
-                warn!(left_out = loaded.left_out, "the Canton window had more records than max_result_records");
-            }
-            return Ok(loaded.data);
-        }
-        self.runtime.block_on(graph::load(db, per_table)).map_err(|e| e.to_string())
-    }
-
-    /// Draws every table's records, up to the per-table limit (in the Canton
-    /// view: the current window of transactions).
-    fn load_everything(&mut self) {
+    /// Draws the records read from the database in place of the graph;
+    /// records already on screen keep their place.
+    fn show_records(&mut self, data: GraphData, notice: Option<&str>) {
         self.overview = false;
-        if self.db.is_none() {
-            return;
-        }
         self.change_marker = None;
-        match self.fetch_graph() {
-            Ok(data) => {
-                self.graph = Graph::new(data, Some(&self.graph));
-                self.result_view = None;
-                if self.canton() {
-                    self.canton_layout_fitted();
-                }
-                self.error = None;
-                self.notice = Some("Reloaded".into());
-            }
-            Err(e) => {
-                error!(error = %e, "could not reload the graph");
-                self.error = Some(e.to_string());
-            }
+        self.graph = Graph::new(data, Some(&self.graph));
+        self.result_view = None;
+        if self.canton() {
+            self.canton_layout_fitted();
         }
+        self.error = None;
+        self.notice = notice.map(Into::into);
         self.hover = None;
         self.selection = None;
         self.menu = None;
@@ -1030,8 +1147,8 @@ impl App {
     /// auto refresh (see `graph::change_marker`).
     fn check_for_changes(&mut self) -> Task<Message> {
         let Some(db) = self.db.clone() else { return Task::none() };
-        // Skip a check while the user is moving things or one is still running.
-        if self.checking || self.dragging.is_some() || self.menu.is_some() || self.data_busy {
+        // Skip a check while the user is moving things, or one (or a load) is still running.
+        if self.checking || self.loading || self.switching || self.dragging.is_some() || self.menu.is_some() || self.data_busy {
             return Task::none();
         }
         self.checking = true;
@@ -1049,20 +1166,10 @@ impl App {
         )
     }
 
-    /// Loads the database again after auto refresh saw a change. Unlike
+    /// Shows the records auto refresh read after it saw a change. Unlike
     /// Reload, it keeps the view as it is: the camera, the selected record
     /// and the records the user hid.
-    fn refresh(&mut self) {
-        if self.db.is_none() {
-            return;
-        }
-        let data = match self.fetch_graph() {
-            Ok(data) => data,
-            Err(e) => {
-                warn!(error = %e, "auto refresh could not load the graph");
-                return;
-            }
-        };
+    fn refresh(&mut self, data: GraphData) {
         let id_of = |g: &Graph, i: usize| g.nodes.get(i).map(|n| n.id.clone());
         let selected = match self.selection {
             Some(Selection::Node(i)) => id_of(&self.graph, i),
@@ -1267,13 +1374,17 @@ impl App {
     /// Saves the settings and applies them straight away: switches the
     /// database, changes the log level and reloads the graph. Only a new log
     /// folder waits for a restart.
-    fn save_settings(&mut self) {
-        let Some(form) = &mut self.settings else { return };
+    fn save_settings(&mut self) -> Task<Message> {
+        // Wait for the database the last save named.
+        if self.switching {
+            return Task::none();
+        }
+        let Some(form) = &mut self.settings else { return Task::none() };
         let mut new = match form.to_config() {
             Ok(config) => config,
             Err(e) => {
                 form.message = Some(Err(e));
-                return;
+                return Task::none();
             }
         };
         // Settings the form doesn't edit may have changed while it was open
@@ -1289,41 +1400,26 @@ impl App {
         if let Err(e) = new.save_to(&self.files.config) {
             warn!(error = %e, "could not save settings");
             form.message = Some(Err(e.to_string()));
-            return;
+            return Task::none();
         }
         info!(?new, "settings saved");
 
         let old = self.config.clone();
-        let mut problems: Vec<String> = Vec::new();
-        let mut notes: Vec<&str> = Vec::new();
-
-        let database_changed = new.database != old.database || self.db.is_none();
-        if database_changed {
-            match self.switch_database(&new.database) {
-                Ok(()) => {
-                    self.config.database = new.database.clone();
-                    if let Queries::Failed(e) = &self.queries {
-                        problems.push(format!("Queries won't run: {e}"));
-                    }
-                }
-                Err(e) => problems.push(format!("Could not open the new database, still using the previous one: {e}")),
-            }
-        }
+        let mut report = SettingsReport::default();
 
         if new.logging.level != old.logging.level {
             match self.log.as_ref().map(|log| log.set_level(&new.logging.level)) {
                 Some(Ok(true)) | None => {}
-                Some(Ok(false)) => notes.push("RUST_LOG is set, so it still decides the log level."),
-                Some(Err(e)) => problems.push(e.to_string()),
+                Some(Ok(false)) => report.notes.push("RUST_LOG is set, so it still decides the log level."),
+                Some(Err(e)) => report.problems.push(e.to_string()),
             }
             self.config.logging.level = new.logging.level.clone();
         }
         if new.logging.directory != old.logging.directory {
-            notes.push("The new log folder is used after a restart.");
+            report.notes.push("The new log folder is used after a restart.");
         }
 
-
-        let graph_changed = new.graph != old.graph;
+        report.graph_changed = new.graph != old.graph;
         if let graph::CantonWindow::Latest(_) = self.canton_window {
             self.canton_window = graph::CantonWindow::Latest(new.graph.canton_transactions);
         }
@@ -1331,64 +1427,85 @@ impl App {
             self.canton_count = new.graph.canton_transactions.to_string();
         }
         self.config.graph = new.graph.clone();
-        if database_changed || graph_changed {
-            self.reload();
-        }
 
-        let message = if problems.is_empty() {
+        let database_changed = new.database != old.database || self.db.is_none();
+        if database_changed {
+            // Connecting can take a while (or time out): the window stays
+            // responsive meanwhile, and the rest is done when it's open.
+            self.switching = true;
+            if let Some(form) = &mut self.settings {
+                form.message = Some(Ok("Saved. Opening the database…".into()));
+            }
+            let config = new.database.clone();
+            let same_place = self.db.is_some() && config.same_place(&self.config.database);
+            let handle = self.runtime.spawn(open_database(self.db.clone(), same_place, config.clone()));
+            return Task::perform(
+                async move { handle.await.unwrap_or_else(|e| Err(format!("the task failed: {e}"))) },
+                move |result| Message::DatabaseOpened(config.clone(), result, report.clone()),
+            );
+        }
+        self.finish_settings(report)
+    }
+
+    /// Uses the database the saved settings name, once it's open: in place
+    /// of the current one, which is closed if it was a different connection.
+    fn database_opened(
+        &mut self,
+        config: DatabaseConfig,
+        result: Result<Opened, String>,
+        mut report: SettingsReport,
+    ) -> Task<Message> {
+        self.switching = false;
+        match result {
+            Ok(Opened { db, queries }) => {
+                if let Some(new) = db
+                    && let Some(old) = self.db.replace(new)
+                {
+                    self.runtime.spawn(async move {
+                        if let Err(e) = db::close(old).await {
+                            warn!(error = %e, "could not close the previous database");
+                        }
+                    });
+                }
+                if let Queries::Failed(e) = &queries {
+                    error!(error = %e, "could not connect the viewer user");
+                    report.problems.push(format!("Queries won't run: {e}"));
+                }
+                let old = std::mem::replace(&mut self.queries, queries);
+                self.runtime.spawn(old.close());
+                self.config.database = config;
+                // The query results and pending actions belong to the previous database.
+                // A write Claude Code asked for was meant for the previous database.
+                self.answer_write(false);
+                self.query_outcome = None;
+                self.query_drawable = false;
+                self.result_view = None;
+                self.pending_data_action = None;
+                // The graph is read again from the new database.
+                report.graph_changed = true;
+            }
+            Err(e) => report.problems.push(format!("Could not open the new database, still using the previous one: {e}")),
+        }
+        self.finish_settings(report)
+    }
+
+    /// Says in the settings form how saving went, and reads the graph again
+    /// if what it shows changed.
+    fn finish_settings(&mut self, report: SettingsReport) -> Task<Message> {
+        let message = if report.problems.is_empty() {
             let mut m = String::from("Saved and applied.");
-            for n in notes {
+            for n in report.notes {
                 m.push(' ');
                 m.push_str(n);
             }
             Ok(m)
         } else {
-            Err(format!("Saved, but: {}", problems.join(" ")))
+            Err(format!("Saved, but: {}", report.problems.join(" ")))
         };
         if let Some(form) = &mut self.settings {
             form.message = Some(message);
         }
-    }
-
-    /// Opens the database `config` describes in place of the current one.
-    /// A different server (or user) is connected to first, and the old
-    /// connection is closed only if that succeeds.
-    fn switch_database(&mut self, config: &DatabaseConfig) -> Result<(), String> {
-        // The same server and user keep the connection and only switch
-        // namespace and database.
-        let same_place = config.same_place(&self.config.database);
-        match &self.db {
-            Some(db) if same_place => {
-                self.runtime
-                    .block_on(async { db.use_ns(&config.namespace).use_db(&config.database).await })
-                    .map_err(|e| e.to_string())?;
-                info!(namespace = %config.namespace, database = %config.database, "switched namespace/database");
-            }
-            _ => {
-                let new = self.runtime.block_on(db::connect(config)).map_err(|e| e.to_string())?;
-                if let Some(old) = self.db.replace(new)
-                    && let Err(e) = self.runtime.block_on(db::close(old))
-                {
-                    warn!(error = %e, "could not close the previous database");
-                }
-            }
-        }
-        // The viewer signs in again: a database or namespace viewer belongs
-        // to one database or namespace.
-        let queries = self.runtime.block_on(Queries::connect(config));
-        if let Queries::Failed(e) = &queries {
-            error!(error = %e, "could not connect the viewer user");
-        }
-        let old = std::mem::replace(&mut self.queries, queries);
-        self.runtime.block_on(old.close());
-        // The query results and pending actions belong to the previous database.
-        // A write Claude Code asked for was meant for the previous database.
-        self.answer_write(false);
-        self.query_outcome = None;
-        self.query_drawable = false;
-        self.result_view = None;
-        self.pending_data_action = None;
-        Ok(())
+        if report.graph_changed { self.reload(RELOADED) } else { Task::none() }
     }
 
     /// Saves the editor's query under the typed name (replacing a saved
@@ -1521,6 +1638,9 @@ impl App {
             return;
         }
         let limit = self.config.graph.max_result_records;
+        // A load still running would replace the result when it arrives.
+        self.load_generation += 1;
+        self.loading = false;
         self.overview = false;
         self.graph = Graph::new(result.data, None);
         self.notice = (result.left_out > 0).then(|| {
@@ -1813,4 +1933,33 @@ fn parse_offset(text: &str, old: Option<i64>) -> Option<i64> {
     } else {
         text.parse().ok().or(old)
     }
+}
+
+/// What Reload and Load everything say when they're done.
+const RELOADED: LoadPurpose = LoadPurpose::Reload { notice: Some("Reloaded"), fit: false };
+
+/// The notice a load for `purpose` shows when it's done.
+fn notice_of(purpose: LoadPurpose) -> Option<&'static str> {
+    match purpose {
+        LoadPurpose::Reload { notice, .. } => notice,
+        LoadPurpose::Page(_) => Some("Reloaded"),
+        LoadPurpose::Refresh => None,
+    }
+}
+
+/// Opens the database `config` describes. The same server and user keep the
+/// `current` connection and only switch namespace and database; otherwise a
+/// new connection is made. The viewer signs in again: a database or
+/// namespace viewer belongs to one database or namespace.
+async fn open_database(current: Option<Database>, same_place: bool, config: DatabaseConfig) -> Result<Opened, String> {
+    let db = match current {
+        Some(db) if same_place => {
+            db.use_ns(&config.namespace).use_db(&config.database).await.map_err(|e| e.to_string())?;
+            info!(namespace = %config.namespace, database = %config.database, "switched namespace/database");
+            None
+        }
+        _ => Some(db::connect(&config).await.map_err(|e| e.to_string())?),
+    };
+    let queries = Queries::connect(&config).await;
+    Ok(Opened { db, queries })
 }
