@@ -646,6 +646,8 @@ impl App {
                     if let Err(e) = self.config.save_to(&self.files.config) {
                         warn!(error = %e, "could not save the setting");
                     }
+                    // The offsets belong to the other view's load.
+                    self.canton_offsets = None;
                     self.apply_visualization();
                     // The views load different records: a window of transactions, or every table.
                     return self.reload(LoadPurpose::Reload { notice: Some("Reloaded"), fit: true });
@@ -972,6 +974,10 @@ impl App {
     /// one still running.
     fn start_load(&mut self, purpose: LoadPurpose, what: LoadWhat) -> Task<Message> {
         let Some(db) = self.db.clone() else { return Task::none() };
+        // The graph is read again once the new database is open.
+        if self.switching {
+            return Task::none();
+        }
         self.load_generation += 1;
         let generation = self.load_generation;
         self.loading = true;
@@ -1351,7 +1357,8 @@ impl App {
     /// Runs a data action in the background, on our runtime (see `runtime`).
     fn run_data_action(&mut self, action: DataAction) -> Task<Message> {
         let Some(db) = self.db.clone() else { return Task::none() };
-        if self.data_busy {
+        // While the database is switched, `db` may already point at the new one.
+        if self.data_busy || self.switching {
             return Task::none();
         }
         self.data_busy = true;
@@ -1377,6 +1384,9 @@ impl App {
     fn save_settings(&mut self) -> Task<Message> {
         // Wait for the database the last save named.
         if self.switching {
+            if let Some(form) = &mut self.settings {
+                form.message = Some(Err("Still opening the database: save again when it's open.".into()));
+            }
             return Task::none();
         }
         let Some(form) = &mut self.settings else { return Task::none() };
@@ -1433,12 +1443,14 @@ impl App {
             // Connecting can take a while (or time out): the window stays
             // responsive meanwhile, and the rest is done when it's open.
             self.switching = true;
+            self.pending_data_action = None;
             if let Some(form) = &mut self.settings {
                 form.message = Some(Ok("Saved. Opening the database…".into()));
             }
             let config = new.database.clone();
             let same_place = self.db.is_some() && config.same_place(&self.config.database);
-            let handle = self.runtime.spawn(open_database(self.db.clone(), same_place, config.clone()));
+            let previous = self.config.database.clone();
+            let handle = self.runtime.spawn(open_database(self.db.clone(), same_place, config.clone(), previous));
             return Task::perform(
                 async move { handle.await.unwrap_or_else(|e| Err(format!("the task failed: {e}"))) },
                 move |result| Message::DatabaseOpened(config.clone(), result, report.clone()),
@@ -1563,7 +1575,7 @@ impl App {
     fn run_query(&mut self) -> Task<Message> {
         let sql = self.query_text.text();
         let Some(main) = &self.db else { return Task::none() };
-        if sql.trim().is_empty() || self.query_running {
+        if sql.trim().is_empty() || self.query_running || self.switching {
             return Task::none();
         }
         self.query_ran = sql.clone();
@@ -1602,6 +1614,9 @@ impl App {
     /// Adds a record's neighbours to the graph, placed around it.
     fn add_neighbours(&mut self, id: &str, result: ResultGraph) {
         let Some(centre) = self.graph.nodes.iter().find(|n| n.id == id).map(|n| n.pos) else { return };
+        // A load still running would replace the neighbours when it arrives.
+        self.load_generation += 1;
+        self.loading = false;
         let mut data = self.graph.to_data();
         let have: HashSet<String> = data.nodes.iter().map(|n| n.id.clone()).collect();
         let have_edges: HashSet<String> = data.edges.iter().map(|e| e.id.clone()).collect();
@@ -1797,7 +1812,7 @@ impl App {
         }
 
         let side = match &self.settings {
-            Some(form) => form.view(self.pending_data_action, self.data_busy, self.db.is_some()),
+            Some(form) => form.view(self.pending_data_action, self.data_busy || self.switching, self.db.is_some()),
             None => self.sidebar(),
         };
 
@@ -1951,10 +1966,22 @@ fn notice_of(purpose: LoadPurpose) -> Option<&'static str> {
 /// `current` connection and only switch namespace and database; otherwise a
 /// new connection is made. The viewer signs in again: a database or
 /// namespace viewer belongs to one database or namespace.
-async fn open_database(current: Option<Database>, same_place: bool, config: DatabaseConfig) -> Result<Opened, String> {
+/// If switching fails halfway, the connection goes back to `previous`'s
+/// namespace and database, which the app still uses.
+async fn open_database(
+    current: Option<Database>,
+    same_place: bool,
+    config: DatabaseConfig,
+    previous: DatabaseConfig,
+) -> Result<Opened, String> {
     let db = match current {
         Some(db) if same_place => {
-            db.use_ns(&config.namespace).use_db(&config.database).await.map_err(|e| e.to_string())?;
+            if let Err(e) = db.use_ns(&config.namespace).use_db(&config.database).await {
+                if let Err(back) = db.use_ns(&previous.namespace).use_db(&previous.database).await {
+                    error!(error = %back, "could not go back to the previous namespace/database");
+                }
+                return Err(e.to_string());
+            }
             info!(namespace = %config.namespace, database = %config.database, "switched namespace/database");
             None
         }
