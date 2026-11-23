@@ -1453,7 +1453,7 @@ dependencies = [
 [[package]]
 name = "canton-analytics-reader"
 version = "0.1.0"
-source = "git+https://github.com/gyorgybalazsi/canton-event-graph-syncer?branch=claude%2Fproject-thread-n2zx85#dba944598d232c6f55116301554e2887e641c351"
+source = "git+https://github.com/gyorgybalazsi/canton-event-graph-syncer?branch=main#ee21c78c1be9e1c117e8e1a8e2eb2f2b4e5886c2"
 dependencies = [
  "anyhow",
  "deltalake",

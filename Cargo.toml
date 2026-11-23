@@ -9,7 +9,7 @@ repository = "https://github.com/gyorgybalazsi/surrealdb-explorer"
 [dependencies]
 # The analytics dashboard (the `dashboard` feature). The reader lives with
 # the canton-analytics daemon in the syncer repo.
-canton-analytics-reader = { git = "https://github.com/gyorgybalazsi/canton-event-graph-syncer", branch = "claude/project-thread-n2zx85", optional = true }
+canton-analytics-reader = { git = "https://github.com/gyorgybalazsi/canton-event-graph-syncer", branch = "main", optional = true }
 iced_plot = { version = "0.5", optional = true }
 iced_table2 = { version = "0.14", optional = true }
 plotters = { version = "0.3", default-features = false, optional = true }
