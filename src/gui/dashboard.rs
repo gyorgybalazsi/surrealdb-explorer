@@ -463,7 +463,7 @@ impl Dashboard {
                 PanelKind::Stats => stats(frame),
                 PanelKind::Timeseries => match &self.plots[i] {
                     Some(plot) => plot.view().map(move |m| Msg::Plot(i, m)),
-                    None => empty("No time column to draw."),
+                    None => empty("No time or number column to draw."),
                 },
                 PanelKind::Bar => match &self.bars[i] {
                     Some(bars) => ChartWidget::new(bars).width(Fill).height(Fill).into(),
@@ -476,17 +476,13 @@ impl Dashboard {
             },
         };
         let title = text(title).size(13).font(Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT });
-        let title: Element<'a, Msg> = if p.panel.kind == PanelKind::Timeseries {
-            row![
-                title,
-                text("drag to pan · Ctrl/⌘ + scroll to zoom · double-click to show all").size(11).color(MUTED)
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center)
-            .into()
-        } else {
-            title.into()
-        };
+        // How long the panel's query took, so the dashboard's speed shows.
+        let mut note = format!("{} ms", p.millis);
+        if p.panel.kind == PanelKind::Timeseries {
+            note.push_str(" · drag to pan · Ctrl/⌘ + scroll to zoom · double-click to show all");
+        }
+        let title: Element<'a, Msg> =
+            row![title, text(note).size(11).color(MUTED)].spacing(10).align_y(Alignment::Center).into();
         container(column![title, container(content).width(Fill).height(Fill)].spacing(6))
             .padding(8)
             .width(Fill)
@@ -534,26 +530,38 @@ fn number(n: f64) -> String {
 }
 
 /// A time series: the first time column across, every number column as a
-/// line.
+/// line. Without a time column, the first number column (such as an offset)
+/// goes across instead.
 fn time_plot(p: &PanelData) -> Option<PlotWidget> {
     if p.panel.kind != PanelKind::Timeseries {
         return None;
     }
     let frame = p.frame.as_ref().ok()?;
-    let times = frame.columns.iter().find_map(|c| match &c.values {
-        Values::Time(v) => Some(v),
-        _ => None,
-    })?;
-    let xs: Vec<Option<f64>> = times.iter().map(|t| t.map(|us| us as f64 / 1e6)).collect();
+    let x_index = x_column_index(frame, p.panel.time_column.as_deref())?;
+    let x_column = &frame.columns[x_index];
+    let time_x = matches!(x_column.values, Values::Time(_)).then_some(x_index);
+    let xs: Vec<Option<f64>> = match &x_column.values {
+        Values::Time(v) => v.iter().map(|t| t.map(|us| us as f64 / 1e6)).collect(),
+        values => (0..frame.rows()).map(|r| values.number(r)).collect(),
+    };
     let (first, last) = xs.iter().flatten().fold((f64::MAX, f64::MIN), |(lo, hi), &x| (lo.min(x), hi.max(x)));
     if first > last {
         return None;
     }
-    let bucket = p.bucket_seconds.unwrap_or(3_600) as f64;
+    let time = time_x.is_some();
+    let bucket = if time {
+        p.bucket_seconds.unwrap_or(3_600) as f64
+    } else {
+        // The gap between neighbouring points, for the margins.
+        let mut sorted: Vec<f64> = xs.iter().flatten().copied().collect();
+        sorted.sort_by(f64::total_cmp);
+        sorted.windows(2).map(|w| w[1] - w[0]).filter(|d| *d > 0.0).fold(f64::MAX, f64::min).min(last - first).max(1.0)
+    };
     let mut builder = PlotWidgetBuilder::new();
     let mut top: f64 = 0.0;
     let mut lines = 0;
-    for (k, c) in frame.columns.iter().filter(|c| matches!(c.values, Values::Number(_))).enumerate() {
+    let lines_of = frame.columns.iter().enumerate().filter(|(i, c)| *i != x_index && matches!(c.values, Values::Number(_)));
+    for (k, (_, c)) in lines_of.enumerate() {
         let points: Vec<[f64; 2]> =
             (0..frame.rows()).filter_map(|r| Some([xs[r]?, c.values.number(r)?])).collect();
         top = points.iter().map(|p| p[1]).fold(top, f64::max);
@@ -568,16 +576,27 @@ fn time_plot(p: &PanelData) -> Option<PlotWidget> {
     if lines == 0 {
         return None;
     }
-    let step = tick_step(last - first);
+    let builder = builder.with_x_lim(first - bucket / 2.0, last + bucket / 2.0).with_y_lim(0.0, (top * 1.15).max(1.0));
+    let builder = if time {
+        let step = tick_step(last - first);
+        builder
+            .with_x_tick_producer(move |min, max| time_ticks(min, max, step))
+            .with_x_tick_formatter(move |tick| short_time_label(tick.value as i64, step))
+            .with_hover_highlight_provider(move |_, point| {
+                Some(format!("{}: {}", time_label(point.x as i64, bucket as i64), number(point.y)))
+            })
+    } else {
+        let step = round_step((last - first).max(1.0) / 5.0);
+        let name = x_column.name.clone();
+        builder
+            .with_x_tick_producer(move |min, max| time_ticks(min, max, step))
+            .with_x_tick_formatter(|tick| short_number(tick.value))
+            .with_hover_highlight_provider(move |_, point| {
+                Some(format!("{name} {}: {}", number(point.x), number(point.y)))
+            })
+    };
     let mut builder = builder
-        .with_x_lim(first - bucket / 2.0, last + bucket / 2.0)
-        .with_y_lim(0.0, (top * 1.15).max(1.0))
-        .with_x_tick_producer(move |min, max| time_ticks(min, max, step))
-        .with_x_tick_formatter(move |tick| short_time_label(tick.value as i64, step))
         .with_y_tick_formatter(|tick| number(tick.value + 0.0))
-        .with_hover_highlight_provider(move |_, point| {
-            Some(format!("{}: {}", time_label(point.x as i64, bucket as i64), number(point.y)))
-        })
         .with_tick_label_size(11.0)
         .with_controls(controls())
         .disable_controls_help();
@@ -597,6 +616,33 @@ fn controls() -> iced_plot::PlotControls {
     controls.unbind_scroll(Modifiers::NONE);
     controls.bind_scroll(Modifiers::LOGO, ScrollAction::Zoom);
     controls
+}
+
+/// The column across: the panel's `time_column` when the result has it,
+/// else the first time column, else the first number column.
+fn x_column_index(frame: &Frame, time_column: Option<&str>) -> Option<usize> {
+    let plottable = |c: &Column| matches!(c.values, Values::Time(_) | Values::Number(_));
+    time_column
+        .and_then(|name| frame.columns.iter().position(|c| c.name == name && plottable(c)))
+        .or_else(|| frame.columns.iter().position(|c| matches!(c.values, Values::Time(_))))
+        .or_else(|| frame.columns.iter().position(|c| matches!(c.values, Values::Number(_))))
+}
+
+/// The smallest 1, 2 or 5 times a power of ten that is at least `at_least`.
+fn round_step(at_least: f64) -> f64 {
+    let power = 10f64.powf(at_least.log10().floor());
+    [1.0, 2.0, 5.0, 10.0].into_iter().map(|m| m * power).find(|s| *s >= at_least).unwrap_or(10.0 * power)
+}
+
+/// `1.2M`, `350k`, `42`: short enough for an axis.
+fn short_number(n: f64) -> String {
+    let trim = |s: String| s.trim_end_matches('0').trim_end_matches('.').to_string();
+    match n.abs() {
+        a if a >= 1e9 => format!("{}G", trim(format!("{:.2}", n / 1e9))),
+        a if a >= 1e6 => format!("{}M", trim(format!("{:.2}", n / 1e6))),
+        a if a >= 1e3 => format!("{}k", trim(format!("{:.1}", n / 1e3))),
+        _ => number(n),
+    }
 }
 
 /// A tick spacing that gives at most about six ticks over `span` seconds.
@@ -921,6 +967,34 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn number_axes_get_round_steps_and_short_labels() {
+        assert_eq!(round_step(1_700_000.0), 2_000_000.0);
+        assert_eq!(round_step(0.3), 0.5);
+        assert_eq!(round_step(40.0), 50.0);
+        assert_eq!(short_number(2_000_000.0), "2M");
+        assert_eq!(short_number(1_250_000.0), "1.25M");
+        assert_eq!(short_number(350_000.0), "350k");
+        assert_eq!(short_number(42.0), "42");
+    }
+
+    #[test]
+    fn the_named_time_column_goes_across() {
+        let col = |name: &str, values| Column { name: name.into(), format: Format::Auto, values };
+        let frame = Frame {
+            columns: vec![
+                col("value", Values::Number(vec![Some(5.0)])),
+                col("offset", Values::Number(vec![Some(10_000.0)])),
+            ],
+        };
+        // The value comes first, but the panel says the offset goes across.
+        assert_eq!(x_column_index(&frame, Some("offset")), Some(1));
+        assert_eq!(x_column_index(&frame, None), Some(0));
+        let timed = Frame { columns: vec![col("n", Values::Number(vec![Some(1.0)])), col("at", Values::Time(vec![Some(0)]))] };
+        assert_eq!(x_column_index(&timed, None), Some(1));
+        assert_eq!(x_column_index(&Frame::default(), Some("offset")), None);
+    }
 
     #[test]
     fn a_replaced_request_is_ignored() {
