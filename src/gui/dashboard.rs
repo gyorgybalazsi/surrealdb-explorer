@@ -463,7 +463,7 @@ impl Dashboard {
                 PanelKind::Stats => stats(frame),
                 PanelKind::Timeseries => match &self.plots[i] {
                     Some(plot) => plot.view().map(move |m| Msg::Plot(i, m)),
-                    None => empty("No time column to draw."),
+                    None => empty("No time or number column to draw."),
                 },
                 PanelKind::Bar => match &self.bars[i] {
                     Some(bars) => ChartWidget::new(bars).width(Fill).height(Fill).into(),
@@ -537,9 +537,9 @@ fn time_plot(p: &PanelData) -> Option<PlotWidget> {
         return None;
     }
     let frame = p.frame.as_ref().ok()?;
-    let time_x = frame.columns.iter().position(|c| matches!(c.values, Values::Time(_)));
-    let x_index = time_x.or_else(|| frame.columns.iter().position(|c| matches!(c.values, Values::Number(_))))?;
+    let x_index = x_column_index(frame, p.panel.time_column.as_deref())?;
     let x_column = &frame.columns[x_index];
+    let time_x = matches!(x_column.values, Values::Time(_)).then_some(x_index);
     let xs: Vec<Option<f64>> = match &x_column.values {
         Values::Time(v) => v.iter().map(|t| t.map(|us| us as f64 / 1e6)).collect(),
         values => (0..frame.rows()).map(|r| values.number(r)).collect(),
@@ -616,6 +616,16 @@ fn controls() -> iced_plot::PlotControls {
     controls.unbind_scroll(Modifiers::NONE);
     controls.bind_scroll(Modifiers::LOGO, ScrollAction::Zoom);
     controls
+}
+
+/// The column across: the panel's `time_column` when the result has it,
+/// else the first time column, else the first number column.
+fn x_column_index(frame: &Frame, time_column: Option<&str>) -> Option<usize> {
+    let plottable = |c: &Column| matches!(c.values, Values::Time(_) | Values::Number(_));
+    time_column
+        .and_then(|name| frame.columns.iter().position(|c| c.name == name && plottable(c)))
+        .or_else(|| frame.columns.iter().position(|c| matches!(c.values, Values::Time(_))))
+        .or_else(|| frame.columns.iter().position(|c| matches!(c.values, Values::Number(_))))
 }
 
 /// The smallest 1, 2 or 5 times a power of ten that is at least `at_least`.
@@ -967,6 +977,23 @@ mod tests {
         assert_eq!(short_number(1_250_000.0), "1.25M");
         assert_eq!(short_number(350_000.0), "350k");
         assert_eq!(short_number(42.0), "42");
+    }
+
+    #[test]
+    fn the_named_time_column_goes_across() {
+        let col = |name: &str, values| Column { name: name.into(), format: Format::Auto, values };
+        let frame = Frame {
+            columns: vec![
+                col("value", Values::Number(vec![Some(5.0)])),
+                col("offset", Values::Number(vec![Some(10_000.0)])),
+            ],
+        };
+        // The value comes first, but the panel says the offset goes across.
+        assert_eq!(x_column_index(&frame, Some("offset")), Some(1));
+        assert_eq!(x_column_index(&frame, None), Some(0));
+        let timed = Frame { columns: vec![col("n", Values::Number(vec![Some(1.0)])), col("at", Values::Time(vec![Some(0)]))] };
+        assert_eq!(x_column_index(&timed, None), Some(1));
+        assert_eq!(x_column_index(&Frame::default(), Some("offset")), None);
     }
 
     #[test]
