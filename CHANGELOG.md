@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.0] - TBD
+## [0.1.0] - 2026-11-23
 
 The first release of SurrealDB Explorer: a desktop app (Rust, iced) for exploring
 a SurrealDB database as an interactive graph, with a dedicated view for Canton
@@ -26,6 +26,9 @@ ledger event graphs and a built-in MCP server for Claude Code.
 - Saved queries in the query panel, kept in `queries.toml`. An unreadable
   `queries.toml` is kept rather than overwritten.
 - Auto refresh: the graph redraws when another program changes the database.
+- Loading the graph, the table overview, Canton paging, auto refresh and
+  switching databases run in the background, so the window no longer freezes
+  while the database answers. Only the latest load's result is shown.
 
 #### Canton event graph view
 - A view for a SurrealDB copy of a Canton ledger: one column per transaction,
@@ -63,13 +66,17 @@ ledger event graphs and a built-in MCP server for Claude Code.
 - README, MIT OR Apache-2.0 dual license, security policy.
 
 #### Development
-- CI builds and tests every pull request; Dependabot updates crates and
-  GitHub Actions.
+- CI builds and tests every pull request, against the `surreal` 4.0.1 server
+  that matches the `surrealdb` crate; Dependabot updates crates and GitHub
+  Actions.
 - Integration tests against throwaway in-memory SurrealDB servers, built as one
   test binary, and the first UI tests with `iced_test` (including one that runs
   the app headless).
 
 ### Fixed
+- Auto refresh no longer misses a change made while a load was reading: each
+  load keeps the change marker it read just before the records, and a failed
+  refresh is retried at the next check.
 - Canton party ids are no longer taken for record ids.
 - A link to a party record counts as that party in the Canton view.
 - The read-only check no longer refuses a query that reads a field such as
