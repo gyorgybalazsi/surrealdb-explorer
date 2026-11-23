@@ -25,7 +25,8 @@ ledger event graphs and a built-in MCP server for Claude Code.
   resizable, and a *Clear* button empties it.
 - Saved queries in the query panel, kept in `queries.toml`. An unreadable
   `queries.toml` is kept rather than overwritten.
-- Auto refresh: the graph redraws when another program changes the database.
+- Auto refresh: the graph redraws when another program changes the database,
+  including a change made while the graph was loading.
 - Loading the graph, the table overview, Canton paging, auto refresh and
   switching databases run in the background, so the window no longer freezes
   while the database answers. Only the latest load's result is shown.
@@ -46,7 +47,9 @@ ledger event graphs and a built-in MCP server for Claude Code.
 #### Connections and security
 - Connects to a SurrealDB server (`ws://…`) as a root, namespace or database
   user.
-- The query panel only reads: user queries run as a read-only viewer user.
+- The query panel only reads. With a read-only viewer user set, queries run as
+  that user and the server enforces it; without one, the app checks each query
+  before running it.
 - *Erase database*, also available to a database user.
 - Settings apply straight away.
 
@@ -72,22 +75,6 @@ ledger event graphs and a built-in MCP server for Claude Code.
 - Integration tests against throwaway in-memory SurrealDB servers, built as one
   test binary, and the first UI tests with `iced_test` (including one that runs
   the app headless).
-
-### Fixed
-- Auto refresh no longer misses a change made while a load was reading: each
-  load keeps the change marker it read just before the records, and a failed
-  refresh is retried at the next check.
-- Canton party ids are no longer taken for record ids.
-- A link to a party record counts as that party in the Canton view.
-- The read-only check no longer refuses a query that reads a field such as
-  `create_arguments` as if it were a write.
-- The read-only check reports the statement that failed it.
-
-### Removed
-- Encryption at rest.
-- The database folder connection mode; the app connects to a server only.
-- The in-app Claude assistant (plain-English questions, chat history and
-  answer highlighting). Use the MCP server with Claude Code instead.
 
 [Unreleased]: https://github.com/gyorgybalazsi/surrealdb-explorer/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/gyorgybalazsi/surrealdb-explorer/releases/tag/v0.1.0
