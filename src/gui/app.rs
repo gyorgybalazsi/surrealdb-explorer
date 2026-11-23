@@ -76,8 +76,10 @@ enum LoadWhat {
 #[derive(Debug, Clone)]
 pub enum Loaded {
     Overview(GraphData),
-    /// `offsets` and `left_out` are only known in the Canton view.
-    Records { data: GraphData, offsets: Option<(i64, i64)>, left_out: usize },
+    /// `offsets` and `left_out` are only known in the Canton view. `marker`
+    /// is auto refresh's fingerprint of the database, read just before the
+    /// records (`None` if auto refresh is off or it couldn't be read).
+    Records { data: GraphData, offsets: Option<(i64, i64)>, left_out: usize, marker: Option<serde_json::Value> },
 }
 
 /// A database opened in the background after the settings changed.
@@ -627,9 +629,9 @@ impl App {
                     // A load started meanwhile reads the current state anyway.
                     Ok(_) if self.loading => {}
                     Ok(marker) if self.auto_refresh_running() => match &self.change_marker {
+                        // The refresh reads its own marker (see `fetch`).
                         Some(previous) if *previous != marker => {
                             debug!("the database changed; refreshing the graph");
-                            self.change_marker = Some(marker);
                             return self.start_load(LoadPurpose::Refresh, LoadWhat::Records);
                         }
                         Some(_) => {}
@@ -1006,6 +1008,7 @@ impl App {
         let canton = self.canton();
         let per_table = self.config.graph.max_records_per_table;
         let limit = self.config.graph.max_result_records;
+        let watch = self.config.graph.auto_refresh.then(|| self.watch());
         async move {
             let overview = match what {
                 LoadWhat::Overview => true,
@@ -1021,13 +1024,23 @@ impl App {
             if overview {
                 return graph::overview(&db).await.map(Loaded::Overview).map_err(|e| e.to_string());
             }
+            // Read before the records: a change made while they're read then
+            // shows up at the next check, rather than being taken as the baseline.
+            let marker = match watch {
+                Some(watch) => graph::change_marker(&db, watch)
+                    .await
+                    .inspect_err(|e| warn!(error = %e, "could not read the change marker"))
+                    .ok(),
+                None => None,
+            };
             if canton {
                 let loaded =
                     graph::load_canton_window(&db, window, per_table, limit).await.map_err(|e| e.to_string())?;
-                return Ok(Loaded::Records { data: loaded.data, offsets: loaded.offsets, left_out: loaded.left_out });
+                let (data, offsets, left_out) = (loaded.data, loaded.offsets, loaded.left_out);
+                return Ok(Loaded::Records { data, offsets, left_out, marker });
             }
             let data = graph::load(&db, per_table).await.map_err(|e| e.to_string())?;
-            Ok(Loaded::Records { data, offsets: None, left_out: 0 })
+            Ok(Loaded::Records { data, offsets: None, left_out: 0, marker })
         }
     }
 
@@ -1049,11 +1062,12 @@ impl App {
         match (purpose, loaded) {
             (LoadPurpose::Refresh, Loaded::Overview(_)) => {}
             (_, Loaded::Overview(data)) => self.show_overview(data, notice_of(purpose)),
-            (LoadPurpose::Refresh, Loaded::Records { data, offsets, left_out }) => {
+            (LoadPurpose::Refresh, Loaded::Records { data, offsets, left_out, marker }) => {
+                self.change_marker = marker;
                 self.note_window(offsets, left_out);
                 self.refresh(data);
             }
-            (LoadPurpose::Page(window), Loaded::Records { data, offsets, left_out }) => {
+            (LoadPurpose::Page(window), Loaded::Records { data, offsets, left_out, marker }) => {
                 // Paging past either end would leave an empty view with both
                 // paging buttons off: stay on the transactions shown instead.
                 let paging = matches!(window, graph::CantonWindow::Before(..) | graph::CantonWindow::After(..));
@@ -1066,12 +1080,12 @@ impl App {
                 }
                 self.canton_window = window;
                 self.note_window(offsets, left_out);
-                self.show_records(data, notice_of(purpose));
+                self.show_records(data, marker, notice_of(purpose));
                 self.relayout_canton();
             }
-            (LoadPurpose::Reload { notice, fit }, Loaded::Records { data, offsets, left_out }) => {
+            (LoadPurpose::Reload { notice, fit }, Loaded::Records { data, offsets, left_out, marker }) => {
                 self.note_window(offsets, left_out);
-                self.show_records(data, notice);
+                self.show_records(data, marker, notice);
                 if fit {
                     self.relayout_canton();
                 }
@@ -1111,9 +1125,10 @@ impl App {
 
     /// Draws the records read from the database in place of the graph;
     /// records already on screen keep their place.
-    fn show_records(&mut self, data: GraphData, notice: Option<&str>) {
+    /// `marker` is auto refresh's fingerprint of what was read.
+    fn show_records(&mut self, data: GraphData, marker: Option<serde_json::Value>, notice: Option<&str>) {
         self.overview = false;
-        self.change_marker = None;
+        self.change_marker = marker;
         self.graph = Graph::new(data, Some(&self.graph));
         self.result_view = None;
         if self.canton() {
@@ -1149,6 +1164,15 @@ impl App {
         self.config.graph.auto_refresh && self.db.is_some() && self.result_view.is_none() && !self.overview
     }
 
+    /// What auto refresh watches for changes in the current view.
+    fn watch(&self) -> graph::Watch {
+        if self.canton() {
+            graph::Watch::Canton
+        } else {
+            graph::Watch::Tables { per_table: self.config.graph.max_records_per_table }
+        }
+    }
+
     /// Reads a fingerprint of what the view shows in the background, for
     /// auto refresh (see `graph::change_marker`).
     fn check_for_changes(&mut self) -> Task<Message> {
@@ -1158,11 +1182,7 @@ impl App {
             return Task::none();
         }
         self.checking = true;
-        let watch = if self.canton() {
-            graph::Watch::Canton
-        } else {
-            graph::Watch::Tables { per_table: self.config.graph.max_records_per_table }
-        };
+        let watch = self.watch();
         let handle = self.runtime.spawn(async move {
             graph::change_marker(&db, watch).await.map_err(|e| e.to_string())
         });
