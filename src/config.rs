@@ -23,6 +23,7 @@ pub struct Config {
     pub graph: GraphConfig,
     pub logging: LoggingConfig,
     pub mcp: McpConfig,
+    pub analytics: AnalyticsConfig,
 }
 
 /// The app's MCP server, through which Claude Code reads the database and
@@ -44,7 +45,8 @@ impl Default for McpConfig {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DatabaseConfig {
-    /// Address of the SurrealDB server, e.g. `ws://127.0.0.1:8000`.
+    /// Address of the SurrealDB server, e.g. `ws://127.0.0.1:8000`. Empty:
+    /// no database, e.g. to use only the analytics dashboard.
     pub server: String,
     /// User to sign in to the server with.
     pub username: String,
@@ -212,6 +214,28 @@ pub struct LoggingConfig {
     pub directory: String,
 }
 
+/// The Dashboard, over the tables the canton-analytics daemon writes. Set
+/// on its own, so the explorer can read a local folder while testing and a
+/// bucket in production.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AnalyticsConfig {
+    /// Where the tables are: a folder (relative to the folder the app runs
+    /// from), or an `s3://`, `az://` or `gs://` URL.
+    pub location: String,
+    /// Object store options as `key=value`, e.g. `aws_region=eu-central-1`.
+    /// Credentials usually come from the cloud's environment variables.
+    pub storage_options: Vec<String>,
+    /// The table last shown.
+    pub selected: Option<String>,
+}
+
+impl Default for AnalyticsConfig {
+    fn default() -> Self {
+        AnalyticsConfig { location: "tables".into(), storage_options: Vec::new(), selected: None }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -219,6 +243,7 @@ impl Default for Config {
             graph: GraphConfig::default(),
             logging: LoggingConfig::default(),
             mcp: McpConfig::default(),
+            analytics: AnalyticsConfig::default(),
         }
     }
 }
@@ -308,8 +333,9 @@ impl Config {
         if d.namespace.trim().is_empty() || d.database.trim().is_empty() {
             return Err("namespace and database must not be empty".into());
         }
-        if d.server.trim().is_empty() || d.username.trim().is_empty() {
-            return Err("the server address and username must not be empty".into());
+        // An empty server address means no database (dashboard only).
+        if !d.server.trim().is_empty() && d.username.trim().is_empty() {
+            return Err("a server needs a username".into());
         }
         if self.graph.max_records_per_table == 0 || self.graph.max_result_records == 0 {
             return Err("the record limits must be at least 1".into());

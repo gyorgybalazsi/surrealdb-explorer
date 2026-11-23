@@ -6,6 +6,8 @@
 mod app;
 mod canton_draw;
 mod canvas;
+#[cfg(feature = "dashboard")]
+mod dashboard;
 pub(crate) mod icon;
 mod layout;
 mod model;
@@ -52,7 +54,11 @@ pub fn program(
     log: Option<LogControl>,
 ) -> iced::application::Application<impl iced::Program<State = App, Message = Message, Theme = iced::Theme>> {
     iced::application(
-        move || App::boot(config.clone(), files.clone(), startup_error.clone(), log.clone()),
+        move || {
+            let mut app = App::boot(config.clone(), files.clone(), startup_error.clone(), log.clone());
+            let task = app.first_task();
+            (app, task)
+        },
         App::update,
         App::view,
     )

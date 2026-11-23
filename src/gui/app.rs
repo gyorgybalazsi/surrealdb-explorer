@@ -201,6 +201,12 @@ pub enum Message {
     /// Empties the query editor.
     ClearQuery,
     RunQuery,
+    /// Shows the analytics dashboard (true) or the graph (false).
+    #[cfg(feature = "dashboard")]
+    ShowDashboard(bool),
+    /// Anything in the dashboard.
+    #[cfg(feature = "dashboard")]
+    Dashboard(crate::gui::dashboard::Msg),
     /// The query's outcome.
     QueryDone(QueryOutcome),
     /// The last query's result, read from the database as a graph.
@@ -294,6 +300,11 @@ pub struct App {
     pub(super) saved_queries_unreadable: bool,
     /// The last query result, shown as the graph.
     pub(super) result_view: Option<ResultView>,
+    /// The main area shows the analytics dashboard instead of the graph.
+    #[cfg(feature = "dashboard")]
+    pub(super) dashboard_open: bool,
+    #[cfg(feature = "dashboard")]
+    pub(super) dashboard: crate::gui::dashboard::Dashboard,
 
     /// Where the settings and the saved queries are kept.
     pub(super) files: Files,
@@ -360,11 +371,20 @@ impl App {
 
         let config_canton_transactions = config.graph.canton_transactions;
         let config_canton_columns = config.graph.canton_columns;
+        #[cfg(feature = "dashboard")]
+        let dashboard_settings = config.analytics.clone();
         // Before the window opens, so it waits for the database here: the
         // first graph is read below, once the app is set up.
-        let (db, connect_error) = match runtime.block_on(db::connect(&config.database)) {
-            Ok(db) => (Some(db), None),
-            Err(e) => (None, Some(format!("Could not open the database: {e}"))),
+        // An empty server address means no database, e.g. when the app is
+        // only used for the analytics dashboard.
+        let (db, connect_error) = if config.database.server.trim().is_empty() {
+            info!("no database server set, so the graph stays empty");
+            (None, None)
+        } else {
+            match runtime.block_on(db::connect(&config.database)) {
+                Ok(db) => (Some(db), None),
+                Err(e) => (None, Some(format!("Could not open the database: {e}"))),
+            }
         };
 
         let queries = runtime.block_on(Queries::connect(&config.database));
@@ -421,6 +441,14 @@ impl App {
             confirm_delete_query: false,
             saved_queries_unreadable: queries_error.is_some(),
             result_view: None,
+            #[cfg(feature = "dashboard")]
+            dashboard_open: false,
+            #[cfg(feature = "dashboard")]
+            dashboard: crate::gui::dashboard::Dashboard::new(
+                dashboard_settings.location,
+                dashboard_settings.storage_options,
+                dashboard_settings.selected,
+            ),
             pending_data_action: None,
             data_busy: false,
             canvas_size: iced::Size::new(880.0, 760.0),
@@ -447,6 +475,17 @@ impl App {
         }
         app.error = startup_error.or(connect_error).or(app.error.take()).or(queries_error);
         app
+    }
+
+    /// What to do once the window opens: with no database server set, the
+    /// app is only there for the dashboard, so it opens on it.
+    pub fn first_task(&mut self) -> Task<Message> {
+        #[cfg(feature = "dashboard")]
+        if self.config.database.server.trim().is_empty() {
+            self.dashboard_open = true;
+            return self.dashboard.reload().map(Message::Dashboard);
+        }
+        Task::none()
     }
 
     pub fn theme(&self) -> Theme {
@@ -477,7 +516,17 @@ impl App {
         } else {
             Subscription::none()
         };
-        Subscription::batch([frames, refresh, opened, panel_drag, Subscription::run(mcp_commands)])
+        // Reload the dashboard when the analytics runner commits.
+        #[cfg(feature = "dashboard")]
+        let dashboard = if self.dashboard_open {
+            iced::time::every(std::time::Duration::from_secs(2))
+                .map(|_| Message::Dashboard(crate::gui::dashboard::Msg::Check))
+        } else {
+            Subscription::none()
+        };
+        #[cfg(not(feature = "dashboard"))]
+        let dashboard = Subscription::none();
+        Subscription::batch([frames, refresh, opened, panel_drag, dashboard, Subscription::run(mcp_commands)])
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -794,6 +843,29 @@ impl App {
             },
             Message::PanelDragEnd => self.panel_drag = None,
             Message::RunQuery => return self.run_query(),
+            #[cfg(feature = "dashboard")]
+            Message::ShowDashboard(open) => {
+                let opening = open && !self.dashboard_open;
+                self.dashboard_open = open;
+                if opening {
+                    return self.dashboard.reload().map(Message::Dashboard);
+                }
+            }
+            #[cfg(feature = "dashboard")]
+            Message::Dashboard(m) => {
+                use crate::gui::dashboard::Msg;
+                let save = matches!(m, Msg::LocationSubmitted | Msg::Select(_));
+                let task = self.dashboard.update(m).map(Message::Dashboard);
+                // Remember where the tables are and which one was shown.
+                if save {
+                    self.config.analytics.location = self.dashboard.location.trim().to_string();
+                    self.config.analytics.selected = self.dashboard.selected.clone();
+                    if let Err(e) = self.config.save_to(&self.files.config) {
+                        warn!(error = %e, "could not save the dashboard's settings");
+                    }
+                }
+                return task;
+            }
             Message::PickSavedQuery(name) => {
                 if let Some(saved) = self.saved_queries.get(&name) {
                     self.query_text = text_editor::Content::with_text(&saved.query);
@@ -1842,11 +1914,34 @@ impl App {
             layers = layers.push(write_banner(query));
         }
 
-        let side = match &self.settings {
-            Some(form) => form.view(self.pending_data_action, self.data_busy || self.switching, self.db.is_some()),
-            None => self.sidebar(),
-        };
+        let settings = self.settings.as_ref().map(|form| {
+            form.view(self.pending_data_action, self.data_busy || self.switching, self.db.is_some())
+        });
 
+        // The dashboard takes the whole window: the graph's sidebar and query
+        // panel belong to the graph, so they are hidden while it is open.
+        #[cfg(feature = "dashboard")]
+        if self.dashboard_open {
+            let bar = row![
+                self.mode_switch(),
+                iced::widget::space::horizontal(),
+                button(text("Settings").size(12)).style(button::secondary).on_press(Message::OpenSettings),
+            ]
+            .padding([8, 10])
+            .align_y(iced::Alignment::Center);
+            let mut main = column![bar, rule::horizontal(1)];
+            // A pending write must be answered whichever view is open.
+            if let Some((query, _)) = &self.pending_write {
+                main = main.push(write_banner(query));
+            }
+            let main = main.push(self.dashboard.view().map(Message::Dashboard)).width(Fill);
+            return match settings {
+                Some(side) => row![main, rule::vertical(1), side].into(),
+                None => main.into(),
+            };
+        }
+
+        let side = settings.unwrap_or_else(|| self.sidebar());
         let main: Element<'_, Message> = layers.into();
 
         // The open query panel can be resized by dragging the line above it.

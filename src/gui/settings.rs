@@ -3,7 +3,7 @@
 use iced::widget::{Column, button, column, pick_list, row, scrollable, text, text_input};
 use iced::{Element, Fill};
 use crate::config::{
-    CONFIG_FILE, Config, DatabaseConfig, GraphConfig, UserLevel,
+    AnalyticsConfig, CONFIG_FILE, Config, DatabaseConfig, GraphConfig, UserLevel,
     LOG_LEVELS, LoggingConfig, McpConfig, Visualization,
 };
 
@@ -50,6 +50,8 @@ pub struct SettingsForm {
     pub log_directory: String,
     /// Not edited in the form; kept so saving doesn't reset it.
     pub mcp: McpConfig,
+    /// Not edited in the form (the Dashboard has the folder box).
+    pub analytics: AnalyticsConfig,
     pub refresh_seconds: String,
     pub overview_above: String,
     pub canton_transactions: String,
@@ -79,6 +81,7 @@ impl SettingsForm {
             log_level: c.logging.level.clone(),
             log_directory: c.logging.directory.clone(),
             mcp: c.mcp.clone(),
+            analytics: c.analytics.clone(),
             visualization: c.graph.visualization,
             auto_refresh: c.graph.auto_refresh,
             refresh_seconds: c.graph.refresh_seconds.to_string(),
@@ -152,6 +155,7 @@ impl SettingsForm {
                 directory: self.log_directory.trim().into(),
             },
             mcp: self.mcp.clone(),
+            analytics: self.analytics.clone(),
         };
         config.validate().map_err(|e| e.to_string())?;
         Ok(config)
