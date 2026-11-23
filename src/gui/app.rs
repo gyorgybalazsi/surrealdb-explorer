@@ -375,9 +375,16 @@ impl App {
         let dashboard_settings = config.analytics.clone();
         // Before the window opens, so it waits for the database here: the
         // first graph is read below, once the app is set up.
-        let (db, connect_error) = match runtime.block_on(db::connect(&config.database)) {
-            Ok(db) => (Some(db), None),
-            Err(e) => (None, Some(format!("Could not open the database: {e}"))),
+        // An empty server address means no database, e.g. when the app is
+        // only used for the analytics dashboard.
+        let (db, connect_error) = if config.database.server.trim().is_empty() {
+            info!("no database server set, so the graph stays empty");
+            (None, None)
+        } else {
+            match runtime.block_on(db::connect(&config.database)) {
+                Ok(db) => (Some(db), None),
+                Err(e) => (None, Some(format!("Could not open the database: {e}"))),
+            }
         };
 
         let queries = runtime.block_on(Queries::connect(&config.database));
@@ -468,6 +475,17 @@ impl App {
         }
         app.error = startup_error.or(connect_error).or(app.error.take()).or(queries_error);
         app
+    }
+
+    /// What to do once the window opens: with no database server set, the
+    /// app is only there for the dashboard, so it opens on it.
+    pub fn first_task(&mut self) -> Task<Message> {
+        #[cfg(feature = "dashboard")]
+        if self.config.database.server.trim().is_empty() {
+            self.dashboard_open = true;
+            return self.dashboard.reload().map(Message::Dashboard);
+        }
+        Task::none()
     }
 
     pub fn theme(&self) -> Theme {

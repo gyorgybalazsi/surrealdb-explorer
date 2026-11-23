@@ -45,7 +45,8 @@ impl Default for McpConfig {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DatabaseConfig {
-    /// Address of the SurrealDB server, e.g. `ws://127.0.0.1:8000`.
+    /// Address of the SurrealDB server, e.g. `ws://127.0.0.1:8000`. Empty:
+    /// no database, e.g. to use only the analytics dashboard.
     pub server: String,
     /// User to sign in to the server with.
     pub username: String,
@@ -332,8 +333,9 @@ impl Config {
         if d.namespace.trim().is_empty() || d.database.trim().is_empty() {
             return Err("namespace and database must not be empty".into());
         }
-        if d.server.trim().is_empty() || d.username.trim().is_empty() {
-            return Err("the server address and username must not be empty".into());
+        // An empty server address means no database (dashboard only).
+        if !d.server.trim().is_empty() && d.username.trim().is_empty() {
+            return Err("a server needs a username".into());
         }
         if self.graph.max_records_per_table == 0 || self.graph.max_result_records == 0 {
             return Err("the record limits must be at least 1".into());
