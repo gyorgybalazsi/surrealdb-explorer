@@ -49,7 +49,7 @@ jobs:
       - name: Install SurrealDB
         run: |
           mkdir -p "$HOME/.surrealdb"
-          curl -sSf https://install.surrealdb.com | sh -s -- --db --version 4.0.0 "$HOME/.surrealdb"
+          curl -sSf https://install.surrealdb.com | sh -s -- --db --version 4.0.1 "$HOME/.surrealdb"
           "$HOME/.surrealdb/surreal" db version
 
       - name: Test
