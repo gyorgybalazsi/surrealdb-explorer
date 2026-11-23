@@ -28,7 +28,7 @@ ledger event graphs and a built-in MCP server for Claude Code.
 - Auto refresh: the graph redraws when another program changes the database,
   including a change made while the graph was loading.
 - Loading the graph, the table overview, Canton paging, auto refresh and
-  switching databases run in the background, so the window no longer freezes
+  switching databases run in the background, so the window stays responsive
   while the database answers. Only the latest load's result is shown.
 
 #### Canton event graph view
