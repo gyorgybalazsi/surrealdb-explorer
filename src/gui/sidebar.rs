@@ -19,18 +19,19 @@ pub(super) const ERROR: Color = Color::from_rgb(0.7, 0.0, 0.0);
 pub(super) const SUCCESS: Color = Color::from_rgb(0.1, 0.5, 0.2);
 
 impl App {
-    /// Switches the main area between the graph and the analytics dashboard.
+    /// Tabs that switch the window between the graph and the analytics
+    /// dashboard; the open one is highlighted.
     #[cfg(feature = "dashboard")]
-    fn dashboard_button(&self) -> Element<'_, Message> {
-        button(text(if self.dashboard_open { "Graph" } else { "Dashboard" }).size(12))
-            .style(button::secondary)
-            .on_press(Message::ToggleDashboard)
+    pub(super) fn mode_switch(&self) -> Element<'_, Message> {
+        let tab = |label: &'static str, dashboard: bool| {
+            let open = self.dashboard_open == dashboard;
+            button(text(label).size(13))
+                .style(if open { button::primary } else { button::secondary })
+                .on_press(Message::ShowDashboard(dashboard))
+        };
+        row![tab("Graph", false), tab("Dashboard", true)]
+            .spacing(2)
             .into()
-    }
-
-    #[cfg(not(feature = "dashboard"))]
-    fn dashboard_button(&self) -> Element<'_, Message> {
-        iced::widget::Row::new().into()
     }
 
     pub(super) fn sidebar(&self) -> Element<'_, Message> {
@@ -38,11 +39,16 @@ impl App {
         let mut col = Column::new().spacing(6).padding(16).width(SIDEBAR_WIDTH);
 
         col = col.push(
-            row![text("SurrealDB Explorer").size(18).width(Fill), self.dashboard_button()]
-                .push(button(text("Settings").size(12)).style(button::secondary).on_press(Message::OpenSettings))
-                .spacing(6)
-                .align_y(iced::Alignment::Center),
+            row![
+                text("SurrealDB Explorer").size(18).width(Fill),
+                button(text("Settings").size(12)).style(button::secondary).on_press(Message::OpenSettings),
+            ]
+            .align_y(iced::Alignment::Center),
         );
+        #[cfg(feature = "dashboard")]
+        {
+            col = col.push(self.mode_switch());
+        }
         let summary = if self.overview {
             let records: i64 = g.nodes.iter().filter_map(|n| n.data["records"].as_i64()).sum();
             format!("Table overview: {} with {records} records", plural(g.nodes.len(), "table"))

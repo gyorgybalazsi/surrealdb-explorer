@@ -201,9 +201,9 @@ pub enum Message {
     /// Empties the query editor.
     ClearQuery,
     RunQuery,
-    /// Shows the analytics dashboard in the main area, or the graph again.
+    /// Shows the analytics dashboard (true) or the graph (false).
     #[cfg(feature = "dashboard")]
-    ToggleDashboard,
+    ShowDashboard(bool),
     /// Anything in the dashboard.
     #[cfg(feature = "dashboard")]
     Dashboard(crate::gui::dashboard::Msg),
@@ -844,9 +844,10 @@ impl App {
             Message::PanelDragEnd => self.panel_drag = None,
             Message::RunQuery => return self.run_query(),
             #[cfg(feature = "dashboard")]
-            Message::ToggleDashboard => {
-                self.dashboard_open = !self.dashboard_open;
-                if self.dashboard_open {
+            Message::ShowDashboard(open) => {
+                let opening = open && !self.dashboard_open;
+                self.dashboard_open = open;
+                if opening {
                     return self.dashboard.reload().map(Message::Dashboard);
                 }
             }
@@ -1913,22 +1914,34 @@ impl App {
             layers = layers.push(write_banner(query));
         }
 
-        let side = match &self.settings {
-            Some(form) => form.view(self.pending_data_action, self.data_busy || self.switching, self.db.is_some()),
-            None => self.sidebar(),
-        };
+        let settings = self.settings.as_ref().map(|form| {
+            form.view(self.pending_data_action, self.data_busy || self.switching, self.db.is_some())
+        });
 
+        // The dashboard takes the whole window: the graph's sidebar and query
+        // panel belong to the graph, so they are hidden while it is open.
         #[cfg(feature = "dashboard")]
-        let main: Element<'_, Message> = if self.dashboard_open {
+        if self.dashboard_open {
+            let bar = row![
+                self.mode_switch(),
+                iced::widget::space::horizontal(),
+                button(text("Settings").size(12)).style(button::secondary).on_press(Message::OpenSettings),
+            ]
+            .padding([8, 10])
+            .align_y(iced::Alignment::Center);
+            let mut main = column![bar, rule::horizontal(1)];
             // A pending write must be answered whichever view is open.
-            match &self.pending_write {
-                Some((query, _)) => column![write_banner(query), self.dashboard.view().map(Message::Dashboard)].into(),
-                None => self.dashboard.view().map(Message::Dashboard),
+            if let Some((query, _)) = &self.pending_write {
+                main = main.push(write_banner(query));
             }
-        } else {
-            layers.into()
-        };
-        #[cfg(not(feature = "dashboard"))]
+            let main = main.push(self.dashboard.view().map(Message::Dashboard)).width(Fill);
+            return match settings {
+                Some(side) => row![main, rule::vertical(1), side].into(),
+                None => main.into(),
+            };
+        }
+
+        let side = settings.unwrap_or_else(|| self.sidebar());
         let main: Element<'_, Message> = layers.into();
 
         // The open query panel can be resized by dragging the line above it.
