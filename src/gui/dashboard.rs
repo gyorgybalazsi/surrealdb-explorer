@@ -476,6 +476,17 @@ impl Dashboard {
             },
         };
         let title = text(title).size(13).font(Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT });
+        let title: Element<'a, Msg> = if p.panel.kind == PanelKind::Timeseries {
+            row![
+                title,
+                text("drag to pan · Ctrl/⌘ + scroll to zoom · double-click to show all").size(11).color(MUTED)
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into()
+        } else {
+            title.into()
+        };
         container(column![title, container(content).width(Fill).height(Fill)].spacing(6))
             .padding(8)
             .width(Fill)
@@ -568,11 +579,24 @@ fn time_plot(p: &PanelData) -> Option<PlotWidget> {
             Some(format!("{}: {}", time_label(point.x as i64, bucket as i64), number(point.y)))
         })
         .with_tick_label_size(11.0)
+        .with_controls(controls())
         .disable_controls_help();
     if lines == 1 {
         builder = builder.disable_legend();
     }
     builder.build().ok()
+}
+
+/// Charts sit in a scrolling page, so the scroll wheel scrolls the page.
+/// Ctrl (or Cmd) + scroll zooms, dragging pans, right-dragging zooms to a
+/// box, and a double click shows all the data again.
+fn controls() -> iced_plot::PlotControls {
+    use iced::keyboard::Modifiers;
+    use iced_plot::ScrollAction;
+    let mut controls = iced_plot::PlotControls::default();
+    controls.unbind_scroll(Modifiers::NONE);
+    controls.bind_scroll(Modifiers::LOGO, ScrollAction::Zoom);
+    controls
 }
 
 /// A tick spacing that gives at most about six ticks over `span` seconds.
