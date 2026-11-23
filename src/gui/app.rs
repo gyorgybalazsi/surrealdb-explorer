@@ -173,7 +173,9 @@ pub enum Message {
     /// Time for auto refresh to look for changes in the database.
     CheckForChanges,
     /// A fingerprint of what the view shows, to compare with the last one.
-    Checked(Result<serde_json::Value, String>),
+    /// Carries the number of the latest load when the check started: a
+    /// load that finished since then has a newer marker.
+    Checked(u64, Result<serde_json::Value, String>),
     /// Switches how the graph is drawn (and remembers it).
     SetVisualization(Visualization),
     /// Fits the whole graph in view.
@@ -621,17 +623,22 @@ impl App {
                 }
             }
             Message::CheckForChanges => return self.check_for_changes(),
-            Message::Checked(result) => {
+            Message::Checked(generation, result) => {
                 self.checking = false;
                 match result {
+                    // A load finished meanwhile: its marker is newer than this one.
+                    Ok(_) if generation != self.load_generation => {}
                     // Only act on the answer if auto refresh is still wanted:
                     // a query result may have been drawn meanwhile.
                     // A load started meanwhile reads the current state anyway.
                     Ok(_) if self.loading => {}
                     Ok(marker) if self.auto_refresh_running() => match &self.change_marker {
-                        // The refresh reads its own marker (see `fetch`).
+                        // The refresh keeps the marker it reads with the records
+                        // (see `fetch`). If it fails, this one stays, so a
+                        // failing refresh isn't started again at every check.
                         Some(previous) if *previous != marker => {
                             debug!("the database changed; refreshing the graph");
+                            self.change_marker = Some(marker);
                             return self.start_load(LoadPurpose::Refresh, LoadWhat::Records);
                         }
                         Some(_) => {}
@@ -1029,7 +1036,7 @@ impl App {
             let marker = match watch {
                 Some(watch) => graph::change_marker(&db, watch)
                     .await
-                    .inspect_err(|e| warn!(error = %e, "could not read the change marker"))
+                    .inspect_err(|e| debug!(error = %e, "could not read the change marker"))
                     .ok(),
                 None => None,
             };
@@ -1063,7 +1070,10 @@ impl App {
             (LoadPurpose::Refresh, Loaded::Overview(_)) => {}
             (_, Loaded::Overview(data)) => self.show_overview(data, notice_of(purpose)),
             (LoadPurpose::Refresh, Loaded::Records { data, offsets, left_out, marker }) => {
-                self.change_marker = marker;
+                // Read with the records, so newer than the check's.
+                if marker.is_some() {
+                    self.change_marker = marker;
+                }
                 self.note_window(offsets, left_out);
                 self.refresh(data);
             }
@@ -1182,13 +1192,14 @@ impl App {
             return Task::none();
         }
         self.checking = true;
+        let generation = self.load_generation;
         let watch = self.watch();
         let handle = self.runtime.spawn(async move {
             graph::change_marker(&db, watch).await.map_err(|e| e.to_string())
         });
         Task::perform(
             async move { handle.await.unwrap_or_else(|e| Err(format!("the task failed: {e}"))) },
-            Message::Checked,
+            move |result| Message::Checked(generation, result),
         )
     }
 
