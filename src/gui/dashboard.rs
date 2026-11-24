@@ -38,6 +38,11 @@ const SERIES: [Color; 4] = [
     Color::from_rgb(0.55, 0.30, 0.70),
 ];
 const OK: Color = Color::from_rgb(0.20, 0.60, 0.35);
+/// Chart gridlines: a few faint ones, no minor lines (as sniffnet does).
+const GRID: RGBColor = RGBColor(232, 232, 232);
+/// Chart axes, darker than the grid, so bars stand on a clear baseline.
+const AXIS: RGBColor = RGBColor(140, 140, 140);
+const CHART_TEXT: RGBColor = RGBColor(90, 90, 90);
 const WARN: Color = Color::from_rgb(0.80, 0.55, 0.10);
 
 /// An open table, shared with the background tasks that refresh it.
@@ -855,7 +860,9 @@ fn time_plot(p: &PanelData) -> Option<PlotWidget> {
             })
     };
     let mut builder = builder
-        .with_y_tick_formatter(|tick| number(tick.value + 0.0))
+        // About five ticks up the side, as on the column charts.
+        .with_y_tick_producer(|min, max| axis_ticks(min, max, round_step((max - min) / 5.0)))
+        .with_y_tick_formatter(|tick| short_number(tick.value + 0.0))
         .with_tick_label_size(11.0)
         .with_controls(controls())
         .disable_controls_help();
@@ -1011,7 +1018,8 @@ impl Chart<Msg> for &Bars {
         else {
             return;
         };
-        let label_style = ("sans-serif", 12).into_font().color(&RGBColor(90, 90, 90));
+        // `sans-serif` is iced's default family, the font the rest of the window uses.
+        let label_style = ("sans-serif", 12).into_font().color(&CHART_TEXT);
         let _ = chart
             .configure_mesh()
             .disable_y_mesh()
@@ -1022,11 +1030,16 @@ impl Chart<Msg> for &Bars {
                 }
                 SegmentValue::Last => String::new(),
             })
+            .x_labels(5)
+            .x_label_formatter(&|v| short_number(*v))
             .x_desc(self.axis.clone())
             .label_style(label_style.clone())
             .axis_desc_style(label_style)
-            .light_line_style(RGBColor(235, 235, 235))
-            .bold_line_style(RGBColor(220, 220, 220))
+            // No minor lines. Not `max_light_lines(0)`: on a segmented
+            // (whole-number) axis plotters then loops until it overflows.
+            .light_line_style(TRANSPARENT)
+            .bold_line_style(GRID)
+            .axis_style(AXIS.stroke_width(1))
             .draw();
         let bar = RGBColor(46, 107, 199);
         let _ = chart.draw_series(self.values.iter().enumerate().filter_map(|(i, v)| {
@@ -1102,9 +1115,10 @@ impl Chart<Msg> for &Columns {
         else {
             return;
         };
-        let label_style = ("sans-serif", 12).into_font().color(&RGBColor(90, 90, 90));
-        // Week numbers are short, so more of them fit than dates.
-        let labels = if self.weeks() { 27 } else { 14 };
+        // `sans-serif` is iced's default family, the font the rest of the window uses.
+        let label_style = ("sans-serif", 12).into_font().color(&CHART_TEXT);
+        // Few labels read calmer; week numbers are short, so a few more fit.
+        let labels = if self.weeks() { 12 } else { 8 };
         let _ = chart
             .configure_mesh()
             .disable_x_mesh()
@@ -1115,11 +1129,15 @@ impl Chart<Msg> for &Columns {
             })
             // No axis name: the panel's title already says what is counted,
             // and a side label crowds the numbers in a narrow panel.
+            .y_labels(5)
             .y_label_formatter(&|v| short_number(*v))
             .label_style(label_style.clone())
             .axis_desc_style(label_style)
-            .light_line_style(RGBColor(235, 235, 235))
-            .bold_line_style(RGBColor(220, 220, 220))
+            // No minor lines. Not `max_light_lines(0)`: on a segmented
+            // (whole-number) axis plotters then loops until it overflows.
+            .light_line_style(TRANSPARENT)
+            .bold_line_style(GRID)
+            .axis_style(AXIS.stroke_width(1))
             .draw();
         let bar = RGBColor(46, 107, 199);
         let gap = if n > 120 { 0 } else { 2 };
