@@ -10,6 +10,7 @@ pub mod graph;
 pub mod gui;
 pub mod logging;
 pub mod mcp;
+pub mod memory;
 pub mod query;
 pub mod saved_queries;
 pub mod schema;

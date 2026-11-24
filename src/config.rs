@@ -24,6 +24,7 @@ pub struct Config {
     pub logging: LoggingConfig,
     pub mcp: McpConfig,
     pub analytics: AnalyticsConfig,
+    pub memory: MemoryConfig,
 }
 
 /// The app's MCP server, through which Claude Code reads the database and
@@ -34,6 +35,30 @@ pub struct McpConfig {
     pub enabled: bool,
     /// Served at `http://127.0.0.1:<port>/mcp`. Changes apply at the next start.
     pub port: u16,
+}
+
+/// The watch on the app's own memory use (see `memory.rs`). Sizes are
+/// resident memory in MB; 0 switches that check off. Changes apply at the
+/// next start.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryConfig {
+    /// How often memory is sampled; 0 switches the watch off.
+    pub check_seconds: u64,
+    /// Warn, in the log and in the window, above this size.
+    pub warn_above_mb: u64,
+    /// Warn when memory grows by this much within a minute.
+    pub growth_warn_mb: u64,
+    /// Stop the app above this size, before the computer runs out of
+    /// memory; 0 never stops. Left out, it is half the computer's memory, up
+    /// to 8 GB.
+    pub stop_above_mb: Option<u64>,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        MemoryConfig { check_seconds: 5, warn_above_mb: 2048, growth_warn_mb: 1024, stop_above_mb: None }
+    }
 }
 
 impl Default for McpConfig {
@@ -244,6 +269,7 @@ impl Default for Config {
             logging: LoggingConfig::default(),
             mcp: McpConfig::default(),
             analytics: AnalyticsConfig::default(),
+            memory: MemoryConfig::default(),
         }
     }
 }
