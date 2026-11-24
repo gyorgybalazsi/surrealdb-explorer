@@ -610,22 +610,22 @@ fn time_plot(p: &PanelData) -> Option<PlotWidget> {
     }
     let builder = builder.with_x_lim(first - bucket / 2.0, last + bucket / 2.0).with_y_lim(0.0, (top * 1.15).max(1.0));
     let builder = if time {
-        let step = tick_step(last - first);
+        // Ticks follow the visible range (it changes as the user zooms), not
+        // the data's: a step fixed from the data gave one tick per minute over
+        // a zoomed-out view, and a label widget for each.
         builder
-            .with_x_tick_producer(move |min, max| time_ticks(min, max, step))
-            .with_x_tick_formatter(move |tick| short_time_label(tick.value as i64, step))
+            .with_x_tick_producer(|min, max| axis_ticks(min, max, tick_step(max - min)))
+            .with_x_tick_formatter(|tick| short_time_label(tick.value as i64, tick.step_size))
             .with_hover_highlight_provider(move |_, point| {
                 Some(format!("{}: {}", time_label(point.x as i64, bucket as i64), number(point.y)))
             })
     } else {
-        let mut step = round_step((last - first).max(1.0) / 5.0);
         // Offsets and other counts are whole numbers: no ticks between them.
-        if xs.iter().flatten().all(|x| x.fract() == 0.0) {
-            step = step.max(1.0);
-        }
+        let whole = xs.iter().flatten().all(|x| x.fract() == 0.0);
+        let floor = if whole { 1.0 } else { 0.0 };
         let name = x_column.name.clone();
         builder
-            .with_x_tick_producer(move |min, max| time_ticks(min, max, step))
+            .with_x_tick_producer(move |min, max| axis_ticks(min, max, round_step((max - min) / 5.0).max(floor)))
             .with_x_tick_formatter(|tick| short_number(tick.value))
             .with_hover_highlight_provider(move |_, point| {
                 Some(format!("{name} {}: {}", number(point.x), number(point.y)))
@@ -690,17 +690,29 @@ fn tick_step(span: f64) -> f64 {
     STEPS.into_iter().find(|s| span / s <= 6.0).unwrap_or((span / 6.0 / 86_400.0).ceil() * 86_400.0)
 }
 
-fn time_ticks(min: f64, max: f64, step: f64) -> Vec<iced_plot::Tick> {
-    if !(max > min) {
+/// The most ticks an axis gets, whatever the range and step. Each tick is a
+/// label widget built on every redraw, so a runaway count eats memory fast.
+const MAX_TICKS: usize = 50;
+
+/// Ticks `step` apart over `min..=max`. A step too small for the range is
+/// doubled until at most [`MAX_TICKS`] fit; a range or step that isn't a
+/// positive finite number gives none.
+fn axis_ticks(min: f64, max: f64, step: f64) -> Vec<iced_plot::Tick> {
+    if !(min.is_finite() && max.is_finite() && max > min && step.is_finite() && step > 0.0) {
         return Vec::new();
     }
-    let mut t = (min / step).ceil() * step;
-    let mut ticks = Vec::new();
-    while t <= max {
-        ticks.push(iced_plot::Tick { value: t, step_size: step, line_type: iced_plot::TickWeight::Major });
-        t += step;
+    let mut step = step;
+    while (max - min) / step > MAX_TICKS as f64 {
+        step *= 2.0;
     }
-    ticks
+    let first = (min / step).ceil();
+    // Counted rather than added up, so a step below the float resolution of
+    // `min` can't stall the loop.
+    (0..=MAX_TICKS)
+        .map(|i| (first + i as f64) * step)
+        .take_while(|&value| value <= max)
+        .map(|value| iced_plot::Tick { value, step_size: step, line_type: iced_plot::TickWeight::Major })
+        .collect()
 }
 
 /// `11-02 09:00` for ticks under a day apart, `2026-11-02` otherwise (UTC).
@@ -1099,5 +1111,25 @@ mod tests {
         assert_eq!(short_time_label(45_296, 5.0), "12:34:56");
         assert_eq!(bucket_name(1), "second");
         assert!(tick_step(86_400.0) <= 21_600.0);
+    }
+
+    #[test]
+    fn axis_tick_counts_stay_small() {
+        // A single day of points on a week-wide view, once a crash.
+        assert!(axis_ticks(0.0, 604_800.0, tick_step(604_800.0)).len() <= 7);
+        // A step far too small for the range is widened.
+        let ticks = axis_ticks(0.0, 604_800.0, 1.0);
+        assert!(!ticks.is_empty() && ticks.len() <= MAX_TICKS + 1);
+        // A range far from zero with a step below its float resolution.
+        assert!(axis_ticks(1.8e18, 1.8e18 + 1e6, 1e-3).len() <= MAX_TICKS + 1);
+        // Zoomed out to the extremes.
+        assert!(axis_ticks(-1e300, 1e300, round_step(2e300 / 5.0)).len() <= MAX_TICKS + 1);
+        // Nothing to tick.
+        assert!(axis_ticks(5.0, 5.0, 1.0).is_empty());
+        assert!(axis_ticks(0.0, 10.0, 0.0).is_empty());
+        assert!(axis_ticks(0.0, 10.0, round_step(0.0)).is_empty());
+        assert!(axis_ticks(f64::NAN, 10.0, 1.0).is_empty());
+        let ticks = axis_ticks(0.0, 10.0, 2.0);
+        assert_eq!(ticks.iter().map(|t| t.value).collect::<Vec<_>>(), [0.0, 2.0, 4.0, 6.0, 8.0, 10.0]);
     }
 }
