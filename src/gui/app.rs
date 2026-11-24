@@ -125,8 +125,8 @@ pub enum Message {
     WindowOpened,
     /// An animation frame while the layout is moving.
     Tick,
-    /// Redraw, so a memory warning shows up even while nothing else changes.
-    MemoryCheck,
+    /// The memory watch's warning changed (`None`: it cleared).
+    MemoryAlarm(Option<String>),
     Hover(Option<usize>),
     Select(Option<Selection>),
     DragNode(usize, Vector),
@@ -271,6 +271,8 @@ pub struct App {
     pub(super) dragging: Option<usize>,
     pub(super) error: Option<String>,
     pub(super) notice: Option<String>,
+    /// The memory watch's warning, shown until it clears.
+    pub(super) memory_alarm: Option<String>,
 
     /// The settings being edited, while the settings view is open.
     pub(super) settings: Option<SettingsForm>,
@@ -428,6 +430,7 @@ impl App {
             dragging: None,
             error: None,
             notice: None,
+            memory_alarm: None,
             settings: None,
             query_open: false,
             query_text: text_editor::Content::with_text("SELECT * FROM person;"),
@@ -528,7 +531,7 @@ impl App {
         };
         #[cfg(not(feature = "dashboard"))]
         let dashboard = Subscription::none();
-        let memory = iced::time::every(std::time::Duration::from_secs(10)).map(|_| Message::MemoryCheck);
+        let memory = Subscription::run(memory_alarms);
         Subscription::batch([frames, refresh, opened, panel_drag, dashboard, memory, Subscription::run(mcp_commands)])
     }
 
@@ -543,7 +546,7 @@ impl App {
             Message::WindowOpened => {
                 crate::gui::icon::set_dock_icon();
             }
-            Message::MemoryCheck => {}
+            Message::MemoryAlarm(alarm) => self.memory_alarm = alarm,
             Message::Tick => {
                 self.layout.step(&mut self.graph, self.dragging);
                 self.follow_layout();
@@ -1938,7 +1941,7 @@ impl App {
             if let Some((query, _)) = &self.pending_write {
                 main = main.push(write_banner(query));
             }
-            if let Some(alarm) = crate::memory::alarm() {
+            if let Some(alarm) = &self.memory_alarm {
                 main = main.push(container(text(alarm).size(12).color(crate::gui::sidebar::ERROR)).padding([4, 10]));
             }
             let main = main.push(self.dashboard.view().map(Message::Dashboard)).width(Fill);
@@ -2033,6 +2036,11 @@ fn start_mcp(runtime: &tokio::runtime::Runtime, port: u16) -> mcp::Shared {
 }
 
 /// The MCP server's commands, as messages for the window.
+fn memory_alarms() -> impl iced::futures::Stream<Item = Message> {
+    use iced::futures::StreamExt;
+    crate::memory::alarms().map(Message::MemoryAlarm)
+}
+
 fn mcp_commands() -> impl iced::futures::Stream<Item = Message> {
     let commands = MCP_COMMANDS.get().and_then(|cell| cell.lock().ok()?.take());
     iced::futures::stream::unfold(commands, |commands| async move {

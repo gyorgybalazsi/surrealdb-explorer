@@ -64,7 +64,7 @@ impl App {
         if let Some(error) = &self.error {
             col = col.push(text(error).size(12).color(ERROR));
         }
-        if let Some(alarm) = crate::memory::alarm() {
+        if let Some(alarm) = &self.memory_alarm {
             col = col.push(text(alarm).size(12).color(ERROR));
         }
         let mcp_error = self.mcp.as_ref().and_then(|m| m.window.lock().ok()?.server_error.clone());

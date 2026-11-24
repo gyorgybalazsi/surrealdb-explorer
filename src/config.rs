@@ -49,13 +49,15 @@ pub struct MemoryConfig {
     pub warn_above_mb: u64,
     /// Warn when memory grows by this much within a minute.
     pub growth_warn_mb: u64,
-    /// Stop the app above this size, before the computer runs out of memory.
-    pub stop_above_mb: u64,
+    /// Stop the app above this size, before the computer runs out of
+    /// memory; 0 never stops. Left out, it is half the computer's memory, up
+    /// to 8 GB.
+    pub stop_above_mb: Option<u64>,
 }
 
 impl Default for MemoryConfig {
     fn default() -> Self {
-        MemoryConfig { check_seconds: 5, warn_above_mb: 2048, growth_warn_mb: 1024, stop_above_mb: 8192 }
+        MemoryConfig { check_seconds: 5, warn_above_mb: 2048, growth_warn_mb: 1024, stop_above_mb: None }
     }
 }
 
