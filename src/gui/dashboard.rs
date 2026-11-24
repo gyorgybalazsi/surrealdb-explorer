@@ -119,6 +119,7 @@ pub struct Dashboard {
     tried: Option<i64>,
     plots: Vec<Option<PlotWidget>>,
     bars: Vec<Option<Bars>>,
+    columns: Vec<Option<Columns>>,
     tables: Vec<Option<TableState>>,
     /// What `{period}` stands for in the panels that use it.
     period: Period,
@@ -140,6 +141,7 @@ impl Dashboard {
             tried: None,
             plots: Vec::new(),
             bars: Vec::new(),
+            columns: Vec::new(),
             tables: Vec::new(),
             period: Period::Day,
         }
@@ -335,6 +337,7 @@ impl Dashboard {
         self.tried = None;
         self.plots.clear();
         self.bars.clear();
+        self.columns.clear();
         self.tables.clear();
     }
 
@@ -353,6 +356,7 @@ impl Dashboard {
         }
         self.plots = data.panels.iter().map(time_plot).collect();
         self.bars = data.panels.iter().map(Bars::new).collect();
+        self.columns = data.panels.iter().map(Columns::new).collect();
         self.tables = (0..data.panels.len()).map(|i| TableState::new(&data, i, old.remove(&data.panels[i].panel.title))).collect();
         self.data = Some(data);
     }
@@ -497,9 +501,10 @@ impl Dashboard {
                     Some(plot) => plot.view().map(move |m| Msg::Plot(i, m)),
                     None => empty("No time or number column to draw."),
                 },
-                PanelKind::Bar => match &self.bars[i] {
-                    Some(bars) => ChartWidget::new(bars).width(Fill).height(Fill).into(),
-                    None => empty("Needs a label column and a number column."),
+                PanelKind::Bar => match (&self.columns[i], &self.bars[i]) {
+                    (Some(columns), _) => ChartWidget::new(columns).width(Fill).height(Fill).into(),
+                    (None, Some(bars)) => ChartWidget::new(bars).width(Fill).height(Fill).into(),
+                    (None, None) => empty("Needs a label column and a number column."),
                 },
                 PanelKind::Table => match &self.tables[i] {
                     Some(t) => t.view().map(move |m| Msg::Table(i, m)),
@@ -816,6 +821,120 @@ impl Chart<Msg> for &Bars {
     }
 }
 
+/// Columns over time: a bar panel whose label column is a time draws one
+/// upright column per row, left to right, labelled by date, or by ISO week
+/// number when the rows are weeks.
+pub struct Columns {
+    /// Each row's start, in seconds.
+    starts: Vec<i64>,
+    values: Vec<Option<f64>>,
+    /// The rows' spacing, in seconds.
+    step: i64,
+    axis: String,
+}
+
+impl Columns {
+    fn new(p: &PanelData) -> Option<Columns> {
+        if p.panel.kind != PanelKind::Bar {
+            return None;
+        }
+        let frame = p.frame.as_ref().ok()?;
+        let label = frame.columns.iter().find(|c| !matches!(c.values, Values::Number(_)))?;
+        let Values::Time(times) = &label.values else {
+            return None;
+        };
+        let value_column = frame.columns.iter().find(|c| matches!(c.values, Values::Number(_)))?;
+        let starts: Vec<i64> = times.iter().map(|t| t.map(|us| us.div_euclid(1_000_000))).collect::<Option<_>>()?;
+        let values = (0..starts.len()).map(|r| value_column.values.number(r)).collect();
+        let step = p.bucket_seconds.or_else(|| starts.windows(2).map(|w| w[1] - w[0]).filter(|d| *d > 0).min()).unwrap_or(86_400);
+        Some(Columns { starts, values, step, axis: value_column.name.clone() })
+    }
+
+    /// Rows a week apart that start on Mondays.
+    fn weeks(&self) -> bool {
+        self.step == 604_800 && self.starts.iter().all(|s| (s.div_euclid(86_400) + 3).rem_euclid(7) == 0)
+    }
+
+    /// `W48`, with the year on the first column and on each year's first
+    /// week; a date for days; a time for anything shorter.
+    fn label(&self, i: usize) -> String {
+        let Some(&start) = self.starts.get(i) else {
+            return String::new();
+        };
+        if self.weeks() {
+            let (year, week) = iso_week(start.div_euclid(86_400));
+            if i == 0 || week == 1 { format!("{year} W{week:02}") } else { format!("W{week:02}") }
+        } else {
+            time_label(start, self.step)
+        }
+    }
+}
+
+impl Chart<Msg> for &Columns {
+    type State = ();
+
+    fn build_chart<DB: DrawingBackend>(&self, _: &(), mut builder: ChartBuilder<DB>) {
+        let n = self.starts.len() as i32;
+        let max = self.values.iter().flatten().fold(0.0, |m: f64, v| m.max(*v)).max(f64::MIN_POSITIVE);
+        let lo = self.values.iter().flatten().fold(0.0, |m: f64, v| m.min(*v));
+        let Ok(mut chart) = builder
+            .margin(8)
+            .x_label_area_size(36)
+            .y_label_area_size(64)
+            .build_cartesian_2d((0..n).into_segmented(), lo * 1.1..max * 1.1)
+        else {
+            return;
+        };
+        let label_style = ("sans-serif", 12).into_font().color(&RGBColor(90, 90, 90));
+        // Week numbers are short, so more of them fit than dates.
+        let labels = if self.weeks() { 27 } else { 14 };
+        let _ = chart
+            .configure_mesh()
+            .disable_x_mesh()
+            .x_labels(labels)
+            .x_label_formatter(&|v| match v {
+                SegmentValue::CenterOf(x) | SegmentValue::Exact(x) => self.label(*x as usize),
+                SegmentValue::Last => String::new(),
+            })
+            .y_label_formatter(&|v| short_number(*v))
+            .y_desc(self.axis.clone())
+            .label_style(label_style.clone())
+            .axis_desc_style(label_style)
+            .light_line_style(RGBColor(235, 235, 235))
+            .bold_line_style(RGBColor(220, 220, 220))
+            .draw();
+        let bar = RGBColor(46, 107, 199);
+        let gap = if n > 120 { 0 } else { 2 };
+        let _ = chart.draw_series(self.values.iter().enumerate().filter_map(|(i, v)| {
+            let x = i as i32;
+            let mut r = Rectangle::new([(SegmentValue::Exact(x), 0.0), (SegmentValue::Exact(x + 1), (*v)?)], bar.mix(0.8).filled());
+            r.set_margin(0, 0, gap, gap);
+            Some(r)
+        }));
+    }
+}
+
+/// The ISO 8601 year and week number of a day (days since 1970-01-01):
+/// weeks start on Monday, and week 1 holds the year's first Thursday.
+fn iso_week(day: i64) -> (i64, i64) {
+    let weekday = (day + 3).rem_euclid(7); // Monday is 0; 1970-01-01 was a Thursday.
+    let thursday = day - weekday + 3;
+    let (year, _, _) = civil_from_days(thursday);
+    let january_first = days_from_civil(year, 1, 1);
+    (year, (thursday - january_first) / 7 + 1)
+}
+
+/// (year, month, day) to days since 1970-01-01, from Howard Hinnant's algorithm.
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let mp = (i64::from(m) + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + i64::from(d) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
 /// A table panel: its columns and the order of its rows.
 struct TableState {
     columns: Vec<TableColumn>,
@@ -1111,6 +1230,17 @@ mod tests {
         assert_eq!(short_time_label(45_296, 5.0), "12:34:56");
         assert_eq!(bucket_name(1), "second");
         assert!(tick_step(86_400.0) <= 21_600.0);
+    }
+
+    #[test]
+    fn iso_week_numbers() {
+        let day = |y, m, d| days_from_civil(y, m, d);
+        assert_eq!(civil_from_days(day(2026, 11, 24)), (2026, 11, 24));
+        assert_eq!(iso_week(day(2026, 11, 24)), (2026, 48));
+        assert_eq!(iso_week(day(2026, 1, 1)), (2026, 1)); // a Thursday
+        assert_eq!(iso_week(day(2027, 1, 1)), (2026, 53)); // a Friday
+        assert_eq!(iso_week(day(2024, 12, 30)), (2025, 1)); // a Monday
+        assert_eq!(iso_week(day(2025, 12, 28)), (2025, 52)); // a Sunday
     }
 
     #[test]
