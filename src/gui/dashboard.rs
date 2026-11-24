@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use analytics_reader::catalog::{self, Entry};
-use analytics_reader::dashboard::{self, Dashboard as Data, PanelData};
+use analytics_reader::dashboard::{self, Dashboard as Data, PanelData, Period};
 use analytics_reader::frame::{Column, Frame, Values};
 use analytics_reader::location::{self, Location};
 use analytics_reader::manifest::{Format, PanelKind};
@@ -84,6 +84,8 @@ pub enum Msg {
     Plot(usize, PlotUiMessage),
     /// Something in the table of the panel with this number.
     Table(usize, TableMsg),
+    /// The Day / Week switch, for panels that use `{period}`.
+    Period(Period),
 }
 
 /// The table widget takes plain functions, so its messages say nothing of
@@ -118,6 +120,8 @@ pub struct Dashboard {
     plots: Vec<Option<PlotWidget>>,
     bars: Vec<Option<Bars>>,
     tables: Vec<Option<TableState>>,
+    /// What `{period}` stands for in the panels that use it.
+    period: Period,
 }
 
 impl Dashboard {
@@ -137,6 +141,7 @@ impl Dashboard {
             plots: Vec::new(),
             bars: Vec::new(),
             tables: Vec::new(),
+            period: Period::Day,
         }
     }
 
@@ -171,10 +176,11 @@ impl Dashboard {
         self.tried = None;
         let id = self.next_request();
         let location = self.root().map(|root| root.join(&name));
+        let period = self.period;
         Task::perform(
             async move {
                 let session = Session::open(&location?).await.map_err(|e| format!("{e:#}"))?;
-                let data = dashboard::load(&session).await.map_err(|e| format!("{e:#}"))?;
+                let data = dashboard::load_with(&session, period).await.map_err(|e| format!("{e:#}"))?;
                 let status = session.status().await.ok().flatten();
                 Ok(Opened { session: Shared(Arc::new(Mutex::new(session))), data: Arc::new(data), status })
             },
@@ -187,6 +193,7 @@ impl Dashboard {
             return Task::none();
         };
         let tried = self.tried;
+        let period = self.period;
         let id = self.next_request();
         Task::perform(
             async move {
@@ -196,7 +203,7 @@ impl Dashboard {
                 let data = if Some(version) != tried {
                     let loaded = async {
                         session.refresh().await?;
-                        dashboard::load(&session).await
+                        dashboard::load_with(&session, period).await
                     };
                     Some(loaded.await.map(Arc::new).map_err(|e| format!("{e:#}")))
                 } else {
@@ -225,6 +232,15 @@ impl Dashboard {
                 return self.reload();
             }
             Msg::Check => {
+                if !self.busy {
+                    return self.check();
+                }
+            }
+            Msg::Period(period) => {
+                self.period = period;
+                // Load the same version again with the new period; if a
+                // request is running, the next check does it.
+                self.tried = None;
                 if !self.busy {
                     return self.check();
                 }
@@ -362,6 +378,22 @@ impl Dashboard {
         ]
         .spacing(8)
         .align_y(Alignment::Center);
+        // Day / Week, when a panel of this table lets the viewer pick.
+        let header = match &self.data {
+            Some(d) if d.panels.iter().any(|p| dashboard::uses_period(&p.panel)) => {
+                let choice = |label: &'static str, period: Period| {
+                    button(text(label).size(12))
+                        .style(if self.period == period { button::primary } else { button::secondary })
+                        .on_press(Msg::Period(period))
+                };
+                header.push(
+                    row![text("Per").size(12).color(MUTED), choice("Day", Period::Day), choice("Week", Period::Week)]
+                        .spacing(4)
+                        .align_y(Alignment::Center),
+                )
+            }
+            _ => header,
+        };
 
         let mut col = column![header].spacing(8).padding(10).width(Fill).height(Fill);
         if let Some(status) = self.status_view() {
