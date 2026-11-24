@@ -28,6 +28,7 @@ fn main() -> iced::Result {
     };
 
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "surrealdb-explorer starting");
+    surrealdb_explorer::memory::spawn_watch(config.memory.clone());
     if created {
         tracing::info!(path = %Config::path().display(), "created a default config file");
     }
