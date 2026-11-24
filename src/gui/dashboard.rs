@@ -499,12 +499,12 @@ fn empty<'a>(message: &'a str) -> Element<'a, Msg> {
 /// One card per column, from the first row.
 fn stats(frame: &Frame) -> Element<'_, Msg> {
     let cards = frame.columns.iter().map(|c| {
-        container(column![text(value(c, 0)).size(22).color(ACCENT), text(c.name.clone()).size(11).color(MUTED)].spacing(2))
-            .padding([6, 14])
-            .style(container::rounded_box)
+        // Plain figures with their label, not boxes: boxes read as buttons.
+        container(column![text(value(c, 0)).size(24).color(ACCENT), text(c.name.clone()).size(12).color(MUTED)].spacing(0))
+            .padding([2, 0])
             .into()
     });
-    scrollable(row(cards).spacing(10)).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new())).into()
+    scrollable(row(cards).spacing(36)).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new())).into()
 }
 
 /// A value as text, in its column's format.
@@ -586,7 +586,11 @@ fn time_plot(p: &PanelData) -> Option<PlotWidget> {
                 Some(format!("{}: {}", time_label(point.x as i64, bucket as i64), number(point.y)))
             })
     } else {
-        let step = round_step((last - first).max(1.0) / 5.0);
+        let mut step = round_step((last - first).max(1.0) / 5.0);
+        // Offsets and other counts are whole numbers: no ticks between them.
+        if xs.iter().flatten().all(|x| x.fract() == 0.0) {
+            step = step.max(1.0);
+        }
         let name = x_column.name.clone();
         builder
             .with_x_tick_producer(move |min, max| time_ticks(min, max, step))
@@ -647,8 +651,8 @@ fn short_number(n: f64) -> String {
 
 /// A tick spacing that gives at most about six ticks over `span` seconds.
 fn tick_step(span: f64) -> f64 {
-    const STEPS: [f64; 14] = [
-        60.0, 300.0, 900.0, 1_800.0, 3_600.0, 10_800.0, 21_600.0, 43_200.0, 86_400.0, 172_800.0, 604_800.0,
+    const STEPS: [f64; 19] = [
+        1.0, 5.0, 10.0, 15.0, 30.0, 60.0, 300.0, 900.0, 1_800.0, 3_600.0, 10_800.0, 21_600.0, 43_200.0, 86_400.0, 172_800.0, 604_800.0,
         1_209_600.0, 2_592_000.0, 7_776_000.0,
     ];
     STEPS.into_iter().find(|s| span / s <= 6.0).unwrap_or((span / 6.0 / 86_400.0).ceil() * 86_400.0)
@@ -669,7 +673,10 @@ fn time_ticks(min: f64, max: f64, step: f64) -> Vec<iced_plot::Tick> {
 
 /// `11-02 09:00` for ticks under a day apart, `2026-11-02` otherwise (UTC).
 fn short_time_label(seconds: i64, step: f64) -> String {
-    if step < 86_400.0 {
+    if step < 60.0 {
+        let label = time_label(seconds, 1);
+        label.get(11..).unwrap_or(&label).to_string()
+    } else if step < 86_400.0 {
         let label = time_label(seconds, 60);
         label.get(5..).unwrap_or(&label).to_string()
     } else {
@@ -685,6 +692,7 @@ fn bucket_name(seconds: i64) -> String {
         3_600 => "hour".into(),
         s if s % 3_600 == 0 => format!("{} hours", s / 3_600),
         60 => "minute".into(),
+        1 => "second".into(),
         s if s % 60 == 0 => format!("{} minutes", s / 60),
         s => format!("{s} seconds"),
     }
@@ -743,7 +751,7 @@ impl Chart<Msg> for &Bars {
             .y_labels(n as usize)
             .y_label_formatter(&|v| match v {
                 SegmentValue::CenterOf(y) | SegmentValue::Exact(y) => {
-                    self.labels.get((n - 1 - y) as usize).map(|l| shorten(l, 26)).unwrap_or_default()
+                    self.labels.get((n - 1 - y) as usize).map(|l| short_id(l)).unwrap_or_default()
                 }
                 SegmentValue::Last => String::new(),
             })
@@ -893,8 +901,13 @@ impl<'a> table::Column<'a, TableMsg, Theme, iced::Renderer> for TableColumn {
 
     fn cell(&'a self, _: usize, _: usize, row: &'a usize) -> Element<'a, TableMsg> {
         let c = &self.frame().columns[self.column];
-        let t = text(value(c, *row)).size(12);
-        if c.effective_format() == Format::Id { t.font(Font::MONOSPACE).into() } else { t.into() }
+        // One line, clipped to the column, so a long value can't run over
+        // its neighbours; ids are shortened the way the bar charts do.
+        let t = match c.effective_format() {
+            Format::Id => text(short_id(&value(c, *row))).font(Font::MONOSPACE),
+            _ => text(value(c, *row)),
+        };
+        container(t.size(12).wrapping(iced::widget::text::Wrapping::None)).width(Fill).clip(true).into()
     }
 
     fn width(&self) -> f32 {
@@ -931,12 +944,20 @@ fn ago(seconds: i64) -> String {
     }
 }
 
-fn shorten(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        format!("…{}", s.chars().rev().take(max - 1).collect::<Vec<_>>().into_iter().rev().collect::<String>())
+/// A party or contract id short enough for a column or an axis:
+/// `Alice::1220d45c…bf9f` keeps the party's name and both ends of its hash.
+fn short_id(s: &str) -> String {
+    let (name, hash) = match s.split_once("::") {
+        Some((name, hash)) => (format!("{name}::"), hash),
+        None => (String::new(), s),
+    };
+    let chars: Vec<char> = hash.chars().collect();
+    if chars.len() <= 14 {
+        return s.to_string();
     }
+    let head: String = chars[..8].iter().collect();
+    let tail: String = chars[chars.len() - 4..].iter().collect();
+    format!("{name}{head}…{tail}")
 }
 
 /// `2026-11-02 09:00:05`, `2026-11-02 09:00` or `2026-11-02` for a
@@ -1040,7 +1061,11 @@ mod tests {
         assert_eq!(bucket_name(3_600), "hour");
         assert_eq!(bucket_name(21_600), "6 hours");
         assert_eq!(ago(3_700), "61 min ago");
-        assert_eq!(shorten("Main.TicketOffer", 8), "…etOffer");
+        assert_eq!(short_id("Alice::1220d45c8b0b8dec9f71038b"), "Alice::1220d45c…038b");
+        assert_eq!(short_id("00c5e9f6a1b2c3d4e5f60718"), "00c5e9f6…0718");
+        assert_eq!(short_id("Bob::1220ab"), "Bob::1220ab");
+        assert_eq!(short_time_label(45_296, 5.0), "12:34:56");
+        assert_eq!(bucket_name(1), "second");
         assert!(tick_step(86_400.0) <= 21_600.0);
     }
 }
