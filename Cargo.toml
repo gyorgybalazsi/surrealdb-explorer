@@ -27,6 +27,8 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 rmcp = { version = "3.9", features = ["server", "macros", "transport-streamable-http-server"] }
 axum = "0.8.9"
 png = "0.18"
+# The memory watch reads the app's own resident size.
+sysinfo = { version = "0.38", default-features = false, features = ["system"] }
 
 [features]
 default = []

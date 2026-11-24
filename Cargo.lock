@@ -7555,6 +7555,7 @@ dependencies = [
  "serde",
  "serde_json",
  "surrealdb",
+ "sysinfo",
  "tempfile",
  "tokio",
  "toml",

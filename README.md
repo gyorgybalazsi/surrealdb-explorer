@@ -76,6 +76,7 @@ cargo bundle --release
 | `[logging]`  | Log level and folder |
 | `[mcp]`      | `enabled` and `port` (default 8765) |
 | `[analytics]` | The Dashboard: `location` of the tables, `storage_options` and the `selected` table |
+| `[memory]`   | The memory watch, in MB of resident memory (0 switches a check off): `warn_above_mb` (default 2048) and `growth_warn_mb` (1024 within a minute) log a warning and show it in the window; `stop_above_mb` (8192) stops the app before the computer runs out of memory; `check_seconds` (5) |
 
 `password` and `viewer_password` can be a 1Password reference (`op://vault/item/field`). The app then
 reads it with the 1Password CLI (`op`), so the secret never has to be in the

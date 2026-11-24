@@ -125,6 +125,8 @@ pub enum Message {
     WindowOpened,
     /// An animation frame while the layout is moving.
     Tick,
+    /// Redraw, so a memory warning shows up even while nothing else changes.
+    MemoryCheck,
     Hover(Option<usize>),
     Select(Option<Selection>),
     DragNode(usize, Vector),
@@ -526,7 +528,8 @@ impl App {
         };
         #[cfg(not(feature = "dashboard"))]
         let dashboard = Subscription::none();
-        Subscription::batch([frames, refresh, opened, panel_drag, dashboard, Subscription::run(mcp_commands)])
+        let memory = iced::time::every(std::time::Duration::from_secs(10)).map(|_| Message::MemoryCheck);
+        Subscription::batch([frames, refresh, opened, panel_drag, dashboard, memory, Subscription::run(mcp_commands)])
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -540,6 +543,7 @@ impl App {
             Message::WindowOpened => {
                 crate::gui::icon::set_dock_icon();
             }
+            Message::MemoryCheck => {}
             Message::Tick => {
                 self.layout.step(&mut self.graph, self.dragging);
                 self.follow_layout();
@@ -1933,6 +1937,9 @@ impl App {
             // A pending write must be answered whichever view is open.
             if let Some((query, _)) = &self.pending_write {
                 main = main.push(write_banner(query));
+            }
+            if let Some(alarm) = crate::memory::alarm() {
+                main = main.push(container(text(alarm).size(12).color(crate::gui::sidebar::ERROR)).padding([4, 10]));
             }
             let main = main.push(self.dashboard.view().map(Message::Dashboard)).width(Fill);
             return match settings {

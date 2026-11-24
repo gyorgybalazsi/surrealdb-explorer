@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- A memory watch: the app samples its own memory use every few seconds,
+  logs it every five minutes, and warns in the log and the window when it
+  grows by 1 GB within a minute or passes 2 GB. Above 8 GB it stops, so a
+  leak can't take the computer down. Set in `[memory]` in `config.toml`.
+
+### Fixed
+- The Dashboard's x axis could make hundreds of thousands of ticks (one row
+  on a day- or week-wide axis, or zooming out) and run out of memory (#44).
+
 ## [0.1.0] - 2026-11-23
 
 The first release of SurrealDB Explorer: a desktop app (Rust, iced) for exploring
