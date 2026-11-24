@@ -449,11 +449,15 @@ impl App {
             #[cfg(feature = "dashboard")]
             dashboard_open: false,
             #[cfg(feature = "dashboard")]
-            dashboard: crate::gui::dashboard::Dashboard::new(
-                dashboard_settings.location,
-                dashboard_settings.storage_options,
-                dashboard_settings.selected,
-            ),
+            dashboard: {
+                let mut d = crate::gui::dashboard::Dashboard::new(
+                    dashboard_settings.location,
+                    dashboard_settings.storage_options,
+                    dashboard_settings.selected,
+                );
+                d.check_seconds = dashboard_settings.check_seconds.max(1);
+                d
+            },
             pending_data_action: None,
             data_busy: false,
             canvas_size: iced::Size::new(880.0, 760.0),
@@ -524,7 +528,7 @@ impl App {
         // Reload the dashboard when the analytics runner commits.
         #[cfg(feature = "dashboard")]
         let dashboard = if self.dashboard_open {
-            iced::time::every(std::time::Duration::from_secs(2))
+            iced::time::every(std::time::Duration::from_secs(self.dashboard.check_seconds.max(1)))
                 .map(|_| Message::Dashboard(crate::gui::dashboard::Msg::Check))
         } else {
             Subscription::none()
@@ -861,12 +865,14 @@ impl App {
             #[cfg(feature = "dashboard")]
             Message::Dashboard(m) => {
                 use crate::gui::dashboard::Msg;
-                let save = matches!(m, Msg::LocationSubmitted | Msg::Select(_));
+                let save = matches!(m, Msg::LocationSubmitted | Msg::Select(_) | Msg::SaveSettings);
                 let task = self.dashboard.update(m).map(Message::Dashboard);
-                // Remember where the tables are and which one was shown.
+                // Remember where the tables are, which one was shown, and
+                // how often to look for commits.
                 if save {
                     self.config.analytics.location = self.dashboard.location.trim().to_string();
                     self.config.analytics.selected = self.dashboard.selected.clone();
+                    self.config.analytics.check_seconds = self.dashboard.check_seconds;
                     if let Err(e) = self.config.save_to(&self.files.config) {
                         warn!(error = %e, "could not save the dashboard's settings");
                     }
@@ -1932,7 +1938,9 @@ impl App {
             let bar = row![
                 self.mode_switch(),
                 iced::widget::space::horizontal(),
-                button(text("Settings").size(12)).style(button::secondary).on_press(Message::OpenSettings),
+                button(text("Settings").size(12))
+                    .style(button::secondary)
+                    .on_press(Message::Dashboard(crate::gui::dashboard::Msg::OpenSettings)),
             ]
             .padding([8, 10])
             .align_y(iced::Alignment::Center);
@@ -1945,8 +1953,9 @@ impl App {
                 main = main.push(container(text(alarm).size(12).color(crate::gui::sidebar::ERROR)).padding([4, 10]));
             }
             let main = main.push(self.dashboard.view().map(Message::Dashboard)).width(Fill);
-            return match settings {
-                Some(side) => row![main, rule::vertical(1), side].into(),
+            // The Dashboard's own settings; the graph's stay with the graph.
+            return match self.dashboard.settings_view() {
+                Some(side) => row![main, rule::vertical(1), side.map(Message::Dashboard)].into(),
                 None => main.into(),
             };
         }

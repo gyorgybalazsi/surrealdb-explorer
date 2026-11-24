@@ -17,6 +17,7 @@ use analytics_reader::frame::{Column, Frame, Values};
 use analytics_reader::location::{self, Location};
 use analytics_reader::manifest::{Format, PanelKind};
 use analytics_reader::status::{Status, now_ms};
+use analytics_reader::tuning::Tuning;
 use analytics_reader::Session;
 use iced::widget::{button, column, container, pick_list, responsive, row, scrollable, text, text_input, Id};
 use iced::{Alignment, Color, Element, Fill, Font, Length, Task, Theme};
@@ -27,7 +28,7 @@ use plotters::style::Color as _;
 use plotters_iced2::{Chart, ChartWidget, DrawingBackend};
 use tokio::sync::Mutex;
 
-use crate::gui::sidebar::{ERROR, MUTED};
+use crate::gui::sidebar::{ERROR, MUTED, SIDEBAR_WIDTH};
 
 const ACCENT: Color = Color::from_rgb(0.18, 0.42, 0.78);
 const SERIES: [Color; 4] = [
@@ -86,6 +87,71 @@ pub enum Msg {
     Table(usize, TableMsg),
     /// The Day / Week switch, for panels that use `{period}`.
     Period(Period),
+    /// The Settings button while the Dashboard is open.
+    OpenSettings,
+    CloseSettings,
+    /// The shown table's lag settings, to fill the form with.
+    TuningRead(Result<Option<Tuning>, String>),
+    SettingEdited(LagField, String),
+    /// Save: the app keeps the check interval in config.toml; the daemon's
+    /// settings go next to every table at the location.
+    SaveSettings,
+    /// How many tables got the daemon's settings.
+    SettingsSaved(Result<usize, String>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LagField {
+    Check,
+    Every,
+    MinRows,
+    MaxWait,
+}
+
+/// The dashboard settings as edited, kept as text until saved: how often
+/// this window looks for a commit, and the daemon's lag settings (see
+/// `analytics_reader::tuning`), empty for the daemon's own value.
+pub struct LagForm {
+    check: String,
+    every: String,
+    min_rows: String,
+    max_wait: String,
+    saving: bool,
+    /// The outcome of the last save: success, and what it said.
+    said: Option<(bool, String)>,
+}
+
+impl LagForm {
+    fn field(&mut self, which: LagField) -> &mut String {
+        match which {
+            LagField::Check => &mut self.check,
+            LagField::Every => &mut self.every,
+            LagField::MinRows => &mut self.min_rows,
+            LagField::MaxWait => &mut self.max_wait,
+        }
+    }
+
+    /// The check interval and the daemon's settings, or what is wrong.
+    fn parse(&self) -> Result<(u64, Tuning), String> {
+        let number = |name: &str, v: &str, at_least: u64| -> Result<Option<u64>, String> {
+            match v.trim() {
+                "" => Ok(None),
+                v => match v.parse::<u64>() {
+                    Ok(n) if n >= at_least => Ok(Some(n)),
+                    _ => Err(format!("{name}: a whole number of at least {at_least}, or empty")),
+                },
+            }
+        };
+        let check = number("This window looks every", &self.check, 1)?.ok_or("This window looks every: a number of seconds")?;
+        Ok((
+            check,
+            Tuning {
+                every_seconds: number("Check the database every", &self.every, 1)?,
+                min_rows: number("Commit at", &self.min_rows, 1)?,
+                max_wait_seconds: number("…or after", &self.max_wait, 0)?,
+            },
+        ))
+    }
 }
 
 /// The table widget takes plain functions, so its messages say nothing of
@@ -123,6 +189,10 @@ pub struct Dashboard {
     tables: Vec<Option<TableState>>,
     /// What `{period}` stands for in the panels that use it.
     period: Period,
+    /// How often to look for a new commit, in seconds.
+    pub check_seconds: u64,
+    /// The dashboard settings, while they are open.
+    settings: Option<LagForm>,
 }
 
 impl Dashboard {
@@ -144,6 +214,8 @@ impl Dashboard {
             columns: Vec::new(),
             tables: Vec::new(),
             period: Period::Day,
+            check_seconds: 2,
+            settings: None,
         }
     }
 
@@ -245,6 +317,84 @@ impl Dashboard {
                 self.tried = None;
                 if !self.busy {
                     return self.check();
+                }
+            }
+            Msg::OpenSettings => {
+                let in_force = self.status.as_ref().filter(|s| s.min_rows > 0);
+                self.settings = Some(LagForm {
+                    check: self.check_seconds.to_string(),
+                    every: in_force.map(|s| (s.every_ms / 1000).to_string()).unwrap_or_default(),
+                    min_rows: in_force.map(|s| s.min_rows.to_string()).unwrap_or_default(),
+                    max_wait: in_force.map(|s| (s.max_wait_ms / 1000).to_string()).unwrap_or_default(),
+                    saving: false,
+                    said: None,
+                });
+                // What the table's file says wins over the heartbeat.
+                let (Ok(root), Some(name)) = (self.root(), self.selected.clone()) else { return Task::none() };
+                return Task::perform(
+                    async move { Tuning::read_at(&root.join(&name)).await.map_err(|e| format!("{e:#}")) },
+                    Msg::TuningRead,
+                );
+            }
+            Msg::CloseSettings => self.settings = None,
+            Msg::TuningRead(result) => {
+                if let (Some(form), Ok(Some(t))) = (&mut self.settings, result) {
+                    let text = |v: Option<u64>| v.map(|n| n.to_string()).unwrap_or_default();
+                    form.every = text(t.every_seconds);
+                    form.min_rows = text(t.min_rows);
+                    form.max_wait = text(t.max_wait_seconds);
+                }
+            }
+            Msg::SettingEdited(which, value) => {
+                if let Some(form) = &mut self.settings {
+                    *form.field(which) = value;
+                    form.said = None;
+                }
+            }
+            Msg::SaveSettings => {
+                let Some(form) = &mut self.settings else { return Task::none() };
+                let (check, tuning) = match form.parse() {
+                    Ok(parsed) => parsed,
+                    Err(e) => {
+                        form.said = Some((false, e));
+                        return Task::none();
+                    }
+                };
+                self.check_seconds = check;
+                let root = match self.root() {
+                    Ok(root) => root,
+                    Err(e) => {
+                        if let Some(form) = &mut self.settings {
+                            form.said = Some((false, e));
+                        }
+                        return Task::none();
+                    }
+                };
+                if let Some(form) = &mut self.settings {
+                    form.saving = true;
+                }
+                let names: Vec<String> = self.entries.iter().map(|e| e.name.clone()).collect();
+                return Task::perform(
+                    async move {
+                        for name in &names {
+                            tuning.write_at(&root.join(name)).await.map_err(|e| format!("{name}: {e:#}"))?;
+                        }
+                        Ok(names.len())
+                    },
+                    Msg::SettingsSaved,
+                );
+            }
+            Msg::SettingsSaved(result) => {
+                if let Some(form) = &mut self.settings {
+                    form.saving = false;
+                    form.said = Some(match result {
+                        Ok(0) => (true, "Saved. There are no tables here yet for the daemon's settings.".into()),
+                        Ok(n) => (
+                            true,
+                            format!("Saved. The daemon takes up its settings for the {n} table{} at its next check.", if n == 1 { "" } else { "s" }),
+                        ),
+                        Err(e) => (false, format!("The daemon's settings could not be written: {e}")),
+                    });
                 }
             }
             Msg::Listed(id, _) | Msg::Opened(id, _) | Msg::Checked(id, _) if id != self.request => {}
@@ -421,6 +571,74 @@ impl Dashboard {
             .into(),
         };
         col.push(body).into()
+    }
+
+    /// The dashboard settings, beside the dashboard while they are open.
+    pub fn settings_view(&self) -> Option<Element<'_, Msg>> {
+        let form = self.settings.as_ref()?;
+        let field = |label: &'static str, unit: &'static str, value: &str, which: LagField| {
+            row![
+                text(label).size(13).width(Fill),
+                text_input("", value).on_input(move |v| Msg::SettingEdited(which, v)).size(13).width(80),
+                text(unit).size(12).color(MUTED).width(36),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center)
+        };
+        let heading = |label: &'static str| text(label).size(14).font(Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT });
+        let note = |s: String| text(s).size(11).color(MUTED);
+        let tables = self.entries.len();
+
+        let mut col = iced::widget::Column::new().spacing(10).padding(16).width(SIDEBAR_WIDTH);
+        col = col.push(
+            row![
+                text("Dashboard settings").size(18).width(Fill),
+                button(text("Back").size(12)).style(button::secondary).on_press(Msg::CloseSettings),
+            ]
+            .align_y(Alignment::Center),
+        );
+        col = col.push(note(
+            "A new ledger row shows up here once the daemon has seen it, committed it to its table, and this window has looked for the commit."
+                .into(),
+        ));
+
+        col = col.push(heading("This window"));
+        col = col.push(field("Look for new commits every", "s", &form.check, LagField::Check));
+        col = col.push(note("Saved in config.toml.".into()));
+
+        col = col.push(heading("The daemon"));
+        col = col.push(field("Check the database every", "s", &form.every, LagField::Every));
+        col = col.push(field("Commit at", "rows", &form.min_rows, LagField::MinRows));
+        col = col.push(field("…or once the oldest has waited", "s", &form.max_wait, LagField::MaxWait));
+        col = col.push(note(format!(
+            "Saved next to {} at this location; the daemon takes them up at its next check, without a restart. Empty: the daemon's own setting. Committing less often keeps fewer, bigger files.",
+            match tables {
+                1 => "the table".to_string(),
+                n => format!("all {n} tables"),
+            }
+        )));
+        if let Some(s) = self.status.as_ref().filter(|s| s.min_rows > 0) {
+            col = col.push(note(format!(
+                "In force now for {}: every {} s, at {} rows or after {} s.",
+                self.selected.as_deref().unwrap_or("this table"),
+                s.every_ms / 1000,
+                s.min_rows,
+                s.max_wait_ms / 1000
+            )));
+        }
+        if let Ok((check, tuning)) = form.parse() {
+            let every = tuning.every_seconds.or(self.status.as_ref().map(|s| (s.every_ms / 1000) as u64));
+            let wait = tuning.max_wait_seconds.or(self.status.as_ref().filter(|s| s.min_rows > 0).map(|s| (s.max_wait_ms / 1000) as u64));
+            if let (Some(every), Some(wait)) = (every, wait) {
+                col = col.push(text(format!("On a quiet ledger, new rows show up within about {} s.", every + wait + check)).size(12));
+            }
+        }
+        let save = button(text(if form.saving { "Saving…" } else { "Save" }).size(13)).style(button::primary);
+        col = col.push(if form.saving { save } else { save.on_press(Msg::SaveSettings) });
+        if let Some((ok, said)) = &form.said {
+            col = col.push(text(said).size(12).color(if *ok { OK } else { ERROR }));
+        }
+        Some(scrollable(col).height(Fill).into())
     }
 
     /// The daemon's heartbeat, in words.
@@ -830,7 +1048,6 @@ pub struct Columns {
     values: Vec<Option<f64>>,
     /// The rows' spacing, in seconds.
     step: i64,
-    axis: String,
 }
 
 impl Columns {
@@ -847,7 +1064,7 @@ impl Columns {
         let starts: Vec<i64> = times.iter().map(|t| t.map(|us| us.div_euclid(1_000_000))).collect::<Option<_>>()?;
         let values = (0..starts.len()).map(|r| value_column.values.number(r)).collect();
         let step = p.bucket_seconds.or_else(|| starts.windows(2).map(|w| w[1] - w[0]).filter(|d| *d > 0).min()).unwrap_or(86_400);
-        Some(Columns { starts, values, step, axis: value_column.name.clone() })
+        Some(Columns { starts, values, step })
     }
 
     /// Rows a week apart that start on Mondays.
@@ -896,8 +1113,9 @@ impl Chart<Msg> for &Columns {
                 SegmentValue::CenterOf(x) | SegmentValue::Exact(x) => self.label(*x as usize),
                 SegmentValue::Last => String::new(),
             })
+            // No axis name: the panel's title already says what is counted,
+            // and a side label crowds the numbers in a narrow panel.
             .y_label_formatter(&|v| short_number(*v))
-            .y_desc(self.axis.clone())
             .label_style(label_style.clone())
             .axis_desc_style(label_style)
             .light_line_style(RGBColor(235, 235, 235))
@@ -1230,6 +1448,25 @@ mod tests {
         assert_eq!(short_time_label(45_296, 5.0), "12:34:56");
         assert_eq!(bucket_name(1), "second");
         assert!(tick_step(86_400.0) <= 21_600.0);
+    }
+
+    #[test]
+    fn lag_settings_parse_with_empty_for_the_daemons_own() {
+        let form = |check: &str, every: &str, min_rows: &str, max_wait: &str| LagForm {
+            check: check.into(),
+            every: every.into(),
+            min_rows: min_rows.into(),
+            max_wait: max_wait.into(),
+            saving: false,
+            said: None,
+        };
+        let (check, tuning) = form("2", "", " 1000 ", "0").parse().unwrap();
+        assert_eq!(check, 2);
+        assert_eq!(tuning, Tuning { every_seconds: None, min_rows: Some(1000), max_wait_seconds: Some(0) });
+        assert!(form("0", "", "", "").parse().is_err(), "this window must look at least every second");
+        assert!(form("", "", "", "").parse().is_err());
+        assert!(form("2", "0", "", "").parse().is_err());
+        assert!(form("2", "", "lots", "").parse().is_err());
     }
 
     #[test]
