@@ -75,7 +75,7 @@ impl App {
         let outcome = self.query_outcome.as_ref();
         let copy_json = button(text("Copy JSON").size(13))
             .style(button::secondary)
-            .on_press_maybe(outcome.is_some_and(|o| o.statements.is_ok()).then_some(Message::CopyQueryResult(CopyFormat::Json)));
+            .on_press_maybe(outcome.is_some().then_some(Message::CopyQueryResult(CopyFormat::Json)));
         let copy_table = tooltip(
             button(text("Copy table").size(13))
                 .style(button::secondary)
@@ -96,9 +96,16 @@ impl App {
         ]
         .spacing(8)
         .align_y(Alignment::Center);
-        if let Some(summary) = self.query_outcome.as_ref().map(summary) {
+        if let Some(summary) = outcome.map(summary) {
             status = status.push(summary);
         }
+        // Right after a copy, next to the button, so it isn't missed.
+        if let Some(copied) = &self.query_copied {
+            status = status.push(text(format!("· {copied}")).size(12).color(SUCCESS));
+        }
+        // On a narrow window the summary moves to a second line rather than
+        // being cut off.
+        let status = status.wrap().vertical_spacing(4);
         column![container(toggle).padding([2, 0]), self.saved_queries_row(), editor, status, self.result_view()]
             .spacing(6)
             .padding([4, 8])
@@ -298,7 +305,8 @@ impl App {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CopyFormat {
     /// The whole result as pretty JSON: one statement's value, or an array
-    /// with one entry per statement (`{"error": …}` for a failed one).
+    /// with one entry per statement (`{"error": …}` for a failed one, or
+    /// for the whole query when it didn't run).
     Json,
     /// The tables (rows of fields) as tab-separated text with a header row,
     /// a blank line between statements, ready to paste into a spreadsheet.
@@ -309,7 +317,15 @@ impl CopyFormat {
     /// The text to copy and a few words on what it is, or `None` when there
     /// is nothing to copy in this format.
     pub(super) fn render(self, outcome: &QueryOutcome, query: &str) -> Option<(String, String)> {
-        let results = outcome.statements.as_ref().ok()?;
+        let results = match (&outcome.statements, self) {
+            // The query didn't run (such as a refused write): its error.
+            (Err(e), CopyFormat::Json) => {
+                let json = serde_json::to_string_pretty(&serde_json::json!({ "error": e })).ok()?;
+                return Some((json, "the error as JSON".to_string()));
+            }
+            (Err(_), CopyFormat::Table) => return None,
+            (Ok(results), _) => results,
+        };
         match self {
             CopyFormat::Json => {
                 let value = |r: &crate::query::StatementResult| match &r.result {
@@ -373,9 +389,13 @@ fn tsv(rows: &[serde_json::Value], query: &str) -> String {
     out
 }
 
-/// A value on one line with no tabs, so it stays in its cell.
+/// A value on one line with no tabs, so it stays in its cell. A value with
+/// a quote mark is quoted (`"` doubled inside), as spreadsheets expect:
+/// unquoted, one that starts with `"` would be read as the start of a
+/// quoted value and swallow the cells after it.
 fn clean(s: &str) -> String {
-    s.replace(['\t', '\n', '\r'], " ")
+    let flat = s.replace(['\t', '\n', '\r'], " ");
+    if flat.contains('"') { format!("\"{}\"", flat.replace('"', "\"\"")) } else { flat }
 }
 
 /// A table's columns: every field of every row, ordered like the query.
@@ -599,6 +619,22 @@ mod tests {
         assert_eq!(copied, format!("offset\tbuyer\tnote\n7\t{party}\ta b\n8\t\t\n"));
         assert_eq!(what, "2 rows as a table");
         assert!(CopyFormat::Table.render(&outcome(vec![Ok(json!(3))]), "").is_none());
+    }
+
+    #[test]
+    fn quotes_table_values_with_quote_marks() {
+        let o = outcome(vec![Ok(json!([{ "parties": ["Bob::1220aa"], "say": "\"hi\" there" }]))]);
+        let (copied, _) = CopyFormat::Table.render(&o, "SELECT parties, say FROM t").unwrap();
+        assert_eq!(copied, "parties\tsay\n\"[\"\"Bob::1220aa\"\"]\"\t\"\"\"hi\"\" there\"\n");
+    }
+
+    #[test]
+    fn copies_a_query_that_did_not_run_as_its_error() {
+        let o = QueryOutcome::refused("writes are refused");
+        let (copied, what) = CopyFormat::Json.render(&o, "").unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&copied).unwrap(), json!({ "error": "writes are refused" }));
+        assert_eq!(what, "the error as JSON");
+        assert!(CopyFormat::Table.render(&o, "").is_none());
     }
 
     #[test]
