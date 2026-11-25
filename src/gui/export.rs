@@ -205,7 +205,9 @@ mod tests {
         let ratio = pixel_ratio(Size::new(900.0, 20_000.0));
         assert!(20_000.0 * ratio <= MAX_SIDE + 0.5);
         let ratio = pixel_ratio(Size::new(7000.0, 7000.0));
-        assert!(7000.0 * 7000.0 * ratio * ratio <= MAX_PIXELS + 1.0);
+        // Within f32 rounding: a few pixels in 40 million.
+        let pixels = f64::from(7000.0 * ratio).powi(2);
+        assert!(pixels <= f64::from(MAX_PIXELS) * 1.000_01, "{pixels} pixels");
     }
 
     /// Two records and a relation, laid out wider than any window would show.
