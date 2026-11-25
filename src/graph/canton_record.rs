@@ -60,7 +60,7 @@ pub async fn archiving_event(db: &Database, id: &str, limit: usize) -> surrealdb
 /// is neither, or its contract isn't in the database.
 pub async fn lifecycle(db: &Database, id: &str, limit: usize) -> surrealdb::Result<Option<Lifecycle>> {
     let contract = match kind_of(id) {
-        NodeKind::Created => id.to_string(),
+        NodeKind::Created => canonical(db, id).await?,
         NodeKind::Exercised | NodeKind::Fetched => match ends(db, id, Direction::Out, &["target"]).await?.into_iter().next() {
             Some(c) => c,
             None => return Ok(None),
@@ -84,6 +84,13 @@ pub async fn lifecycle(db: &Database, id: &str, limit: usize) -> surrealdb::Resu
         return Ok(None);
     }
     Ok(Some(Lifecycle { contract, events: events.len(), graph }))
+}
+
+/// The id as the database writes it (`created:⟨…⟩` may come back as
+/// `` created:`…` ``), so it matches the ids of the records loaded.
+async fn canonical(db: &Database, id: &str) -> surrealdb::Result<String> {
+    let v: Value = db.query("RETURN <string> type::record($id)").bind(("id", id.to_string())).await?.take(0)?;
+    Ok(v.into_json_value().as_str().map(String::from).unwrap_or_else(|| id.to_string()))
 }
 
 /// What a record is, from the table in its id.
