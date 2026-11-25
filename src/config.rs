@@ -253,11 +253,13 @@ pub struct AnalyticsConfig {
     pub storage_options: Vec<String>,
     /// The table last shown.
     pub selected: Option<String>,
+    /// How often the Dashboard looks for a new commit, in seconds.
+    pub check_seconds: u64,
 }
 
 impl Default for AnalyticsConfig {
     fn default() -> Self {
-        AnalyticsConfig { location: "tables".into(), storage_options: Vec::new(), selected: None }
+        AnalyticsConfig { location: "tables".into(), storage_options: Vec::new(), selected: None, check_seconds: 2 }
     }
 }
 

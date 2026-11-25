@@ -12,11 +12,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use analytics_reader::catalog::{self, Entry};
-use analytics_reader::dashboard::{self, Dashboard as Data, PanelData};
+use analytics_reader::dashboard::{self, Dashboard as Data, PanelData, Period};
 use analytics_reader::frame::{Column, Frame, Values};
 use analytics_reader::location::{self, Location};
 use analytics_reader::manifest::{Format, PanelKind};
 use analytics_reader::status::{Status, now_ms};
+use analytics_reader::tuning::Tuning;
 use analytics_reader::Session;
 use iced::widget::{button, column, container, pick_list, responsive, row, scrollable, text, text_input, Id};
 use iced::{Alignment, Color, Element, Fill, Font, Length, Task, Theme};
@@ -27,7 +28,7 @@ use plotters::style::Color as _;
 use plotters_iced2::{Chart, ChartWidget, DrawingBackend};
 use tokio::sync::Mutex;
 
-use crate::gui::sidebar::{ERROR, MUTED};
+use crate::gui::sidebar::{ERROR, MUTED, SIDEBAR_WIDTH};
 
 const ACCENT: Color = Color::from_rgb(0.18, 0.42, 0.78);
 const SERIES: [Color; 4] = [
@@ -37,6 +38,11 @@ const SERIES: [Color; 4] = [
     Color::from_rgb(0.55, 0.30, 0.70),
 ];
 const OK: Color = Color::from_rgb(0.20, 0.60, 0.35);
+/// Chart gridlines: a few faint ones, no minor lines (as sniffnet does).
+const GRID: RGBColor = RGBColor(232, 232, 232);
+/// Chart axes, darker than the grid, so bars stand on a clear baseline.
+const AXIS: RGBColor = RGBColor(140, 140, 140);
+const CHART_TEXT: RGBColor = RGBColor(90, 90, 90);
 const WARN: Color = Color::from_rgb(0.80, 0.55, 0.10);
 
 /// An open table, shared with the background tasks that refresh it.
@@ -84,6 +90,73 @@ pub enum Msg {
     Plot(usize, PlotUiMessage),
     /// Something in the table of the panel with this number.
     Table(usize, TableMsg),
+    /// The Day / Week switch, for panels that use `{period}`.
+    Period(Period),
+    /// The Settings button while the Dashboard is open.
+    OpenSettings,
+    CloseSettings,
+    /// The shown table's lag settings, to fill the form with.
+    TuningRead(Result<Option<Tuning>, String>),
+    SettingEdited(LagField, String),
+    /// Save: the app keeps the check interval in config.toml; the daemon's
+    /// settings go next to every table at the location.
+    SaveSettings,
+    /// How many tables got the daemon's settings.
+    SettingsSaved(Result<usize, String>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LagField {
+    Check,
+    Every,
+    MinRows,
+    MaxWait,
+}
+
+/// The dashboard settings as edited, kept as text until saved: how often
+/// this window looks for a commit, and the daemon's lag settings (see
+/// `analytics_reader::tuning`), empty for the daemon's own value.
+pub struct LagForm {
+    check: String,
+    every: String,
+    min_rows: String,
+    max_wait: String,
+    saving: bool,
+    /// The outcome of the last save: success, and what it said.
+    said: Option<(bool, String)>,
+}
+
+impl LagForm {
+    fn field(&mut self, which: LagField) -> &mut String {
+        match which {
+            LagField::Check => &mut self.check,
+            LagField::Every => &mut self.every,
+            LagField::MinRows => &mut self.min_rows,
+            LagField::MaxWait => &mut self.max_wait,
+        }
+    }
+
+    /// The check interval and the daemon's settings, or what is wrong.
+    fn parse(&self) -> Result<(u64, Tuning), String> {
+        let number = |name: &str, v: &str, at_least: u64| -> Result<Option<u64>, String> {
+            match v.trim() {
+                "" => Ok(None),
+                v => match v.parse::<u64>() {
+                    Ok(n) if n >= at_least => Ok(Some(n)),
+                    _ => Err(format!("{name}: a whole number of at least {at_least}, or empty")),
+                },
+            }
+        };
+        let check = number("This window looks every", &self.check, 1)?.ok_or("This window looks every: a number of seconds")?;
+        Ok((
+            check,
+            Tuning {
+                every_seconds: number("Check the database every", &self.every, 1)?,
+                min_rows: number("Commit at", &self.min_rows, 1)?,
+                max_wait_seconds: number("…or after", &self.max_wait, 0)?,
+            },
+        ))
+    }
 }
 
 /// The table widget takes plain functions, so its messages say nothing of
@@ -117,7 +190,14 @@ pub struct Dashboard {
     tried: Option<i64>,
     plots: Vec<Option<PlotWidget>>,
     bars: Vec<Option<Bars>>,
+    columns: Vec<Option<Columns>>,
     tables: Vec<Option<TableState>>,
+    /// What `{period}` stands for in the panels that use it.
+    period: Period,
+    /// How often to look for a new commit, in seconds.
+    pub check_seconds: u64,
+    /// The dashboard settings, while they are open.
+    settings: Option<LagForm>,
 }
 
 impl Dashboard {
@@ -136,7 +216,11 @@ impl Dashboard {
             tried: None,
             plots: Vec::new(),
             bars: Vec::new(),
+            columns: Vec::new(),
             tables: Vec::new(),
+            period: Period::Day,
+            check_seconds: 2,
+            settings: None,
         }
     }
 
@@ -171,10 +255,11 @@ impl Dashboard {
         self.tried = None;
         let id = self.next_request();
         let location = self.root().map(|root| root.join(&name));
+        let period = self.period;
         Task::perform(
             async move {
                 let session = Session::open(&location?).await.map_err(|e| format!("{e:#}"))?;
-                let data = dashboard::load(&session).await.map_err(|e| format!("{e:#}"))?;
+                let data = dashboard::load_with(&session, period).await.map_err(|e| format!("{e:#}"))?;
                 let status = session.status().await.ok().flatten();
                 Ok(Opened { session: Shared(Arc::new(Mutex::new(session))), data: Arc::new(data), status })
             },
@@ -187,6 +272,7 @@ impl Dashboard {
             return Task::none();
         };
         let tried = self.tried;
+        let period = self.period;
         let id = self.next_request();
         Task::perform(
             async move {
@@ -196,7 +282,7 @@ impl Dashboard {
                 let data = if Some(version) != tried {
                     let loaded = async {
                         session.refresh().await?;
-                        dashboard::load(&session).await
+                        dashboard::load_with(&session, period).await
                     };
                     Some(loaded.await.map(Arc::new).map_err(|e| format!("{e:#}")))
                 } else {
@@ -227,6 +313,93 @@ impl Dashboard {
             Msg::Check => {
                 if !self.busy {
                     return self.check();
+                }
+            }
+            Msg::Period(period) => {
+                self.period = period;
+                // Load the same version again with the new period; if a
+                // request is running, the next check does it.
+                self.tried = None;
+                if !self.busy {
+                    return self.check();
+                }
+            }
+            Msg::OpenSettings => {
+                let in_force = self.status.as_ref().filter(|s| s.min_rows > 0);
+                self.settings = Some(LagForm {
+                    check: self.check_seconds.to_string(),
+                    every: in_force.map(|s| (s.every_ms / 1000).to_string()).unwrap_or_default(),
+                    min_rows: in_force.map(|s| s.min_rows.to_string()).unwrap_or_default(),
+                    max_wait: in_force.map(|s| (s.max_wait_ms / 1000).to_string()).unwrap_or_default(),
+                    saving: false,
+                    said: None,
+                });
+                // What the table's file says wins over the heartbeat.
+                let (Ok(root), Some(name)) = (self.root(), self.selected.clone()) else { return Task::none() };
+                return Task::perform(
+                    async move { Tuning::read_at(&root.join(&name)).await.map_err(|e| format!("{e:#}")) },
+                    Msg::TuningRead,
+                );
+            }
+            Msg::CloseSettings => self.settings = None,
+            Msg::TuningRead(result) => {
+                if let (Some(form), Ok(Some(t))) = (&mut self.settings, result) {
+                    let text = |v: Option<u64>| v.map(|n| n.to_string()).unwrap_or_default();
+                    form.every = text(t.every_seconds);
+                    form.min_rows = text(t.min_rows);
+                    form.max_wait = text(t.max_wait_seconds);
+                }
+            }
+            Msg::SettingEdited(which, value) => {
+                if let Some(form) = &mut self.settings {
+                    *form.field(which) = value;
+                    form.said = None;
+                }
+            }
+            Msg::SaveSettings => {
+                let Some(form) = &mut self.settings else { return Task::none() };
+                let (check, tuning) = match form.parse() {
+                    Ok(parsed) => parsed,
+                    Err(e) => {
+                        form.said = Some((false, e));
+                        return Task::none();
+                    }
+                };
+                self.check_seconds = check;
+                let root = match self.root() {
+                    Ok(root) => root,
+                    Err(e) => {
+                        if let Some(form) = &mut self.settings {
+                            form.said = Some((false, e));
+                        }
+                        return Task::none();
+                    }
+                };
+                if let Some(form) = &mut self.settings {
+                    form.saving = true;
+                }
+                let names: Vec<String> = self.entries.iter().map(|e| e.name.clone()).collect();
+                return Task::perform(
+                    async move {
+                        for name in &names {
+                            tuning.write_at(&root.join(name)).await.map_err(|e| format!("{name}: {e:#}"))?;
+                        }
+                        Ok(names.len())
+                    },
+                    Msg::SettingsSaved,
+                );
+            }
+            Msg::SettingsSaved(result) => {
+                if let Some(form) = &mut self.settings {
+                    form.saving = false;
+                    form.said = Some(match result {
+                        Ok(0) => (true, "Saved. There are no tables here yet for the daemon's settings.".into()),
+                        Ok(n) => (
+                            true,
+                            format!("Saved. The daemon takes up its settings for the {n} table{} at its next check.", if n == 1 { "" } else { "s" }),
+                        ),
+                        Err(e) => (false, format!("The daemon's settings could not be written: {e}")),
+                    });
                 }
             }
             Msg::Listed(id, _) | Msg::Opened(id, _) | Msg::Checked(id, _) if id != self.request => {}
@@ -319,6 +492,7 @@ impl Dashboard {
         self.tried = None;
         self.plots.clear();
         self.bars.clear();
+        self.columns.clear();
         self.tables.clear();
     }
 
@@ -337,6 +511,7 @@ impl Dashboard {
         }
         self.plots = data.panels.iter().map(time_plot).collect();
         self.bars = data.panels.iter().map(Bars::new).collect();
+        self.columns = data.panels.iter().map(Columns::new).collect();
         self.tables = (0..data.panels.len()).map(|i| TableState::new(&data, i, old.remove(&data.panels[i].panel.title))).collect();
         self.data = Some(data);
     }
@@ -362,6 +537,22 @@ impl Dashboard {
         ]
         .spacing(8)
         .align_y(Alignment::Center);
+        // Day / Week, when a panel of this table lets the viewer pick.
+        let header = match &self.data {
+            Some(d) if d.panels.iter().any(|p| dashboard::uses_period(&p.panel)) => {
+                let choice = |label: &'static str, period: Period| {
+                    button(text(label).size(12))
+                        .style(if self.period == period { button::primary } else { button::secondary })
+                        .on_press(Msg::Period(period))
+                };
+                header.push(
+                    row![text("Per").size(12).color(MUTED), choice("Day", Period::Day), choice("Week", Period::Week)]
+                        .spacing(4)
+                        .align_y(Alignment::Center),
+                )
+            }
+            _ => header,
+        };
 
         let mut col = column![header].spacing(8).padding(10).width(Fill).height(Fill);
         if let Some(status) = self.status_view() {
@@ -385,6 +576,74 @@ impl Dashboard {
             .into(),
         };
         col.push(body).into()
+    }
+
+    /// The dashboard settings, beside the dashboard while they are open.
+    pub fn settings_view(&self) -> Option<Element<'_, Msg>> {
+        let form = self.settings.as_ref()?;
+        let field = |label: &'static str, unit: &'static str, value: &str, which: LagField| {
+            row![
+                text(label).size(13).width(Fill),
+                text_input("", value).on_input(move |v| Msg::SettingEdited(which, v)).size(13).width(80),
+                text(unit).size(12).color(MUTED).width(36),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center)
+        };
+        let heading = |label: &'static str| text(label).size(14).font(Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT });
+        let note = |s: String| text(s).size(11).color(MUTED);
+        let tables = self.entries.len();
+
+        let mut col = iced::widget::Column::new().spacing(10).padding(16).width(SIDEBAR_WIDTH);
+        col = col.push(
+            row![
+                text("Dashboard settings").size(18).width(Fill),
+                button(text("Back").size(12)).style(button::secondary).on_press(Msg::CloseSettings),
+            ]
+            .align_y(Alignment::Center),
+        );
+        col = col.push(note(
+            "A new ledger row shows up here once the daemon has seen it, committed it to its table, and this window has looked for the commit."
+                .into(),
+        ));
+
+        col = col.push(heading("This window"));
+        col = col.push(field("Look for new commits every", "s", &form.check, LagField::Check));
+        col = col.push(note("Saved in config.toml.".into()));
+
+        col = col.push(heading("The daemon"));
+        col = col.push(field("Check the database every", "s", &form.every, LagField::Every));
+        col = col.push(field("Commit at", "rows", &form.min_rows, LagField::MinRows));
+        col = col.push(field("…or once the oldest has waited", "s", &form.max_wait, LagField::MaxWait));
+        col = col.push(note(format!(
+            "Saved next to {} at this location; the daemon takes them up at its next check, without a restart. Empty: the daemon's own setting. Committing less often keeps fewer, bigger files.",
+            match tables {
+                1 => "the table".to_string(),
+                n => format!("all {n} tables"),
+            }
+        )));
+        if let Some(s) = self.status.as_ref().filter(|s| s.min_rows > 0) {
+            col = col.push(note(format!(
+                "In force now for {}: every {} s, at {} rows or after {} s.",
+                self.selected.as_deref().unwrap_or("this table"),
+                s.every_ms / 1000,
+                s.min_rows,
+                s.max_wait_ms / 1000
+            )));
+        }
+        if let Ok((check, tuning)) = form.parse() {
+            let every = tuning.every_seconds.or(self.status.as_ref().map(|s| (s.every_ms / 1000) as u64));
+            let wait = tuning.max_wait_seconds.or(self.status.as_ref().filter(|s| s.min_rows > 0).map(|s| (s.max_wait_ms / 1000) as u64));
+            if let (Some(every), Some(wait)) = (every, wait) {
+                col = col.push(text(format!("On a quiet ledger, new rows show up within about {} s.", every + wait + check)).size(12));
+            }
+        }
+        let save = button(text(if form.saving { "Saving…" } else { "Save" }).size(13)).style(button::primary);
+        col = col.push(if form.saving { save } else { save.on_press(Msg::SaveSettings) });
+        if let Some((ok, said)) = &form.said {
+            col = col.push(text(said).size(12).color(if *ok { OK } else { ERROR }));
+        }
+        Some(scrollable(col).height(Fill).into())
     }
 
     /// The daemon's heartbeat, in words.
@@ -465,9 +724,10 @@ impl Dashboard {
                     Some(plot) => plot.view().map(move |m| Msg::Plot(i, m)),
                     None => empty("No time or number column to draw."),
                 },
-                PanelKind::Bar => match &self.bars[i] {
-                    Some(bars) => ChartWidget::new(bars).width(Fill).height(Fill).into(),
-                    None => empty("Needs a label column and a number column."),
+                PanelKind::Bar => match (&self.columns[i], &self.bars[i]) {
+                    (Some(columns), _) => ChartWidget::new(columns).width(Fill).height(Fill).into(),
+                    (None, Some(bars)) => ChartWidget::new(bars).width(Fill).height(Fill).into(),
+                    (None, None) => empty("Needs a label column and a number column."),
                 },
                 PanelKind::Table => match &self.tables[i] {
                     Some(t) => t.view().map(move |m| Msg::Table(i, m)),
@@ -499,12 +759,12 @@ fn empty<'a>(message: &'a str) -> Element<'a, Msg> {
 /// One card per column, from the first row.
 fn stats(frame: &Frame) -> Element<'_, Msg> {
     let cards = frame.columns.iter().map(|c| {
-        container(column![text(value(c, 0)).size(22).color(ACCENT), text(c.name.clone()).size(11).color(MUTED)].spacing(2))
-            .padding([6, 14])
-            .style(container::rounded_box)
+        // Plain figures with their label, not boxes: boxes read as buttons.
+        container(column![text(value(c, 0)).size(24).color(ACCENT), text(c.name.clone()).size(12).color(MUTED)].spacing(0))
+            .padding([2, 0])
             .into()
     });
-    scrollable(row(cards).spacing(10)).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new())).into()
+    scrollable(row(cards).spacing(36)).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new())).into()
 }
 
 /// A value as text, in its column's format.
@@ -588,16 +848,21 @@ fn time_plot(p: &PanelData) -> Option<PlotWidget> {
                 Some(format!("{}: {}", time_label(point.x as i64, bucket as i64), number(point.y)))
             })
     } else {
+        // Offsets and other counts are whole numbers: no ticks between them.
+        let whole = xs.iter().flatten().all(|x| x.fract() == 0.0);
+        let floor = if whole { 1.0 } else { 0.0 };
         let name = x_column.name.clone();
         builder
-            .with_x_tick_producer(|min, max| axis_ticks(min, max, round_step((max - min) / 5.0)))
+            .with_x_tick_producer(move |min, max| axis_ticks(min, max, round_step((max - min) / 5.0).max(floor)))
             .with_x_tick_formatter(|tick| short_number(tick.value))
             .with_hover_highlight_provider(move |_, point| {
                 Some(format!("{name} {}: {}", number(point.x), number(point.y)))
             })
     };
     let mut builder = builder
-        .with_y_tick_formatter(|tick| number(tick.value + 0.0))
+        // About five ticks up the side, as on the column charts.
+        .with_y_tick_producer(|min, max| axis_ticks(min, max, round_step((max - min) / 5.0)))
+        .with_y_tick_formatter(|tick| short_number(tick.value + 0.0))
         .with_tick_label_size(11.0)
         .with_controls(controls())
         .disable_controls_help();
@@ -648,8 +913,8 @@ fn short_number(n: f64) -> String {
 
 /// A tick spacing that gives at most about six ticks over `span` seconds.
 fn tick_step(span: f64) -> f64 {
-    const STEPS: [f64; 14] = [
-        60.0, 300.0, 900.0, 1_800.0, 3_600.0, 10_800.0, 21_600.0, 43_200.0, 86_400.0, 172_800.0, 604_800.0,
+    const STEPS: [f64; 19] = [
+        1.0, 5.0, 10.0, 15.0, 30.0, 60.0, 300.0, 900.0, 1_800.0, 3_600.0, 10_800.0, 21_600.0, 43_200.0, 86_400.0, 172_800.0, 604_800.0,
         1_209_600.0, 2_592_000.0, 7_776_000.0,
     ];
     STEPS.into_iter().find(|s| span / s <= 6.0).unwrap_or((span / 6.0 / 86_400.0).ceil() * 86_400.0)
@@ -682,7 +947,10 @@ fn axis_ticks(min: f64, max: f64, step: f64) -> Vec<iced_plot::Tick> {
 
 /// `11-02 09:00` for ticks under a day apart, `2026-11-02` otherwise (UTC).
 fn short_time_label(seconds: i64, step: f64) -> String {
-    if step < 86_400.0 {
+    if step < 60.0 {
+        let label = time_label(seconds, 1);
+        label.get(11..).unwrap_or(&label).to_string()
+    } else if step < 86_400.0 {
         let label = time_label(seconds, 60);
         label.get(5..).unwrap_or(&label).to_string()
     } else {
@@ -698,6 +966,7 @@ fn bucket_name(seconds: i64) -> String {
         3_600 => "hour".into(),
         s if s % 3_600 == 0 => format!("{} hours", s / 3_600),
         60 => "minute".into(),
+        1 => "second".into(),
         s if s % 60 == 0 => format!("{} minutes", s / 60),
         s => format!("{s} seconds"),
     }
@@ -749,22 +1018,28 @@ impl Chart<Msg> for &Bars {
         else {
             return;
         };
-        let label_style = ("sans-serif", 12).into_font().color(&RGBColor(90, 90, 90));
+        // `sans-serif` is iced's default family, the font the rest of the window uses.
+        let label_style = ("sans-serif", 12).into_font().color(&CHART_TEXT);
         let _ = chart
             .configure_mesh()
             .disable_y_mesh()
             .y_labels(n as usize)
             .y_label_formatter(&|v| match v {
                 SegmentValue::CenterOf(y) | SegmentValue::Exact(y) => {
-                    self.labels.get((n - 1 - y) as usize).map(|l| shorten(l, 26)).unwrap_or_default()
+                    self.labels.get((n - 1 - y) as usize).map(|l| short_id(l)).unwrap_or_default()
                 }
                 SegmentValue::Last => String::new(),
             })
+            .x_labels(5)
+            .x_label_formatter(&|v| short_number(*v))
             .x_desc(self.axis.clone())
             .label_style(label_style.clone())
             .axis_desc_style(label_style)
-            .light_line_style(RGBColor(235, 235, 235))
-            .bold_line_style(RGBColor(220, 220, 220))
+            // No minor lines. Not `max_light_lines(0)`: on a segmented
+            // (whole-number) axis plotters then loops until it overflows.
+            .light_line_style(TRANSPARENT)
+            .bold_line_style(GRID)
+            .axis_style(AXIS.stroke_width(1))
             .draw();
         let bar = RGBColor(46, 107, 199);
         let _ = chart.draw_series(self.values.iter().enumerate().filter_map(|(i, v)| {
@@ -775,6 +1050,125 @@ impl Chart<Msg> for &Bars {
             Some(r)
         }));
     }
+}
+
+/// Columns over time: a bar panel whose label column is a time draws one
+/// upright column per row, left to right, labelled by date, or by ISO week
+/// number when the rows are weeks.
+pub struct Columns {
+    /// Each row's start, in seconds.
+    starts: Vec<i64>,
+    values: Vec<Option<f64>>,
+    /// The rows' spacing, in seconds.
+    step: i64,
+}
+
+impl Columns {
+    fn new(p: &PanelData) -> Option<Columns> {
+        if p.panel.kind != PanelKind::Bar {
+            return None;
+        }
+        let frame = p.frame.as_ref().ok()?;
+        let label = frame.columns.iter().find(|c| !matches!(c.values, Values::Number(_)))?;
+        let Values::Time(times) = &label.values else {
+            return None;
+        };
+        let value_column = frame.columns.iter().find(|c| matches!(c.values, Values::Number(_)))?;
+        let starts: Vec<i64> = times.iter().map(|t| t.map(|us| us.div_euclid(1_000_000))).collect::<Option<_>>()?;
+        let values = (0..starts.len()).map(|r| value_column.values.number(r)).collect();
+        let step = p.bucket_seconds.or_else(|| starts.windows(2).map(|w| w[1] - w[0]).filter(|d| *d > 0).min()).unwrap_or(86_400);
+        Some(Columns { starts, values, step })
+    }
+
+    /// Rows a week apart that start on Mondays.
+    fn weeks(&self) -> bool {
+        self.step == 604_800 && self.starts.iter().all(|s| (s.div_euclid(86_400) + 3).rem_euclid(7) == 0)
+    }
+
+    /// `W48`, with the year on the first column and on each year's first
+    /// week; a date for days; a time for anything shorter.
+    fn label(&self, i: usize) -> String {
+        let Some(&start) = self.starts.get(i) else {
+            return String::new();
+        };
+        if self.weeks() {
+            let (year, week) = iso_week(start.div_euclid(86_400));
+            if i == 0 || week == 1 { format!("{year} W{week:02}") } else { format!("W{week:02}") }
+        } else {
+            time_label(start, self.step)
+        }
+    }
+}
+
+impl Chart<Msg> for &Columns {
+    type State = ();
+
+    fn build_chart<DB: DrawingBackend>(&self, _: &(), mut builder: ChartBuilder<DB>) {
+        let n = self.starts.len() as i32;
+        let max = self.values.iter().flatten().fold(0.0, |m: f64, v| m.max(*v)).max(f64::MIN_POSITIVE);
+        let lo = self.values.iter().flatten().fold(0.0, |m: f64, v| m.min(*v));
+        let Ok(mut chart) = builder
+            .margin(8)
+            .x_label_area_size(36)
+            .y_label_area_size(64)
+            .build_cartesian_2d((0..n).into_segmented(), lo * 1.1..max * 1.1)
+        else {
+            return;
+        };
+        // `sans-serif` is iced's default family, the font the rest of the window uses.
+        let label_style = ("sans-serif", 12).into_font().color(&CHART_TEXT);
+        // Few labels read calmer; week numbers are short, so a few more fit.
+        let labels = if self.weeks() { 12 } else { 8 };
+        let _ = chart
+            .configure_mesh()
+            .disable_x_mesh()
+            .x_labels(labels)
+            .x_label_formatter(&|v| match v {
+                SegmentValue::CenterOf(x) | SegmentValue::Exact(x) => self.label(*x as usize),
+                SegmentValue::Last => String::new(),
+            })
+            // No axis name: the panel's title already says what is counted,
+            // and a side label crowds the numbers in a narrow panel.
+            .y_labels(5)
+            .y_label_formatter(&|v| short_number(*v))
+            .label_style(label_style.clone())
+            .axis_desc_style(label_style)
+            // No minor lines. Not `max_light_lines(0)`: on a segmented
+            // (whole-number) axis plotters then loops until it overflows.
+            .light_line_style(TRANSPARENT)
+            .bold_line_style(GRID)
+            .axis_style(AXIS.stroke_width(1))
+            .draw();
+        let bar = RGBColor(46, 107, 199);
+        let gap = if n > 120 { 0 } else { 2 };
+        let _ = chart.draw_series(self.values.iter().enumerate().filter_map(|(i, v)| {
+            let x = i as i32;
+            let mut r = Rectangle::new([(SegmentValue::Exact(x), 0.0), (SegmentValue::Exact(x + 1), (*v)?)], bar.mix(0.8).filled());
+            r.set_margin(0, 0, gap, gap);
+            Some(r)
+        }));
+    }
+}
+
+/// The ISO 8601 year and week number of a day (days since 1970-01-01):
+/// weeks start on Monday, and week 1 holds the year's first Thursday.
+fn iso_week(day: i64) -> (i64, i64) {
+    let weekday = (day + 3).rem_euclid(7); // Monday is 0; 1970-01-01 was a Thursday.
+    let thursday = day - weekday + 3;
+    let (year, _, _) = civil_from_days(thursday);
+    let january_first = days_from_civil(year, 1, 1);
+    (year, (thursday - january_first) / 7 + 1)
+}
+
+/// (year, month, day) to days since 1970-01-01, from Howard Hinnant's algorithm.
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let mp = (i64::from(m) + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + i64::from(d) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 /// A table panel: its columns and the order of its rows.
@@ -906,8 +1300,13 @@ impl<'a> table::Column<'a, TableMsg, Theme, iced::Renderer> for TableColumn {
 
     fn cell(&'a self, _: usize, _: usize, row: &'a usize) -> Element<'a, TableMsg> {
         let c = &self.frame().columns[self.column];
-        let t = text(value(c, *row)).size(12);
-        if c.effective_format() == Format::Id { t.font(Font::MONOSPACE).into() } else { t.into() }
+        // One line, clipped to the column, so a long value can't run over
+        // its neighbours; ids are shortened the way the bar charts do.
+        let t = match c.effective_format() {
+            Format::Id => text(short_id(&value(c, *row))).font(Font::MONOSPACE),
+            _ => text(value(c, *row)),
+        };
+        container(t.size(12).wrapping(iced::widget::text::Wrapping::None)).width(Fill).clip(true).into()
     }
 
     fn width(&self) -> f32 {
@@ -944,12 +1343,20 @@ fn ago(seconds: i64) -> String {
     }
 }
 
-fn shorten(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        format!("…{}", s.chars().rev().take(max - 1).collect::<Vec<_>>().into_iter().rev().collect::<String>())
+/// A party or contract id short enough for a column or an axis:
+/// `Alice::1220d45c…bf9f` keeps the party's name and both ends of its hash.
+fn short_id(s: &str) -> String {
+    let (name, hash) = match s.split_once("::") {
+        Some((name, hash)) => (format!("{name}::"), hash),
+        None => (String::new(), s),
+    };
+    let chars: Vec<char> = hash.chars().collect();
+    if chars.len() <= 14 {
+        return s.to_string();
     }
+    let head: String = chars[..8].iter().collect();
+    let tail: String = chars[chars.len() - 4..].iter().collect();
+    format!("{name}{head}…{tail}")
 }
 
 /// `2026-11-02 09:00:05`, `2026-11-02 09:00` or `2026-11-02` for a
@@ -1053,8 +1460,42 @@ mod tests {
         assert_eq!(bucket_name(3_600), "hour");
         assert_eq!(bucket_name(21_600), "6 hours");
         assert_eq!(ago(3_700), "61 min ago");
-        assert_eq!(shorten("Main.TicketOffer", 8), "…etOffer");
+        assert_eq!(short_id("Alice::1220d45c8b0b8dec9f71038b"), "Alice::1220d45c…038b");
+        assert_eq!(short_id("00c5e9f6a1b2c3d4e5f60718"), "00c5e9f6…0718");
+        assert_eq!(short_id("Bob::1220ab"), "Bob::1220ab");
+        assert_eq!(short_time_label(45_296, 5.0), "12:34:56");
+        assert_eq!(bucket_name(1), "second");
         assert!(tick_step(86_400.0) <= 21_600.0);
+    }
+
+    #[test]
+    fn lag_settings_parse_with_empty_for_the_daemons_own() {
+        let form = |check: &str, every: &str, min_rows: &str, max_wait: &str| LagForm {
+            check: check.into(),
+            every: every.into(),
+            min_rows: min_rows.into(),
+            max_wait: max_wait.into(),
+            saving: false,
+            said: None,
+        };
+        let (check, tuning) = form("2", "", " 1000 ", "0").parse().unwrap();
+        assert_eq!(check, 2);
+        assert_eq!(tuning, Tuning { every_seconds: None, min_rows: Some(1000), max_wait_seconds: Some(0) });
+        assert!(form("0", "", "", "").parse().is_err(), "this window must look at least every second");
+        assert!(form("", "", "", "").parse().is_err());
+        assert!(form("2", "0", "", "").parse().is_err());
+        assert!(form("2", "", "lots", "").parse().is_err());
+    }
+
+    #[test]
+    fn iso_week_numbers() {
+        let day = |y, m, d| days_from_civil(y, m, d);
+        assert_eq!(civil_from_days(day(2026, 11, 24)), (2026, 11, 24));
+        assert_eq!(iso_week(day(2026, 11, 24)), (2026, 48));
+        assert_eq!(iso_week(day(2026, 1, 1)), (2026, 1)); // a Thursday
+        assert_eq!(iso_week(day(2027, 1, 1)), (2026, 53)); // a Friday
+        assert_eq!(iso_week(day(2024, 12, 30)), (2025, 1)); // a Monday
+        assert_eq!(iso_week(day(2025, 12, 28)), (2025, 52)); // a Sunday
     }
 
     #[test]
