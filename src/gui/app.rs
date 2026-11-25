@@ -202,6 +202,8 @@ pub enum Message {
     QueryEdited(text_editor::Action),
     /// Empties the query editor.
     ClearQuery,
+    /// Copies the last query result to the clipboard.
+    CopyQueryResult(crate::gui::query_panel::CopyFormat),
     RunQuery,
     /// Shows the analytics dashboard (true) or the graph (false).
     #[cfg(feature = "dashboard")]
@@ -843,6 +845,12 @@ impl App {
                 self.fit_panel();
             }
             Message::ClearQuery => self.query_text = text_editor::Content::new(),
+            Message::CopyQueryResult(format) => {
+                if let Some((copied, what)) = self.query_outcome.as_ref().and_then(|o| format.render(o, &self.query_ran)) {
+                    self.notice = Some(format!("Copied {what}"));
+                    return iced::clipboard::write(copied);
+                }
+            }
             Message::PanelDragStart => self.panel_drag = Some(None),
             Message::PanelDrag(y) => match self.panel_drag {
                 Some(None) => self.panel_drag = Some(Some((y, self.panel_height, self.panel_height + self.canvas_size.height))),
