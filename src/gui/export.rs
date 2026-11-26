@@ -30,6 +30,10 @@ const MAX_PIXELS: f32 = 40_000_000.0;
 const STANDARD_MARGIN: f32 = 110.0;
 /// Room below the Canton view's cards for its legend.
 const LEGEND_ROOM: f32 = 40.0;
+/// A plain border around the picture, in canvas pixels. Apps (Claude among
+/// them) show pasted images with rounded corners, which would clip what the
+/// canvas draws near its edges, such as the Canton view's legend.
+const FRAME: f32 = 32.0;
 
 /// What the picture shows: the graph as the window draws it, with the
 /// selection (the hover is left out: it only follows the mouse).
@@ -78,7 +82,7 @@ impl Scene<'_> {
     /// Draws the whole graph. `None` when there is nothing to draw.
     pub fn render(&self) -> Result<Option<Image>, String> {
         let Some((size, camera)) = self.frame() else { return Ok(None) };
-        let ratio = pixel_ratio(size);
+        let ratio = pixel_ratio(Size::new(size.width + 2.0 * FRAME, size.height + 2.0 * FRAME));
         let physical = iced::Size::new(
             ((size.width * ratio).round() as u32).max(1),
             ((size.height * ratio).round() as u32).max(1),
@@ -102,7 +106,8 @@ impl Scene<'_> {
             renderer.draw_geometry(geometry);
         }
         let rgba = renderer.screenshot(physical, ratio, Color::WHITE);
-        Ok(Some(Image { width: physical.width, height: physical.height, rgba }))
+        let image = Image { width: physical.width, height: physical.height, rgba };
+        Ok(Some(image.framed((FRAME * ratio).round() as u32)))
     }
 }
 
@@ -126,6 +131,23 @@ fn pixel_ratio(size: Size) -> f32 {
 }
 
 impl Image {
+    /// The image with a border `width` pixels wide all round, in the colour
+    /// of its top-left pixel (the canvas's background).
+    fn framed(self, width: u32) -> Image {
+        if width == 0 || self.rgba.len() < 4 {
+            return self;
+        }
+        let fill = [self.rgba[0], self.rgba[1], self.rgba[2], self.rgba[3]];
+        let (w, h) = (self.width + 2 * width, self.height + 2 * width);
+        let mut rgba = fill.repeat((w * h) as usize);
+        let row = (self.width * 4) as usize;
+        for (y, line) in self.rgba.chunks_exact(row).enumerate() {
+            let start = (((y as u32 + width) * w + width) * 4) as usize;
+            rgba[start..start + row].copy_from_slice(line);
+        }
+        Image { width: w, height: h, rgba }
+    }
+
     /// The image as a PNG file's bytes.
     pub fn png(&self) -> Result<Vec<u8>, String> {
         let mut out = Vec::new();
@@ -243,8 +265,9 @@ mod tests {
             canton_height: 0.0,
         };
         let image = scene.render().unwrap().unwrap();
-        // 3000 canvas pixels between the records, plus the margins, at twice the size.
-        assert_eq!(image.width, ((3000.0 + 2.0 * STANDARD_MARGIN) * PIXEL_RATIO) as u32);
+        // 3000 canvas pixels between the records, plus the margins and the
+        // frame, at twice the size.
+        assert_eq!(image.width, ((3000.0 + 2.0 * (STANDARD_MARGIN + FRAME)) * PIXEL_RATIO) as u32);
         assert_eq!(image.rgba.len(), (image.width * image.height * 4) as usize);
         // Both records are drawn: the picture is not just the background.
         let pixel = |x: u32, y: u32| {
@@ -253,7 +276,7 @@ mod tests {
         };
         let background = pixel(1, 1);
         let mid_y = image.height / 2 - (20.0 * PIXEL_RATIO) as u32;
-        let left = (STANDARD_MARGIN * PIXEL_RATIO) as u32;
+        let left = ((STANDARD_MARGIN + FRAME) * PIXEL_RATIO) as u32;
         assert_ne!(pixel(left, mid_y), background, "the left record is missing");
         assert_ne!(pixel(image.width - left, image.height / 2 + (20.0 * PIXEL_RATIO) as u32), background, "the right record is missing");
         assert!(image.png().unwrap().starts_with(b"\x89PNG"));
@@ -271,6 +294,20 @@ mod tests {
             canton_height: 0.0,
         };
         assert!(scene.render().unwrap().is_none());
+    }
+
+    #[test]
+    fn the_frame_surrounds_the_picture() {
+        let image = Image { width: 2, height: 1, rgba: vec![1, 2, 3, 255, 9, 9, 9, 255] }.framed(1);
+        assert_eq!((image.width, image.height), (4, 3));
+        let pixel = |x: u32, y: u32| {
+            let i = ((y * image.width + x) * 4) as usize;
+            image.rgba[i..i + 4].to_vec()
+        };
+        assert_eq!(pixel(0, 0), [1, 2, 3, 255]);
+        assert_eq!(pixel(1, 1), [1, 2, 3, 255]);
+        assert_eq!(pixel(2, 1), [9, 9, 9, 255]);
+        assert_eq!(pixel(3, 2), [1, 2, 3, 255]);
     }
 
     #[test]
