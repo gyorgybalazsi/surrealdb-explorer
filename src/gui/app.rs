@@ -705,6 +705,11 @@ impl App {
             }
             Message::MenuShowInTable => {
                 let Some((node, _)) = self.menu.take() else { return Task::none() };
+                if self.query_running {
+                    // Its result would take this query's place.
+                    self.notice = Some("A query is still running: try again when it's done".into());
+                    return Task::none();
+                }
                 let id = self.graph.nodes[node].id.clone();
                 self.query_open = true;
                 self.query_text = text_editor::Content::with_text(&format!("SELECT * FROM {id};"));
@@ -747,7 +752,11 @@ impl App {
                 );
             }
             Message::RelatedLoaded(what, id, Ok(Some((select, result)))) => {
-                let Some((added, links)) = self.add_around(&id, result) else { return Task::none() };
+                let Some((added, links)) = self.add_around(&id, result) else {
+                    // The record went from the graph meanwhile (a reload).
+                    self.notice = None;
+                    return Task::none();
+                };
                 self.select_record(&select);
                 self.notice = Some(match (what, added + links) {
                     (Related::Transaction, 0) => "Its transaction is already shown".to_string(),
@@ -1398,6 +1407,7 @@ impl App {
         self.camera = Camera::default();
         self.hover = None;
         self.selection = None;
+        self.focused = None;
         self.menu = None;
         self.dragging = None;
         self.layout.reheat(1.0);
@@ -1419,6 +1429,7 @@ impl App {
         self.notice = notice.map(Into::into);
         self.hover = None;
         self.selection = None;
+        self.focused = None;
         self.menu = None;
         self.dragging = None;
         self.layout.reheat(0.5);
@@ -2006,6 +2017,7 @@ impl App {
         self.camera = Camera::default();
         self.hover = None;
         self.selection = None;
+        self.focused = None;
         self.menu = None;
         self.dragging = None;
         self.layout.reheat(1.0);
@@ -2215,6 +2227,7 @@ impl App {
         .padding([6, 10]);
         let entries = if self.overview {
             vec![
+                MenuEntry::Rule,
                 MenuEntry::Item("Show records".into(), Message::MenuShowRecords),
                 MenuEntry::Item("Inspect".into(), Message::MenuInspect),
             ]
