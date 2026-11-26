@@ -14,7 +14,9 @@ iced_plot = { version = "0.5", optional = true }
 iced_table2 = { version = "0.14", optional = true }
 plotters = { version = "0.3", default-features = false, optional = true }
 plotters-iced2 = { version = "0.14", optional = true }
-iced = { version = "0.14", features = ["canvas", "tokio"] }
+iced = { version = "0.14", features = ["advanced", "canvas", "tokio"] }
+# Copies a picture of the graph: iced's clipboard only holds text.
+arboard = "3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 surrealdb = "4.0.0"

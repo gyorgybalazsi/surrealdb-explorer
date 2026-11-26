@@ -141,6 +141,14 @@ pub enum Message {
     MenuHide,
     MenuFocus,
     MenuCopy,
+    /// Opens the background menu where the canvas was right-clicked, off any record.
+    CanvasMenu(Point),
+    /// Copies a picture of the whole graph to the clipboard (also ⌘⇧C / Ctrl+Shift+C).
+    CopyImage,
+    /// Saves a picture of the whole graph as a PNG in the Downloads folder.
+    SaveImage,
+    /// A picture was copied or saved: what to tell the user, or what went wrong.
+    ImageDone(Result<String, String>),
     ShowAll,
     Reload,
     /// Shows the tables as a graph.
@@ -268,6 +276,8 @@ pub struct App {
     pub(super) selection: Option<Selection>,
     /// Open record menu: the record and where it was right-clicked.
     pub(super) menu: Option<(usize, Point)>,
+    /// Open background menu: where the canvas was right-clicked.
+    pub(super) canvas_menu: Option<Point>,
     pub(super) dragging: Option<usize>,
     pub(super) error: Option<String>,
     pub(super) notice: Option<String>,
@@ -427,6 +437,7 @@ impl App {
             hover: None,
             selection: None,
             menu: None,
+            canvas_menu: None,
             dragging: None,
             error: None,
             notice: None,
@@ -536,7 +547,25 @@ impl App {
         #[cfg(not(feature = "dashboard"))]
         let dashboard = Subscription::none();
         let memory = Subscription::run(memory_alarms);
-        Subscription::batch([frames, refresh, opened, panel_drag, dashboard, memory, Subscription::run(mcp_commands)])
+        // ⌘⇧C (Ctrl+Shift+C elsewhere) copies a picture of the whole graph.
+        let copy_image = iced::keyboard::listen().filter_map(|event| match event {
+            iced::keyboard::Event::KeyPressed { key: iced::keyboard::Key::Character(c), modifiers, .. }
+                if modifiers.command() && modifiers.shift() && c.eq_ignore_ascii_case("c") =>
+            {
+                Some(Message::CopyImage)
+            }
+            _ => None,
+        });
+        Subscription::batch([
+            frames,
+            refresh,
+            opened,
+            panel_drag,
+            dashboard,
+            memory,
+            copy_image,
+            Subscription::run(mcp_commands),
+        ])
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -590,8 +619,25 @@ impl App {
                 self.camera.offset = from_centre - anchor * scale;
                 self.camera.scale = scale;
             }
-            Message::OpenMenu(node, at) => self.menu = Some((node, at)),
-            Message::CloseMenu => self.menu = None,
+            Message::OpenMenu(node, at) => {
+                self.menu = Some((node, at));
+                self.canvas_menu = None;
+            }
+            Message::CloseMenu => {
+                self.menu = None;
+                self.canvas_menu = None;
+            }
+            Message::CanvasMenu(at) => {
+                self.menu = None;
+                self.canvas_menu = Some(at);
+            }
+            Message::CopyImage => return self.export_image(false),
+            Message::SaveImage => return self.export_image(true),
+            Message::ImageDone(Ok(done)) => self.notice = Some(done),
+            Message::ImageDone(Err(e)) => {
+                self.notice = None;
+                self.error = Some(e);
+            }
             Message::MenuInspect => {
                 if let Some((node, _)) = self.menu.take() {
                     self.selection = Some(Selection::Node(node));
@@ -1865,6 +1911,57 @@ impl App {
         )
     }
 
+    /// Draws the whole graph offscreen, then copies the picture to the
+    /// clipboard or (with `save`) saves it as a PNG in the Downloads folder.
+    /// Encoding and copying run off the window's thread.
+    fn export_image(&mut self, save: bool) -> Task<Message> {
+        self.canvas_menu = None;
+        // The shortcut does nothing while the dashboard is open.
+        #[cfg(feature = "dashboard")]
+        if self.dashboard_open {
+            return Task::none();
+        }
+        let scene = crate::gui::export::Scene {
+            graph: &self.graph,
+            visualization: self.config.graph.visualization,
+            selection: self.selection,
+            camera: self.camera,
+            canton: (self.canton_scale(), self.canton_fill_width()),
+            canton_height: self.canton_content_height(),
+        };
+        let image = match scene.render() {
+            Ok(Some(image)) => image,
+            Ok(None) => {
+                self.notice = Some("Nothing to copy: no records are shown".into());
+                return Task::none();
+            }
+            Err(e) => {
+                self.error = Some(format!("Could not draw the picture: {e}"));
+                return Task::none();
+            }
+        };
+        let stem = if self.canton() { "canton-graph" } else { "graph" };
+        self.notice = Some(if save { "Saving the picture…" } else { "Copying the picture…" }.into());
+        let size = format!("{} × {} px", image.width, image.height);
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    if save {
+                        let path = image.save_png(&crate::gui::export::pictures_folder(), stem)?;
+                        info!(path = %path.display(), "saved a picture of the graph");
+                        Ok(format!("Saved {} ({size})", path.display()))
+                    } else {
+                        image.copy_to_clipboard().map_err(|e| format!("Could not copy the picture: {e}"))?;
+                        Ok(format!("Copied a picture of the whole graph ({size})"))
+                    }
+                })
+                .await
+                .map_err(|e| e.to_string())?
+            },
+            Message::ImageDone,
+        )
+    }
+
     /// The graph canvas's view of the app.
     fn graph_view(&self) -> GraphView<'_> {
         GraphView {
@@ -1922,6 +2019,12 @@ impl App {
         let mut layers = stack![graph].width(Fill).height(Fill);
         if let Some((node, at)) = self.menu {
             layers = layers.push(pin(self.record_menu(node)).x(at.x).y(at.y));
+        }
+        if let Some(at) = self.canvas_menu {
+            // Kept inside the canvas, like the record menu.
+            let x = at.x.min(self.canvas_size.width - 250.0).max(0.0);
+            let y = at.y.min(self.canvas_size.height - 100.0).max(0.0);
+            layers = layers.push(pin(self.canvas_menu()).x(x).y(y));
         }
         if let Some((query, _)) = &self.pending_write {
             layers = layers.push(write_banner(query));
@@ -2009,6 +2112,31 @@ impl App {
         };
         container(items)
         .width(210)
+        .padding(4)
+        .style(|theme| container::bordered_box(theme).background(Color::WHITE))
+        .into()
+    }
+}
+
+impl App {
+    /// The menu for the canvas's background: pictures of the whole graph.
+    fn canvas_menu(&self) -> Element<'_, Message> {
+        let shortcut = if cfg!(target_os = "macos") { "⌘⇧C" } else { "Ctrl+Shift+C" };
+        let muted = Color::from_rgb8(0x68, 0x73, 0x85);
+        let item = |label: &'static str, hint: &'static str, message: Message| {
+            button(row![text(label).size(13), iced::widget::space::horizontal(), text(hint).size(12).color(muted)])
+                .width(Fill)
+                .padding([3, 10])
+                .style(button::text)
+                .on_press(message)
+        };
+        container(column![
+            container(text("Whole graph").size(12).color(muted)).padding([6, 10]),
+            container(rule::horizontal(1)).padding([3, 0]),
+            item("Copy as image", shortcut, Message::CopyImage),
+            item("Save as PNG in Downloads", "", Message::SaveImage),
+        ])
+        .width(240)
         .padding(4)
         .style(|theme| container::bordered_box(theme).background(Color::WHITE))
         .into()
