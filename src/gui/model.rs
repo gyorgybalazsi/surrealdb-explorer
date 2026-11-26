@@ -57,6 +57,10 @@ pub struct Card {
     pub title: String,
     pub subtitle: String,
     pub status: Option<Status>,
+    /// The template a contract is, or an exercise or fetch acts on.
+    pub template: Option<String>,
+    /// The parties joined to the record (see `canton::Facts::parties`).
+    pub parties: Vec<String>,
     /// Drawn: kept by the Canton filters and not hidden.
     pub shown: bool,
 }
@@ -262,6 +266,8 @@ impl Graph {
                 title: f.title.clone(),
                 subtitle: f.subtitle.clone(),
                 status: f.status,
+                template: f.template.clone(),
+                parties: f.parties.iter().cloned().collect(),
                 shown: layout.pos[i].is_some(),
             };
             if let Some((x, y)) = layout.pos[i] {

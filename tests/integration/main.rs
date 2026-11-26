@@ -7,6 +7,7 @@
 mod common;
 
 mod canton;
+mod canton_record;
 mod canton_window;
 mod change_marker;
 mod config_and_query;

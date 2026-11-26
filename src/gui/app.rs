@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use iced::widget::{button, canvas, column, container, pin, row, rule, scrollable, stack, text, text_editor};
 use iced::{Color, Element, Fill, Font, Point, Subscription, Task, Theme, Vector, window};
-use crate::canton::{Filters, NodeKind, StatusFilter};
+use crate::canton::{Filters, NodeKind, StatusFilter, ellipsize};
 use crate::config::{Config, UserLevel, Visualization};
 use crate::db::{self, Database, Queries};
 use crate::graph::{self, GraphData, ResultGraph};
@@ -102,6 +102,15 @@ pub struct SettingsReport {
     graph_changed: bool,
 }
 
+/// What a record's menu asked to add around it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Related {
+    /// The transaction it is in, with every event in it.
+    Transaction,
+    /// The event that archived the contract, with its transaction.
+    ArchivingEvent,
+}
+
 /// One change to the Canton view's filters.
 #[derive(Debug, Clone)]
 pub enum CantonFilterChange {
@@ -141,6 +150,33 @@ pub enum Message {
     MenuHide,
     MenuFocus,
     MenuCopy,
+    /// From a record's menu: shows every hidden record again.
+    MenuUnhideAll,
+    /// From a record's menu: deselects the focused record and fits the view again.
+    MenuClearFocus,
+    /// From a record's menu: copies the contract id a Canton record is or acts on.
+    MenuCopyContractId,
+    /// From a record's menu: copies the record's fields as JSON.
+    MenuCopyJson,
+    /// From a record's menu: runs `SELECT * FROM <record>` in the query panel,
+    /// keeping the graph as it is.
+    MenuShowInTable,
+    /// From a record's menu: filters the Canton view to this template (`None`: any).
+    MenuFilterTemplate(Option<String>),
+    /// From a record's menu: filters the Canton view to this party (`None`: any).
+    MenuFilterParty(Option<String>),
+    /// From a record's menu: adds the transaction a Canton record is in, with its events.
+    MenuTransaction,
+    /// From a contract's menu: adds the event that archived it, with its transaction.
+    MenuArchivingEvent,
+    /// From a Canton record's menu: draws its contract's lifecycle.
+    MenuLifecycle,
+    /// Records related to a record in the graph, read from the database: what
+    /// was asked for, that record, and the record to select with what to add
+    /// (`None`: nothing was found).
+    RelatedLoaded(Related, String, Result<Option<(String, ResultGraph)>, String>),
+    /// A contract's lifecycle, asked for from this record (`None`: no contract found).
+    LifecycleLoaded(String, Result<Option<graph::Lifecycle>, String>),
     /// Opens the background menu where the canvas was right-clicked, off any record.
     CanvasMenu(Point),
     /// Copies a picture of the whole graph to the clipboard (also ⌘⇧C / Ctrl+Shift+C).
@@ -276,6 +312,9 @@ pub struct App {
     pub(super) selection: Option<Selection>,
     /// Open record menu: the record and where it was right-clicked.
     pub(super) menu: Option<(usize, Point)>,
+    /// The record "Focus record" zoomed to, until the focus is cleared or
+    /// another record is selected.
+    pub(super) focused: Option<String>,
     /// Open background menu: where the canvas was right-clicked.
     pub(super) canvas_menu: Option<Point>,
     pub(super) dragging: Option<usize>,
@@ -293,6 +332,9 @@ pub struct App {
     pub(super) query_outcome: Option<QueryOutcome>,
     /// The last result has record ids, so it can be shown in the graph.
     pub(super) query_drawable: bool,
+    /// The query running was started by "Show in table": its result stays
+    /// in the panel instead of replacing the graph.
+    keep_graph_for_query: bool,
     /// The query that gave `query_outcome`, as run.
     pub(super) query_ran: String,
     /// Height of the open query panel, in pixels. It grows to fit a longer
@@ -437,6 +479,7 @@ impl App {
             hover: None,
             selection: None,
             menu: None,
+            focused: None,
             canvas_menu: None,
             dragging: None,
             error: None,
@@ -448,6 +491,7 @@ impl App {
             query_running: false,
             query_outcome: None,
             query_drawable: false,
+            keep_graph_for_query: false,
             query_ran: String::new(),
             panel_height: crate::gui::query_panel::PANEL_HEIGHT,
             panel_drag: None,
@@ -593,6 +637,7 @@ impl App {
                     Selection::Edge(e) => e < self.graph.edges.len(),
                 });
                 self.menu = None;
+                self.focused = None;
                 // The details are at the end of the sidebar: show them.
                 if self.selection.is_some() {
                     return iced::widget::operation::snap_to_end(SIDEBAR_SCROLL);
@@ -652,9 +697,157 @@ impl App {
             Message::MenuFocus => {
                 if let Some((node, _)) = self.menu.take() {
                     self.selection = Some(Selection::Node(node));
-                    self.camera.scale = 1.5;
-                    self.camera.offset = self.graph.nodes[node].pos * -1.5;
+                    self.focused = Some(self.graph.nodes[node].id.clone());
+                    if self.canton() {
+                        // The Canton view doesn't zoom: it scrolls the card into view.
+                        self.bring_into_view(node);
+                    } else {
+                        self.following = false;
+                        self.camera.scale = 1.5;
+                        self.camera.offset = self.graph.nodes[node].pos * -1.5;
+                    }
                 }
+            }
+            Message::MenuClearFocus => {
+                self.menu = None;
+                self.focused = None;
+                self.selection = None;
+                if !self.canton() {
+                    self.fit_view();
+                }
+            }
+            Message::MenuUnhideAll => {
+                self.menu = None;
+                for n in &mut self.graph.nodes {
+                    n.hidden = false;
+                }
+                self.notice = None;
+                if self.canton() {
+                    self.canton_layout_fitted();
+                } else {
+                    self.layout.reheat(0.3);
+                }
+            }
+            Message::MenuCopyContractId => {
+                if let Some((node, _)) = self.menu.take()
+                    && let Some(cid) = contract_id(&self.graph.nodes[node])
+                {
+                    self.notice = Some(format!("Copied contract id {cid}"));
+                    return iced::clipboard::write(cid);
+                }
+            }
+            Message::MenuCopyJson => {
+                if let Some((node, _)) = self.menu.take() {
+                    let n = &self.graph.nodes[node];
+                    let mut data = n.data.clone();
+                    // The id as SurrealQL writes it, like the other copies.
+                    if let Some(fields) = data.as_object_mut() {
+                        fields.insert("id".into(), serde_json::Value::String(n.id.clone()));
+                    }
+                    let json = serde_json::to_string_pretty(&data).unwrap_or_default();
+                    self.notice = Some(format!("Copied {} as JSON", n.id));
+                    return iced::clipboard::write(json);
+                }
+            }
+            Message::MenuShowInTable => {
+                let Some((node, _)) = self.menu.take() else { return Task::none() };
+                if self.query_running {
+                    // Its result would take this query's place.
+                    self.notice = Some("A query is still running: try again when it's done".into());
+                    return Task::none();
+                }
+                let id = self.graph.nodes[node].id.clone();
+                self.query_open = true;
+                self.query_text = text_editor::Content::with_text(&format!("SELECT * FROM {id};"));
+                self.fit_panel();
+                self.keep_graph_for_query = true;
+                let task = self.run_query();
+                if !self.query_running {
+                    self.keep_graph_for_query = false;
+                }
+                return task;
+            }
+            Message::MenuFilterTemplate(template) => {
+                self.menu = None;
+                return self.handle(Message::CantonFilter(CantonFilterChange::Template(template)));
+            }
+            Message::MenuFilterParty(party) => {
+                self.menu = None;
+                return self.handle(Message::CantonFilter(CantonFilterChange::Party(party)));
+            }
+            Message::MenuTransaction => {
+                let Some((node, _)) = self.menu.take() else { return Task::none() };
+                let id = self.graph.nodes[node].id.clone();
+                let limit = self.config.graph.max_result_records;
+                self.notice = Some("Loading the transaction…".into());
+                let select = id.clone();
+                return self.in_background(
+                    move |db| async move { graph::transaction_of(&db, &select, limit).await.map(|g| Some((select, g))) },
+                    move |result| Message::RelatedLoaded(Related::Transaction, id.clone(), result),
+                );
+            }
+            Message::MenuArchivingEvent => {
+                let Some((node, _)) = self.menu.take() else { return Task::none() };
+                let id = self.graph.nodes[node].id.clone();
+                let limit = self.config.graph.max_result_records;
+                self.notice = Some("Looking for the archiving event…".into());
+                let contract = id.clone();
+                return self.in_background(
+                    move |db| async move { graph::archiving_event(&db, &contract, limit).await },
+                    move |result| Message::RelatedLoaded(Related::ArchivingEvent, id.clone(), result),
+                );
+            }
+            Message::RelatedLoaded(what, id, Ok(Some((select, result)))) => {
+                let Some((added, links)) = self.add_around(&id, result) else {
+                    // The record went from the graph meanwhile (a reload).
+                    self.notice = None;
+                    return Task::none();
+                };
+                self.select_record(&select);
+                self.notice = Some(match (what, added + links) {
+                    (Related::Transaction, 0) => "Its transaction is already shown".to_string(),
+                    (Related::Transaction, _) => {
+                        format!("Added {} and {} of the transaction", plural(added, "record"), plural(links, "relation"))
+                    }
+                    (Related::ArchivingEvent, _) => format!("{select} archived {id}"),
+                });
+            }
+            Message::RelatedLoaded(_, id, Ok(None)) => {
+                self.notice = Some(format!("Nothing archived {id}: the contract is active"));
+            }
+            Message::RelatedLoaded(_, _, Err(e)) => {
+                error!(error = %e, "could not load the related records");
+                self.notice = None;
+                self.error = Some(format!("Could not load the related records: {e}"));
+            }
+            Message::MenuLifecycle => {
+                let Some((node, _)) = self.menu.take() else { return Task::none() };
+                let id = self.graph.nodes[node].id.clone();
+                let limit = self.config.graph.max_result_records;
+                self.notice = Some("Tracing the contract's lifecycle…".into());
+                let from = id.clone();
+                return self.in_background(
+                    move |db| async move { graph::lifecycle(&db, &from, limit).await },
+                    move |result| Message::LifecycleLoaded(id.clone(), result),
+                );
+            }
+            Message::LifecycleLoaded(_, Ok(Some(lifecycle))) => {
+                let contract = lifecycle.contract.clone();
+                self.apply_result(lifecycle.graph);
+                if self.notice.is_none() {
+                    self.notice = Some(format!(
+                        "Lifecycle of {contract}: {}. Show all goes back.",
+                        plural(lifecycle.events, "event")
+                    ));
+                }
+            }
+            Message::LifecycleLoaded(id, Ok(None)) => {
+                self.notice = Some(format!("The contract of {id} isn't in the database"));
+            }
+            Message::LifecycleLoaded(_, Err(e)) => {
+                error!(error = %e, "could not trace the contract's lifecycle");
+                self.notice = None;
+                self.error = Some(format!("Could not trace the lifecycle: {e}"));
             }
             Message::MenuCopy => {
                 if let Some((node, _)) = self.menu.take() {
@@ -948,8 +1141,10 @@ impl App {
                 let has_records = !query::record_ids(&outcome).is_empty();
                 self.query_drawable = has_records;
                 self.query_outcome = Some(outcome);
-                // A result with records becomes the graph.
-                if has_records {
+                // A result with records becomes the graph, unless "Show in
+                // table" asked for it ("Show in graph" still draws it).
+                let keep_graph = std::mem::take(&mut self.keep_graph_for_query);
+                if has_records && !keep_graph {
                     return self.load_result();
                 }
             }
@@ -1258,6 +1453,7 @@ impl App {
         self.camera = Camera::default();
         self.hover = None;
         self.selection = None;
+        self.focused = None;
         self.menu = None;
         self.dragging = None;
         self.layout.reheat(1.0);
@@ -1279,6 +1475,7 @@ impl App {
         self.notice = notice.map(Into::into);
         self.hover = None;
         self.selection = None;
+        self.focused = None;
         self.menu = None;
         self.dragging = None;
         self.layout.reheat(0.5);
@@ -1772,10 +1969,49 @@ impl App {
         )
     }
 
-    /// Draws a query result as the graph.
     /// Adds a record's neighbours to the graph, placed around it.
     fn add_neighbours(&mut self, id: &str, result: ResultGraph) {
-        let Some(centre) = self.graph.nodes.iter().find(|n| n.id == id).map(|n| n.pos) else { return };
+        let Some((added, links)) = self.add_around(id, result) else { return };
+        self.select_record(id);
+        self.notice = Some(match (added, links) {
+            (0, 0) => format!("{id} has no other relations"),
+            (a, l) => format!("Added {} and {} around {id}", plural(a, "record"), plural(l, "relation")),
+        });
+    }
+
+    /// Selects the record with this id, scrolling the Canton view to it.
+    fn select_record(&mut self, id: &str) {
+        let found = self.graph.nodes.iter().position(|n| n.id == id);
+        self.selection = found.map(Selection::Node);
+        if let Some(i) = found
+            && self.canton()
+        {
+            self.bring_into_view(i);
+        }
+    }
+
+    /// Runs `work` on the open database, on our runtime, and turns its
+    /// result into a message. Does nothing without a database.
+    fn in_background<T, F>(
+        &self,
+        work: impl FnOnce(Database) -> F,
+        done: impl Fn(Result<T, String>) -> Message + Send + 'static,
+    ) -> Task<Message>
+    where
+        T: Send + 'static,
+        F: std::future::Future<Output = surrealdb::Result<T>> + Send + 'static,
+    {
+        let Some(db) = self.db.clone() else { return Task::none() };
+        let future = work(db);
+        let handle = self.runtime.spawn(async move { future.await.map_err(|e| e.to_string()) });
+        Task::perform(async move { handle.await.unwrap_or_else(|e| Err(format!("the task failed: {e}"))) }, done)
+    }
+
+    /// Adds records and relations to the graph around record `id`, new
+    /// records placed on a small circle around it. Returns how many records
+    /// and relations were new, or `None` if `id` isn't in the graph.
+    fn add_around(&mut self, id: &str, result: ResultGraph) -> Option<(usize, usize)> {
+        let centre = self.graph.nodes.iter().find(|n| n.id == id).map(|n| n.pos)?;
         // A load still running would replace the neighbours when it arrives.
         self.load_generation += 1;
         self.loading = false;
@@ -1796,19 +2032,19 @@ impl App {
                 n.pos = centre + Vector::new(angle.cos(), angle.sin()) * 60.0;
             }
         }
-        self.selection = self.graph.nodes.iter().position(|n| n.id == id).map(Selection::Node);
+        // The old indices point into the graph that was replaced.
+        self.selection = None;
+        self.hover = None;
         self.result_view = Some(ResultView);
-        self.notice = Some(match (added, links) {
-            (0, 0) => format!("{id} has no other relations"),
-            (a, l) => format!("Added {} and {} around {id}", plural(a, "record"), plural(l, "relation")),
-        });
         if self.canton() {
             self.relayout_canton();
         } else {
             self.layout.reheat(0.4);
         }
+        Some((added, links))
     }
 
+    /// Draws a query result as the graph.
     fn apply_result(&mut self, result: ResultGraph) {
         if result.data.nodes.is_empty() {
             self.notice = Some("None of the returned records could be drawn.".into());
@@ -1827,6 +2063,7 @@ impl App {
         self.camera = Camera::default();
         self.hover = None;
         self.selection = None;
+        self.focused = None;
         self.menu = None;
         self.dragging = None;
         self.layout.reheat(1.0);
@@ -2017,8 +2254,8 @@ impl App {
         .height(Fill);
 
         let mut layers = stack![graph].width(Fill).height(Fill);
-        if let Some((node, at)) = self.menu {
-            layers = layers.push(pin(self.record_menu(node)).x(at.x).y(at.y));
+        if let Some((node, _)) = self.menu {
+            layers = layers.push(self.record_menu(node));
         }
         if let Some(at) = self.canvas_menu {
             // Kept inside the canvas, like the record menu.
@@ -2086,36 +2323,134 @@ impl App {
 
     fn record_menu(&self, node: usize) -> Element<'_, Message> {
         let n = &self.graph.nodes[node];
-        let item = |label: &'static str, message: Message| {
-            button(text(label).size(14))
-                .width(Fill)
-                .style(button::text)
-                .on_press(message)
-        };
         let header = container(
             row![text("●").color(n.color), text(if self.overview { &n.table } else { &n.id }).font(Font::MONOSPACE).size(13)]
                 .spacing(8),
         )
         .padding([6, 10]);
-        let items = if self.overview {
-            column![header, rule::horizontal(1), item("Show records", Message::MenuShowRecords), item("Inspect", Message::MenuInspect)]
-        } else {
-            column![
-                header,
-                rule::horizontal(1),
-                item("Show neighbours", Message::MenuNeighbours),
-                item("Inspect", Message::MenuInspect),
-                item("Hide record", Message::MenuHide),
-                item("Focus record", Message::MenuFocus),
-                item("Copy record id", Message::MenuCopy),
+        let entries = if self.overview {
+            vec![
+                MenuEntry::Rule,
+                MenuEntry::Item("Show records".into(), Message::MenuShowRecords),
+                MenuEntry::Item("Inspect".into(), Message::MenuInspect),
             ]
+        } else {
+            self.record_menu_entries(node)
         };
-        container(items)
-        .width(210)
-        .padding(4)
-        .style(|theme| container::bordered_box(theme).background(Color::WHITE))
-        .into()
+        // Kept inside the canvas: a long menu opened low down moves up.
+        let height = MENU_HEADER
+            + entries.iter().map(|e| if matches!(e, MenuEntry::Rule) { MENU_RULE } else { MENU_ITEM }).sum::<f32>();
+        let mut items = column![header];
+        for entry in entries {
+            let line: Element<'_, Message> = match entry {
+                MenuEntry::Rule => container(rule::horizontal(1)).padding([3, 0]).into(),
+                MenuEntry::Item(label, message) => button(text(ellipsize(&label, 34)).size(13))
+                    .width(Fill)
+                    .padding([3, 10])
+                    .style(button::text)
+                    .on_press(message)
+                    .into(),
+            };
+            items = items.push(line);
+        }
+        let menu = container(items)
+            .width(MENU_WIDTH)
+            .padding(4)
+            .style(|theme| container::bordered_box(theme).background(Color::WHITE));
+        let Some((_, at)) = self.menu else { return menu.into() };
+        let x = at.x.min(self.canvas_size.width - MENU_WIDTH - 4.0).max(0.0);
+        let y = at.y.min(self.canvas_size.height - height - 4.0).max(0.0);
+        pin(menu).x(x).y(y).into()
     }
+
+    /// A record's menu, in groups: what to load around it, how to show
+    /// it, and what to copy. Canton records get the ledger's own items.
+    fn record_menu_entries(&self, node: usize) -> Vec<MenuEntry> {
+        use MenuEntry::{Item, Rule};
+        let n = &self.graph.nodes[node];
+        let event = matches!(n.kind, NodeKind::Created | NodeKind::Exercised | NodeKind::Fetched);
+        let mut entries = vec![Rule, Item("Show neighbours".into(), Message::MenuNeighbours)];
+        match n.kind {
+            NodeKind::Transaction => entries.push(Item("Show whole transaction".into(), Message::MenuTransaction)),
+            _ if event => entries.push(Item("Show transaction".into(), Message::MenuTransaction)),
+            _ => {}
+        }
+        if n.kind == NodeKind::Created {
+            entries.push(Item("Show archiving event".into(), Message::MenuArchivingEvent));
+        }
+        if event {
+            entries.push(Item("Trace contract lifecycle".into(), Message::MenuLifecycle));
+        }
+        entries.push(Item("Show in table".into(), Message::MenuShowInTable));
+
+        entries.push(Rule);
+        entries.push(Item("Inspect".into(), Message::MenuInspect));
+        if self.focused.as_deref() == Some(n.id.as_str()) {
+            entries.push(Item("Clear focus".into(), Message::MenuClearFocus));
+        } else {
+            entries.push(Item("Focus record".into(), Message::MenuFocus));
+            if self.focused.is_some() {
+                entries.push(Item("Clear focus".into(), Message::MenuClearFocus));
+            }
+        }
+        entries.push(Item("Hide record".into(), Message::MenuHide));
+        let hidden = self.graph.hidden_count();
+        if hidden > 0 {
+            entries.push(Item(format!("Unhide all ({hidden})"), Message::MenuUnhideAll));
+        }
+        if self.canton() {
+            let filters = &self.canton_filters;
+            if filters.template.is_some() {
+                entries.push(Item("Clear template filter".into(), Message::MenuFilterTemplate(None)));
+            } else if let Some(t) = &n.card.template {
+                entries.push(Item(format!("Filter to {t}"), Message::MenuFilterTemplate(Some(t.clone()))));
+            }
+            if filters.party.is_some() {
+                entries.push(Item("Clear party filter".into(), Message::MenuFilterParty(None)));
+            } else {
+                // A transaction joins every party in its tree: offer the first few.
+                for p in n.card.parties.iter().take(MENU_PARTIES) {
+                    entries.push(Item(
+                        format!("Filter to party {}", crate::canton::short_party(p)),
+                        Message::MenuFilterParty(Some(p.clone())),
+                    ));
+                }
+            }
+        }
+
+        entries.push(Rule);
+        entries.push(Item("Copy record id".into(), Message::MenuCopy));
+        if contract_id(n).is_some() {
+            entries.push(Item("Copy contract id".into(), Message::MenuCopyContractId));
+        }
+        entries.push(Item("Copy as JSON".into(), Message::MenuCopyJson));
+        entries
+    }
+}
+
+/// One line of a record's menu.
+enum MenuEntry {
+    Item(String, Message),
+    Rule,
+}
+
+const MENU_WIDTH: f32 = 240.0;
+/// Heights used to keep the menu inside the canvas, in pixels.
+const MENU_HEADER: f32 = 40.0;
+const MENU_ITEM: f32 = 25.0;
+const MENU_RULE: f32 = 7.0;
+/// How many "Filter to party" items a record's menu offers at most.
+const MENU_PARTIES: usize = 3;
+
+/// The contract id a Canton record is (a contract) or acts on (an exercise or fetch).
+fn contract_id(n: &crate::gui::model::Node) -> Option<String> {
+    if !matches!(n.kind, NodeKind::Created | NodeKind::Exercised | NodeKind::Fetched) {
+        return None;
+    }
+    ["contract_id", "target_contract_id"]
+        .iter()
+        .find_map(|f| n.data.get(*f)?.as_str().filter(|s| !s.is_empty()))
+        .map(String::from)
 }
 
 impl App {

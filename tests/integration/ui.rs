@@ -258,6 +258,58 @@ fn selecting_a_record_dims_the_rest_and_deselecting_restores_the_view() {
     }
 }
 
+/// Opens the record menu on the drawn record whose id contains `part`.
+fn open_menu(ui: &mut Ui, part: &str) {
+    let index = ui.app.record_index(&ui.record(part)).unwrap();
+    ui.send(Message::OpenMenu(index, iced::Point::new(20.0, 20.0)));
+}
+
+#[test]
+fn the_record_menu_filters_hides_and_traces_a_contract() {
+    let mut ui = Ui::boot(canton_database("ui_menu", ""), Visualization::Canton);
+    let all = ui.app.shown_records();
+
+    // A contract gets the ledger's items; a transaction doesn't.
+    open_menu(&mut ui, "00c1a5b2");
+    for label in ["Show transaction", "Show archiving event", "Trace contract lifecycle", "Copy contract id", "Copy as JSON"] {
+        assert!(ui.shows(label), "the contract's menu has {label:?}");
+    }
+    ui.send(Message::CloseMenu);
+    open_menu(&mut ui, "transaction:1");
+    assert!(ui.shows("Show whole transaction"));
+    assert!(!ui.shows("Trace contract lifecycle") && !ui.shows("Copy contract id"));
+    ui.send(Message::CloseMenu);
+
+    // Filter to the contract's template, then clear it from the menu again.
+    open_menu(&mut ui, "00c1a5b2");
+    ui.click("Filter to Main:Cash");
+    assert!(ui.is_shown("00c3c7d4"), "the other cash stays");
+    assert!(!ui.is_shown("00c4d8e5"), "tickets go: {:?}", ui.app.shown_records());
+    open_menu(&mut ui, "00c1a5b2");
+    ui.click("Clear template filter");
+    assert_eq!(ui.app.shown_records(), all);
+
+    // Hide a record, and show it again from another record's menu.
+    open_menu(&mut ui, "00c5e9f6");
+    ui.click("Hide record");
+    assert!(!ui.is_shown("00c5e9f6"));
+    open_menu(&mut ui, "00c1a5b2");
+    ui.click("Unhide all (1)");
+    assert_eq!(ui.app.shown_records(), all);
+
+    // Show in table runs a SELECT of the record and keeps the graph.
+    open_menu(&mut ui, "00c1a5b2");
+    ui.click("Show in table");
+    assert_eq!(ui.app.query_text().trim(), format!("SELECT * FROM {};", ui.record("00c1a5b2")));
+    assert_eq!(ui.app.shown_records(), all, "the graph stays");
+
+    // Bob's ticket: its create in transaction 3 and its transfer in 4, not 5.
+    open_menu(&mut ui, "00c4d8e5");
+    ui.click("Trace contract lifecycle");
+    assert!(ui.is_shown("transaction:3") && ui.is_shown("transaction:4"), "{:?}", ui.app.shown_records());
+    assert!(!ui.is_shown("transaction:5"));
+}
+
 /// Runs the app the way the window does, but headless: `iced_test`'s
 /// `Emulator` boots the program `gui::run` opens, with its subscriptions
 /// and tasks on its own runtime. The tests above call `App` directly; this

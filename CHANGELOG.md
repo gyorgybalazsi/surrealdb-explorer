@@ -12,6 +12,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   logs it every five minutes, and warns in the log and the window when it
   grows by 1 GB within a minute or passes 2 GB. Above half the computer's
   memory (at most 8 GB) it stops, so a leak can't take the computer down. Set in `[memory]` in `config.toml`.
+- A fuller record menu (right-click), in three groups. Load: Show
+  transaction (the transaction a Canton event is in, with all its events),
+  Show archiving event (for a contract), Trace contract lifecycle (create,
+  every exercise and fetch, and the archive, with their transactions), and
+  Show in table (`SELECT * FROM <record>` in the query panel, keeping the
+  graph). View: Clear focus, Unhide all, and in the Canton view Filter to
+  the record's template or one of its parties (or clear those filters).
+  Copy: contract id and the record as JSON. The menu stays inside the canvas.
+
+### Changed
+- Focus record in the Canton view scrolls the card into view instead of
+  changing the zoom, which that view doesn't use.
 
 ### Fixed
 - The Dashboard's x axis could make hundreds of thousands of ticks (one row
