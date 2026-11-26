@@ -395,6 +395,9 @@ pub struct App {
     pub(super) canton_offsets: Option<(i64, i64)>,
     /// Records of the loaded window left out because of `max_result_records`.
     pub(super) canton_left_out: usize,
+    /// What to say once the next page of transactions is shown, in place
+    /// of "Reloaded" (a dashboard column's day or week).
+    page_notice: Option<String>,
     /// The "latest n transactions" box as typed; also the step for Older / Newer.
     pub(super) canton_count: String,
     /// The "columns side by side" box as typed.
@@ -524,6 +527,7 @@ impl App {
             canton_window: graph::CantonWindow::Latest(config_canton_transactions),
             canton_offsets: None,
             canton_left_out: 0,
+            page_notice: None,
             canton_count: config_canton_transactions.to_string(),
             canton_columns: config_canton_columns.to_string(),
             canton_scroll: 0.0,
@@ -1004,7 +1008,10 @@ impl App {
             Message::CantonScroll(delta) => self.scroll_canton(self.canton_scroll + delta),
             Message::CantonScrollTo(to) => self.scroll_canton(to),
             // The window changes when its transactions arrive (see `show_loaded`).
-            Message::CantonPage(window) => return self.start_load(LoadPurpose::Page(window), LoadWhat::Records),
+            Message::CantonPage(window) => {
+                self.page_notice = None;
+                return self.start_load(LoadPurpose::Page(window), LoadWhat::Records);
+            }
             Message::FitView => self.fit_view(),
             Message::CanvasResized(size) => {
                 self.canvas_size = size;
@@ -1359,9 +1366,10 @@ impl App {
         };
         info!(from, to, label, "showing a dashboard column's transactions");
         let task = self.start_load(LoadPurpose::Page(window), LoadWhat::Records);
-        self.notice = Some(match window {
-            graph::CantonWindow::Range(..) => format!("Loading the transactions of {label}…"),
-            _ => format!("Loading the last {n} transactions of {label}…"),
+        self.notice = Some(format!("Loading the transactions of {label}…"));
+        self.page_notice = Some(match window {
+            graph::CantonWindow::Range(..) => format!("The transactions of {label}"),
+            _ => format!("The last {n} transactions of {label}; ◀ older shows the rest"),
         });
         task
     }
@@ -1452,7 +1460,8 @@ impl App {
                 }
                 self.canton_window = window;
                 self.note_window(offsets, left_out);
-                self.show_records(data, marker, notice_of(purpose));
+                let said = self.page_notice.take();
+                self.show_records(data, marker, said.as_deref().or(notice_of(purpose)));
                 self.relayout_canton();
             }
             (LoadPurpose::Reload { notice, fit }, Loaded::Records { data, offsets, left_out, marker }) => {
