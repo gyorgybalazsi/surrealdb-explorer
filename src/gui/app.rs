@@ -1104,6 +1104,9 @@ impl App {
             #[cfg(feature = "dashboard")]
             Message::Dashboard(m) => {
                 use crate::gui::dashboard::Msg;
+                if let Msg::ShowTransactions { from, to, label } = m {
+                    return self.show_transactions(from, to, &label);
+                }
                 let save = matches!(m, Msg::LocationSubmitted | Msg::Select(_) | Msg::SaveSettings);
                 let task = self.dashboard.update(m).map(Message::Dashboard);
                 // Remember where the tables are, which one was shown, and
@@ -1328,6 +1331,39 @@ impl App {
             async move { handle.await.unwrap_or_else(|e| Err(format!("the task failed: {e}"))) },
             move |result| Message::GraphLoaded(generation, purpose, result),
         )
+    }
+
+    /// A dashboard column was clicked: opens the Graph tab in the Canton
+    /// view on the transactions at ledger offsets `from` to `to` (`label`
+    /// names the day or week). A busy day holds more than a graph can show,
+    /// so then it shows the last of them, as many as "Latest" says; the
+    /// paging buttons go to the others.
+    #[cfg(feature = "dashboard")]
+    fn show_transactions(&mut self, from: i64, to: i64, label: &str) -> Task<Message> {
+        self.dashboard_open = false;
+        if !self.canton() {
+            self.config.graph.visualization = Visualization::Canton;
+            if let Err(e) = self.config.save_to(&self.files.config) {
+                warn!(error = %e, "could not save the setting");
+            }
+            self.canton_offsets = None;
+            self.apply_visualization();
+        }
+        let n = self.canton_n();
+        // Every transaction has its own offset, so a range no wider than
+        // `n` offsets holds at most `n` transactions.
+        let window = if to.saturating_sub(from) < n as i64 {
+            graph::CantonWindow::Range(from, to)
+        } else {
+            graph::CantonWindow::Before(to.saturating_add(1), n)
+        };
+        info!(from, to, label, "showing a dashboard column's transactions");
+        let task = self.start_load(LoadPurpose::Page(window), LoadWhat::Records);
+        self.notice = Some(match window {
+            graph::CantonWindow::Range(..) => format!("Loading the transactions of {label}…"),
+            _ => format!("Loading the last {n} transactions of {label}…"),
+        });
+        task
     }
 
     /// Reads `what` from the database (in the Canton view, transactions in
