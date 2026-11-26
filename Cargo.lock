@@ -7539,7 +7539,6 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "canton-analytics-reader",
- "csv",
  "iced",
  "iced_plot",
  "iced_table2",
