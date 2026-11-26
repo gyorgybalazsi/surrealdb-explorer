@@ -8,6 +8,7 @@ mod canton_draw;
 mod canvas;
 #[cfg(feature = "dashboard")]
 mod dashboard;
+mod export;
 pub(crate) mod icon;
 mod layout;
 mod model;

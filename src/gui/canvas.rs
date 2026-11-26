@@ -257,7 +257,8 @@ impl canvas::Program<Message> for GraphView<'_> {
             mouse::Event::ButtonPressed(Button::Right) => {
                 let message = match self.node_at(bounds, point) {
                     Some(node) => Message::OpenMenu(node, point),
-                    None => Message::CloseMenu,
+                    // Off any record: the menu for pictures of the whole graph.
+                    None => Message::CanvasMenu(point),
                 };
                 Some(Action::publish(message).and_capture())
             }
