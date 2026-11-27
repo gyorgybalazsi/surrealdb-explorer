@@ -72,10 +72,23 @@ impl App {
         let clear = button(text("Clear").size(13))
             .style(button::secondary)
             .on_press_maybe((!self.query_text.text().trim().is_empty()).then_some(Message::ClearQuery));
+        let outcome = self.query_outcome.as_ref();
+        let copy_json = button(text("Copy JSON").size(13))
+            .style(button::secondary)
+            .on_press_maybe(outcome.is_some().then_some(Message::CopyQueryResult(CopyFormat::Json)));
+        let copy_table = tooltip(
+            button(text("Copy table").size(13))
+                .style(button::secondary)
+                .on_press_maybe(outcome.is_some_and(has_table).then_some(Message::CopyQueryResult(CopyFormat::Table))),
+            container(text("Tab-separated, pastes into a spreadsheet").size(12)).padding(6).style(container::rounded_box),
+            tooltip::Position::Bottom,
+        );
         let mut status = row![
             run,
             show,
             clear,
+            copy_json,
+            copy_table,
             checkbox(self.config.graph.connect_results)
                 .label("Connect shown records")
                 .on_toggle(Message::ToggleConnectResults)
@@ -83,9 +96,16 @@ impl App {
         ]
         .spacing(8)
         .align_y(Alignment::Center);
-        if let Some(summary) = self.query_outcome.as_ref().map(summary) {
+        if let Some(summary) = outcome.map(summary) {
             status = status.push(summary);
         }
+        // Right after a copy, next to the button, so it isn't missed.
+        if let Some(copied) = &self.query_copied {
+            status = status.push(text(format!("· {copied}")).size(12).color(SUCCESS));
+        }
+        // On a narrow window the summary moves to a second line rather than
+        // being cut off.
+        let status = status.wrap().vertical_spacing(4);
         column![container(toggle).padding([2, 0]), self.saved_queries_row(), editor, status, self.result_view()]
             .spacing(6)
             .padding([4, 8])
@@ -281,6 +301,117 @@ impl App {
 
 }
 
+/// How the Copy buttons put the last result on the clipboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyFormat {
+    /// The whole result as pretty JSON: one statement's value, or an array
+    /// with one entry per statement (`{"error": …}` for a failed one, or
+    /// for the whole query when it didn't run).
+    Json,
+    /// The tables (rows of fields) as tab-separated text with a header row,
+    /// a blank line between statements, ready to paste into a spreadsheet.
+    Table,
+}
+
+impl CopyFormat {
+    /// The text to copy and a few words on what it is, or `None` when there
+    /// is nothing to copy in this format.
+    pub(super) fn render(self, outcome: &QueryOutcome, query: &str) -> Option<(String, String)> {
+        let results = match (&outcome.statements, self) {
+            // The query didn't run (such as a refused write): its error.
+            (Err(e), CopyFormat::Json) => {
+                let json = serde_json::to_string_pretty(&serde_json::json!({ "error": e })).ok()?;
+                return Some((json, "the error as JSON".to_string()));
+            }
+            (Err(_), CopyFormat::Table) => return None,
+            (Ok(results), _) => results,
+        };
+        match self {
+            CopyFormat::Json => {
+                let value = |r: &crate::query::StatementResult| match &r.result {
+                    Ok(v) => v.clone(),
+                    Err(e) => serde_json::json!({ "error": e }),
+                };
+                let json = match results.as_slice() {
+                    [one] => value(one),
+                    many => serde_json::Value::Array(many.iter().map(value).collect()),
+                };
+                let what = match results.as_slice() {
+                    [one] => one.result.as_ref().ok().and_then(|v| v.as_array()).map_or_else(
+                        || "the result as JSON".to_string(),
+                        |rows| format!("{} as JSON", plural(rows.len(), "row")),
+                    ),
+                    many => format!("{} statements' results as JSON", many.len()),
+                };
+                Some((serde_json::to_string_pretty(&json).ok()?, what))
+            }
+            CopyFormat::Table => {
+                let tables: Vec<&Vec<serde_json::Value>> =
+                    results.iter().filter_map(|r| r.result.as_ref().ok().and_then(table_rows)).collect();
+                if tables.is_empty() {
+                    return None;
+                }
+                let rows: usize = tables.iter().map(|t| t.len()).sum();
+                let text = tables.into_iter().map(|t| tsv(t, query)).collect::<Vec<_>>().join("\n");
+                Some((text, format!("{} as a table", plural(rows, "row"))))
+            }
+        }
+    }
+}
+
+/// Whether the result has a table to copy.
+fn has_table(outcome: &QueryOutcome) -> bool {
+    outcome
+        .statements
+        .as_ref()
+        .is_ok_and(|rs| rs.iter().any(|r| r.result.as_ref().ok().and_then(table_rows).is_some()))
+}
+
+/// Rows of fields as tab-separated text, with a header row and the columns
+/// in the order the table shows them. Every row is copied (the table only
+/// draws the first `MAX_TABLE_ROWS`), values in full.
+fn tsv(rows: &[serde_json::Value], query: &str) -> String {
+    let columns = table_columns(rows, query);
+    let mut out = columns.iter().map(|&c| clean(c)).collect::<Vec<_>>().join("\t");
+    out.push('\n');
+    for r in rows {
+        let line: Vec<String> = columns
+            .iter()
+            .map(|c| match r.get(*c) {
+                None | Some(serde_json::Value::Null) => String::new(),
+                Some(serde_json::Value::String(s)) => clean(s),
+                Some(v) => clean(&v.to_string()),
+            })
+            .collect();
+        out.push_str(&line.join("\t"));
+        out.push('\n');
+    }
+    out
+}
+
+/// A value on one line with no tabs, so it stays in its cell. A value with
+/// a quote mark is quoted (`"` doubled inside), as spreadsheets expect:
+/// unquoted, one that starts with `"` would be read as the start of a
+/// quoted value and swallow the cells after it.
+fn clean(s: &str) -> String {
+    let flat = s.replace(['\t', '\n', '\r'], " ");
+    if flat.contains('"') { format!("\"{}\"", flat.replace('"', "\"\"")) } else { flat }
+}
+
+/// A table's columns: every field of every row, ordered like the query.
+fn table_columns<'a>(rows: &'a [serde_json::Value], query: &str) -> Vec<&'a str> {
+    let mut columns: Vec<&str> = Vec::new();
+    for r in rows {
+        for key in r.as_object().into_iter().flat_map(|o| o.keys()) {
+            if !columns.contains(&key.as_str()) {
+                columns.push(key);
+            }
+        }
+    }
+    order_like_query(&mut columns, query);
+    columns
+}
+
 /// The saved queries list looks like a control to use, even before a query
 /// is picked: white like the editor, with dark placeholder text and an
 /// accent border and arrow (the default is grey, as if it were disabled).
@@ -313,15 +444,7 @@ fn table_rows(value: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
 /// Rows of fields as a table, a column per field. Long values are
 /// shortened; hovering one shows it whole.
 fn result_table(rows: &[serde_json::Value], query: &str) -> Element<'static, Message> {
-    let mut columns: Vec<&str> = Vec::new();
-    for r in rows {
-        for key in r.as_object().into_iter().flat_map(|o| o.keys()) {
-            if !columns.contains(&key.as_str()) {
-                columns.push(key);
-            }
-        }
-    }
-    order_like_query(&mut columns, query);
+    let columns = table_columns(rows, query);
     let shown = &rows[..rows.len().min(MAX_TABLE_ROWS)];
     let cells: Vec<Vec<(String, String)>> = shown
         .iter()
@@ -457,8 +580,62 @@ fn grey_box(body: String) -> Element<'static, Message> {
 
 #[cfg(test)]
 mod tests {
-    use super::{cell, order_like_query, short_party_id};
+    use super::{CopyFormat, cell, order_like_query, short_party_id};
+    use crate::query::{QueryOutcome, StatementResult};
     use serde_json::json;
+    use std::time::Duration;
+
+    fn outcome(results: Vec<Result<serde_json::Value, String>>) -> QueryOutcome {
+        QueryOutcome {
+            statements: Ok(results.into_iter().map(|result| StatementResult { time: None, result }).collect()),
+            elapsed: Duration::ZERO,
+            note: None,
+        }
+    }
+
+    #[test]
+    fn copies_one_statement_as_its_json() {
+        let o = outcome(vec![Ok(json!([{ "name": "Tom" }, { "name": "Meg" }]))]);
+        let (copied, what) = CopyFormat::Json.render(&o, "SELECT name FROM person").unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&copied).unwrap(), json!([{ "name": "Tom" }, { "name": "Meg" }]));
+        assert_eq!(what, "2 rows as JSON");
+    }
+
+    #[test]
+    fn copies_several_statements_as_an_array_with_errors() {
+        let o = outcome(vec![Ok(json!(1)), Err("bad".into())]);
+        let (copied, _) = CopyFormat::Json.render(&o, "").unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&copied).unwrap(), json!([1, { "error": "bad" }]));
+    }
+
+    #[test]
+    fn copies_tables_as_tab_separated_text() {
+        let party = "Alice::1220e60453756687070256c5ab36";
+        let o = outcome(vec![
+            Ok(json!([{ "buyer": party, "offset": 7, "note": "a\tb" }, { "offset": 8, "note": null }])),
+            Ok(json!(3)),
+        ]);
+        let (copied, what) = CopyFormat::Table.render(&o, "SELECT offset, buyer, note FROM t").unwrap();
+        assert_eq!(copied, format!("offset\tbuyer\tnote\n7\t{party}\ta b\n8\t\t\n"));
+        assert_eq!(what, "2 rows as a table");
+        assert!(CopyFormat::Table.render(&outcome(vec![Ok(json!(3))]), "").is_none());
+    }
+
+    #[test]
+    fn quotes_table_values_with_quote_marks() {
+        let o = outcome(vec![Ok(json!([{ "parties": ["Bob::1220aa"], "say": "\"hi\" there" }]))]);
+        let (copied, _) = CopyFormat::Table.render(&o, "SELECT parties, say FROM t").unwrap();
+        assert_eq!(copied, "parties\tsay\n\"[\"\"Bob::1220aa\"\"]\"\t\"\"\"hi\"\" there\"\n");
+    }
+
+    #[test]
+    fn copies_a_query_that_did_not_run_as_its_error() {
+        let o = QueryOutcome::refused("writes are refused");
+        let (copied, what) = CopyFormat::Json.render(&o, "").unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&copied).unwrap(), json!({ "error": "writes are refused" }));
+        assert_eq!(what, "the error as JSON");
+        assert!(CopyFormat::Table.render(&o, "").is_none());
+    }
 
     #[test]
     fn columns_follow_the_query() {

@@ -246,6 +246,8 @@ pub enum Message {
     QueryEdited(text_editor::Action),
     /// Empties the query editor.
     ClearQuery,
+    /// Copies the last query result to the clipboard.
+    CopyQueryResult(crate::gui::query_panel::CopyFormat),
     RunQuery,
     /// Shows the analytics dashboard (true) or the graph (false).
     #[cfg(feature = "dashboard")]
@@ -330,6 +332,9 @@ pub struct App {
     pub(super) query_text: text_editor::Content,
     pub(super) query_running: bool,
     pub(super) query_outcome: Option<QueryOutcome>,
+    /// What the Copy buttons last copied from `query_outcome`, shown in the
+    /// button row until the next result.
+    pub(super) query_copied: Option<String>,
     /// The last result has record ids, so it can be shown in the graph.
     pub(super) query_drawable: bool,
     /// The query running was started by "Show in table": its result stays
@@ -490,6 +495,7 @@ impl App {
             query_text: text_editor::Content::with_text("SELECT * FROM person;"),
             query_running: false,
             query_outcome: None,
+            query_copied: None,
             query_drawable: false,
             keep_graph_for_query: false,
             query_ran: String::new(),
@@ -1082,6 +1088,12 @@ impl App {
                 self.fit_panel();
             }
             Message::ClearQuery => self.query_text = text_editor::Content::new(),
+            Message::CopyQueryResult(format) => {
+                if let Some((copied, what)) = self.query_outcome.as_ref().and_then(|o| format.render(o, &self.query_ran)) {
+                    self.query_copied = Some(format!("Copied {what}"));
+                    return iced::clipboard::write(copied);
+                }
+            }
             Message::PanelDragStart => self.panel_drag = Some(None),
             Message::PanelDrag(y) => match self.panel_drag {
                 Some(None) => self.panel_drag = Some(Some((y, self.panel_height, self.panel_height + self.canvas_size.height))),
@@ -1140,6 +1152,7 @@ impl App {
                 self.query_running = false;
                 let has_records = !query::record_ids(&outcome).is_empty();
                 self.query_drawable = has_records;
+                self.query_copied = None;
                 self.query_outcome = Some(outcome);
                 // A result with records becomes the graph, unless "Show in
                 // table" asked for it ("Show in graph" still draws it).
@@ -1164,6 +1177,7 @@ impl App {
                         self.query_ran = query.clone();
                         self.fit_panel();
                         self.query_drawable = !query::record_ids(&outcome).is_empty();
+                        self.query_copied = None;
                         self.query_outcome = Some(outcome);
                         self.apply_result(graph);
                     }
@@ -1848,6 +1862,7 @@ impl App {
                 // The query results and pending actions belong to the previous database.
                 // A write Claude Code asked for was meant for the previous database.
                 self.answer_write(false);
+                self.query_copied = None;
                 self.query_outcome = None;
                 self.query_drawable = false;
                 self.result_view = None;
@@ -1947,6 +1962,7 @@ impl App {
         };
         if let Some(message) = refused {
             self.query_drawable = false;
+            self.query_copied = None;
             self.query_outcome = Some(QueryOutcome::refused(message));
             return Task::none();
         }
