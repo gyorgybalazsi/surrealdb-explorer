@@ -105,6 +105,14 @@ heartbeat: up to date, catching up, stopped, not heard from, or failing.
 The dashboard checks for new commits every two seconds while it is open;
 **Refresh now** looks again at once, and also finds new tables.
 
+A bar chart over time draws one column per day or week. Hover over a column
+to read its exact value; **Show** picks how far back the columns go (All,
+Year, 90 days, 30 days). When the panel's query also returns `first_offset`
+and `last_offset` (the ledger offsets a row covers), those two aren't drawn
+and a click on a column opens the Graph tab's Canton view on its
+transactions, or on the last of them (as many as **Latest** says) when there
+are more; the paging buttons go to the rest.
+
 Cloud credentials come from the usual environment variables
 (`AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AZURE_STORAGE_ACCOUNT_NAME`,
 `GOOGLE_APPLICATION_CREDENTIALS`…). Other object store options go in

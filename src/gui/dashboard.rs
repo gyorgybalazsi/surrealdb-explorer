@@ -24,6 +24,7 @@ use iced::{Alignment, Color, Element, Fill, Font, Length, Task, Theme};
 use iced_plot::{LineStyle, MarkerStyle, PlotUiMessage, PlotWidget, PlotWidgetBuilder, Series};
 use iced_table2::table::{self, table};
 use plotters::prelude::*;
+use plotters::style::text_anchor::{HPos, Pos, VPos};
 use plotters::style::Color as _;
 use plotters_iced2::{Chart, ChartWidget, DrawingBackend};
 use tokio::sync::Mutex;
@@ -103,6 +104,46 @@ pub enum Msg {
     SaveSettings,
     /// How many tables got the daemon's settings.
     SettingsSaved(Result<usize, String>),
+    /// How much time the columns charts show.
+    Span(Span),
+    /// The mouse is over this row of the columns chart in the panel with
+    /// this number (`None`: over none).
+    Hovered(usize, Option<usize>),
+    /// A column was clicked whose row says which ledger offsets it covers:
+    /// the app shows those transactions in the Graph tab. `label` names
+    /// the day or week.
+    ShowTransactions { from: i64, to: i64, label: String },
+}
+
+/// How much time a columns chart shows, counted back from its newest row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Span {
+    All,
+    Year,
+    Quarter,
+    Month,
+}
+
+impl Span {
+    const ALL: [Span; 4] = [Span::All, Span::Year, Span::Quarter, Span::Month];
+
+    fn seconds(self) -> Option<i64> {
+        match self {
+            Span::All => None,
+            Span::Year => Some(365 * 86_400),
+            Span::Quarter => Some(91 * 86_400),
+            Span::Month => Some(30 * 86_400),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Span::All => "All",
+            Span::Year => "Year",
+            Span::Quarter => "90 days",
+            Span::Month => "30 days",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,6 +235,10 @@ pub struct Dashboard {
     tables: Vec<Option<TableState>>,
     /// What `{period}` stands for in the panels that use it.
     period: Period,
+    /// How much time the columns charts show.
+    span: Span,
+    /// The column under the mouse: the panel's number and the row.
+    hovered: Option<(usize, usize)>,
     /// How often to look for a new commit, in seconds.
     pub check_seconds: u64,
     /// The dashboard settings, while they are open.
@@ -219,6 +264,8 @@ impl Dashboard {
             columns: Vec::new(),
             tables: Vec::new(),
             period: Period::Day,
+            span: Span::All,
+            hovered: None,
             check_seconds: 2,
             settings: None,
         }
@@ -402,6 +449,13 @@ impl Dashboard {
                     });
                 }
             }
+            Msg::Span(span) => {
+                self.span = span;
+                self.hovered = None;
+            }
+            Msg::Hovered(panel, row) => self.hovered = row.map(|r| (panel, r)),
+            // The app opens the Graph tab on them.
+            Msg::ShowTransactions { .. } => {}
             Msg::Listed(id, _) | Msg::Opened(id, _) | Msg::Checked(id, _) if id != self.request => {}
             Msg::Listed(_, result) => {
                 self.busy = false;
@@ -512,6 +566,7 @@ impl Dashboard {
         self.plots = data.panels.iter().map(time_plot).collect();
         self.bars = data.panels.iter().map(Bars::new).collect();
         self.columns = data.panels.iter().map(Columns::new).collect();
+        self.hovered = None;
         self.tables = (0..data.panels.len()).map(|i| TableState::new(&data, i, old.remove(&data.panels[i].panel.title))).collect();
         self.data = Some(data);
     }
@@ -552,6 +607,18 @@ impl Dashboard {
                 )
             }
             _ => header,
+        };
+        // How far back the columns charts go, when there are any.
+        let header = if self.columns.iter().any(Option::is_some) {
+            let choices = Span::ALL.map(|span| {
+                button(text(span.label()).size(12))
+                    .style(if self.span == span { button::primary } else { button::secondary })
+                    .on_press(Msg::Span(span))
+                    .into()
+            });
+            header.push(row![text("Show").size(12).color(MUTED)].extend(choices).spacing(4).align_y(Alignment::Center))
+        } else {
+            header
         };
 
         let mut col = column![header].spacing(8).padding(10).width(Fill).height(Fill);
@@ -725,7 +792,11 @@ impl Dashboard {
                     None => empty("No time or number column to draw."),
                 },
                 PanelKind::Bar => match (&self.columns[i], &self.bars[i]) {
-                    (Some(columns), _) => ChartWidget::new(columns).width(Fill).height(Fill).into(),
+                    (Some(columns), _) => {
+                        let first = columns.first_shown(self.span);
+                        let hovered = self.hovered.filter(|(panel, _)| *panel == i).map(|(_, r)| r);
+                        ChartWidget::new(ColumnsChart { columns, panel: i, first, hovered }).width(Fill).height(Fill).into()
+                    }
                     (None, Some(bars)) => ChartWidget::new(bars).width(Fill).height(Fill).into(),
                     (None, None) => empty("Needs a label column and a number column."),
                 },
@@ -740,6 +811,9 @@ impl Dashboard {
         let mut note = format!("{} ms", p.millis);
         if p.panel.kind == PanelKind::Timeseries {
             note.push_str(" · drag to pan · Ctrl/⌘ + scroll to zoom · double-click to show all");
+        }
+        if self.columns.get(i).and_then(Option::as_ref).is_some_and(|c| c.offsets.is_some()) {
+            note.push_str(" · click a column to see its transactions");
         }
         let title: Element<'a, Msg> =
             row![title, text(note).size(11).color(MUTED)].spacing(10).align_y(Alignment::Center).into();
@@ -760,7 +834,12 @@ fn empty<'a>(message: &'a str) -> Element<'a, Msg> {
 fn stats(frame: &Frame) -> Element<'_, Msg> {
     let cards = frame.columns.iter().map(|c| {
         // Plain figures with their label, not boxes: boxes read as buttons.
-        container(column![text(value(c, 0)).size(24).color(ACCENT), text(c.name.clone()).size(12).color(MUTED)].spacing(0))
+        // Headline numbers are read at a glance: group their thousands.
+        let shown = match (c.effective_format(), c.values.number(0)) {
+            (Format::Number, Some(n)) => grouped(n),
+            _ => value(c, 0),
+        };
+        container(column![text(shown).size(24).color(ACCENT), text(c.name.clone()).size(12).color(MUTED)].spacing(0))
             .padding([2, 0])
             .into()
     });
@@ -1061,7 +1140,21 @@ pub struct Columns {
     values: Vec<Option<f64>>,
     /// The rows' spacing, in seconds.
     step: i64,
+    /// The ledger offsets each row covers, when the panel has
+    /// `first_offset` and `last_offset` columns: a click on a column then
+    /// shows its transactions.
+    offsets: Option<Vec<Option<(i64, i64)>>>,
 }
+
+/// The columns that say which ledger offsets a row covers. They aren't
+/// drawn.
+const FIRST_OFFSET: &str = "first_offset";
+const LAST_OFFSET: &str = "last_offset";
+
+/// The chart's layout in pixels: [`ChartBuilder`]'s margin and label areas.
+const CHART_MARGIN: f32 = 8.0;
+const X_LABELS: f32 = 36.0;
+const Y_LABELS: f32 = 64.0;
 
 impl Columns {
     fn new(p: &PanelData) -> Option<Columns> {
@@ -1073,11 +1166,20 @@ impl Columns {
         let Values::Time(times) = &label.values else {
             return None;
         };
-        let value_column = frame.columns.iter().find(|c| matches!(c.values, Values::Number(_)))?;
+        let offset_column = |name: &str| frame.columns.iter().find(|c| c.name.eq_ignore_ascii_case(name));
+        let value_column = frame
+            .columns
+            .iter()
+            .find(|c| matches!(c.values, Values::Number(_)) && ![FIRST_OFFSET, LAST_OFFSET].iter().any(|n| c.name.eq_ignore_ascii_case(n)))?;
         let starts: Vec<i64> = times.iter().map(|t| t.map(|us| us.div_euclid(1_000_000))).collect::<Option<_>>()?;
         let values = (0..starts.len()).map(|r| value_column.values.number(r)).collect();
         let step = p.bucket_seconds.or_else(|| starts.windows(2).map(|w| w[1] - w[0]).filter(|d| *d > 0).min()).unwrap_or(86_400);
-        Some(Columns { starts, values, step })
+        let offsets = offset_column(FIRST_OFFSET).zip(offset_column(LAST_OFFSET)).map(|(first, last)| {
+            (0..starts.len())
+                .map(|r| Some((first.values.number(r)? as i64, last.values.number(r)? as i64)))
+                .collect()
+        });
+        Some(Columns { starts, values, step, offsets })
     }
 
     /// Rows a week apart that start on Mondays.
@@ -1085,32 +1187,150 @@ impl Columns {
         self.step == 604_800 && self.starts.iter().all(|s| (s.div_euclid(86_400) + 3).rem_euclid(7) == 0)
     }
 
-    /// `W48`, with the year on the first column and on each year's first
-    /// week; a date for days; a time for anything shorter.
-    fn label(&self, i: usize) -> String {
+    /// `W48`, with the year on the first column shown and on each year's
+    /// first week; a date for days; a time for anything shorter.
+    fn label(&self, i: usize, first: usize) -> String {
         let Some(&start) = self.starts.get(i) else {
             return String::new();
         };
         if self.weeks() {
             let (year, week) = iso_week(start.div_euclid(86_400));
-            if i == 0 || week == 1 { format!("{year} W{week:02}") } else { format!("W{week:02}") }
+            if i == first || week == 1 { format!("{year} W{week:02}") } else { format!("W{week:02}") }
         } else {
             time_label(start, self.step)
         }
     }
+
+    /// The row's day or week in full: `2026 W48`, or a date.
+    fn long_label(&self, i: usize) -> String {
+        self.label(i, i)
+    }
+
+    /// The first row inside `span`, counted back from the end of the
+    /// newest row.
+    fn first_shown(&self, span: Span) -> usize {
+        match (span.seconds(), self.starts.last()) {
+            (Some(seconds), Some(&last)) => {
+                let from = last + self.step - seconds;
+                self.starts.iter().position(|s| *s >= from).unwrap_or(self.starts.len())
+            }
+            _ => 0,
+        }
+    }
+
+    /// The ledger offsets of row `i`, when the panel has them.
+    fn offsets(&self, i: usize) -> Option<(i64, i64)> {
+        *self.offsets.as_ref()?.get(i)?
+    }
 }
 
-impl Chart<Msg> for &Columns {
+/// The row under a point `(x, y)` pixels from the top left of a columns
+/// chart `size` big that shows `n` rows. The segmented axis plotters
+/// draws on has a slot for each row and one more, empty, on the right.
+fn column_at((x, y): (f32, f32), size: (f32, f32), n: usize) -> Option<usize> {
+    let left = CHART_MARGIN + Y_LABELS;
+    let width = size.0 - left - CHART_MARGIN;
+    let bottom = size.1 - CHART_MARGIN - X_LABELS;
+    if n == 0 || width <= 0.0 || x < left || y < CHART_MARGIN || y > bottom {
+        return None;
+    }
+    let i = ((x - left) / (width / (n as f32 + 1.0))) as usize;
+    (i < n).then_some(i)
+}
+
+/// `1234567.5` as `1,234,567.5`.
+fn grouped(n: f64) -> String {
+    let text = number(n);
+    let (sign, rest) = text.strip_prefix('-').map_or(("", text.as_str()), |r| ("-", r));
+    let (whole, fraction) = rest.split_once('.').map_or((rest, None), |(w, f)| (w, Some(f)));
+    let mut out = String::new();
+    for (i, c) in whole.chars().enumerate() {
+        if i > 0 && (whole.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    match fraction {
+        Some(f) => format!("{sign}{out}.{f}"),
+        None => format!("{sign}{out}"),
+    }
+}
+
+/// A columns panel as drawn: the rows from `first` on, with the one under
+/// the mouse picked out and its value written above it.
+struct ColumnsChart<'a> {
+    columns: &'a Columns,
+    /// The panel's number, for the messages.
+    panel: usize,
+    first: usize,
+    hovered: Option<usize>,
+}
+
+impl ColumnsChart<'_> {
+    fn shown(&self) -> usize {
+        self.columns.starts.len().saturating_sub(self.first)
+    }
+
+    /// The row under the cursor, if any.
+    fn row_at(&self, bounds: iced::Rectangle, cursor: iced::mouse::Cursor) -> Option<usize> {
+        let p = cursor.position_in(bounds)?;
+        column_at((p.x, p.y), (bounds.width, bounds.height), self.shown()).map(|i| self.first + i)
+    }
+}
+
+impl Chart<Msg> for ColumnsChart<'_> {
     type State = ();
 
+    fn update(
+        &self,
+        _: &mut (),
+        event: &iced::widget::canvas::Event,
+        bounds: iced::Rectangle,
+        cursor: iced::mouse::Cursor,
+    ) -> (iced::event::Status, Option<Msg>) {
+        use iced::mouse::{Button, Event as Mouse};
+        use iced::widget::canvas::Event;
+        match event {
+            Event::Mouse(Mouse::CursorMoved { .. } | Mouse::CursorLeft) => {
+                let row = self.row_at(bounds, cursor);
+                // Only a change is worth a message (and a redraw).
+                let message = (row != self.hovered).then_some(Msg::Hovered(self.panel, row));
+                (iced::event::Status::Ignored, message)
+            }
+            Event::Mouse(Mouse::ButtonPressed(Button::Left)) => {
+                let Some(row) = self.row_at(bounds, cursor) else {
+                    return (iced::event::Status::Ignored, None);
+                };
+                match self.columns.offsets(row) {
+                    Some((from, to)) => (
+                        iced::event::Status::Captured,
+                        Some(Msg::ShowTransactions { from, to, label: self.columns.long_label(row) }),
+                    ),
+                    None => (iced::event::Status::Ignored, None),
+                }
+            }
+            _ => (iced::event::Status::Ignored, None),
+        }
+    }
+
+    fn mouse_interaction(&self, _: &(), bounds: iced::Rectangle, cursor: iced::mouse::Cursor) -> iced::mouse::Interaction {
+        match self.row_at(bounds, cursor).and_then(|r| self.columns.offsets(r)) {
+            Some(_) => iced::mouse::Interaction::Pointer,
+            None => iced::mouse::Interaction::Idle,
+        }
+    }
+
     fn build_chart<DB: DrawingBackend>(&self, _: &(), mut builder: ChartBuilder<DB>) {
-        let n = self.starts.len() as i32;
-        let max = self.values.iter().flatten().fold(0.0, |m: f64, v| m.max(*v)).max(f64::MIN_POSITIVE);
-        let lo = self.values.iter().flatten().fold(0.0, |m: f64, v| m.min(*v));
+        let c = self.columns;
+        let first = self.first;
+        let values = &c.values[first..];
+        let n = values.len() as i32;
+        let max = values.iter().flatten().fold(0.0, |m: f64, v| m.max(*v)).max(f64::MIN_POSITIVE);
+        let lo = values.iter().flatten().fold(0.0, |m: f64, v| m.min(*v));
         let Ok(mut chart) = builder
-            .margin(8)
-            .x_label_area_size(36)
-            .y_label_area_size(64)
+            .margin(CHART_MARGIN as u32)
+            .x_label_area_size(X_LABELS as u32)
+            .y_label_area_size(Y_LABELS as u32)
             .build_cartesian_2d((0..n).into_segmented(), lo * 1.1..max * 1.1)
         else {
             return;
@@ -1118,13 +1338,13 @@ impl Chart<Msg> for &Columns {
         // `sans-serif` is iced's default family, the font the rest of the window uses.
         let label_style = ("sans-serif", 12).into_font().color(&CHART_TEXT);
         // Few labels read calmer; week numbers are short, so a few more fit.
-        let labels = if self.weeks() { 12 } else { 8 };
+        let labels = if c.weeks() { 12 } else { 8 };
         let _ = chart
             .configure_mesh()
             .disable_x_mesh()
             .x_labels(labels)
             .x_label_formatter(&|v| match v {
-                SegmentValue::CenterOf(x) | SegmentValue::Exact(x) => self.label(*x as usize),
+                SegmentValue::CenterOf(x) | SegmentValue::Exact(x) => c.label(first + *x as usize, first),
                 SegmentValue::Last => String::new(),
             })
             // No axis name: the panel's title already says what is counted,
@@ -1132,7 +1352,7 @@ impl Chart<Msg> for &Columns {
             .y_labels(5)
             .y_label_formatter(&|v| short_number(*v))
             .label_style(label_style.clone())
-            .axis_desc_style(label_style)
+            .axis_desc_style(label_style.clone())
             // No minor lines. Not `max_light_lines(0)`: on a segmented
             // (whole-number) axis plotters then loops until it overflows.
             .light_line_style(TRANSPARENT)
@@ -1140,13 +1360,36 @@ impl Chart<Msg> for &Columns {
             .axis_style(AXIS.stroke_width(1))
             .draw();
         let bar = RGBColor(46, 107, 199);
+        let picked = RGBColor(22, 62, 128);
+        let hovered = self.hovered.and_then(|h| h.checked_sub(first)).filter(|h| (*h as i32) < n);
         let gap = if n > 120 { 0 } else { 2 };
-        let _ = chart.draw_series(self.values.iter().enumerate().filter_map(|(i, v)| {
+        let _ = chart.draw_series(values.iter().enumerate().filter_map(|(i, v)| {
             let x = i as i32;
-            let mut r = Rectangle::new([(SegmentValue::Exact(x), 0.0), (SegmentValue::Exact(x + 1), (*v)?)], bar.mix(0.8).filled());
+            let color = if hovered == Some(i) { picked.filled() } else { bar.mix(0.8).filled() };
+            let mut r = Rectangle::new([(SegmentValue::Exact(x), 0.0), (SegmentValue::Exact(x + 1), (*v)?)], color);
             r.set_margin(0, 0, gap, gap);
             Some(r)
         }));
+        // The hovered row's day or week and value, along the top, kept
+        // inside the chart near either end.
+        if let Some(h) = hovered {
+            let value = values[h].map(grouped).unwrap_or_else(|| "–".into());
+            let said = format!("{}: {value}", c.long_label(first + h));
+            let side = if (h as i32) < n / 4 {
+                HPos::Left
+            } else if (h as i32) > n * 3 / 4 {
+                HPos::Right
+            } else {
+                HPos::Center
+            };
+            let style = ("sans-serif", 13).into_font().color(&BLACK).pos(Pos::new(side, VPos::Top));
+            let at = match side {
+                HPos::Center => SegmentValue::CenterOf(h as i32),
+                HPos::Left => SegmentValue::Exact(h as i32),
+                HPos::Right => SegmentValue::Exact(h as i32 + 1),
+            };
+            let _ = chart.draw_series(std::iter::once(Text::new(said, (at, max * 1.1), style)));
+        }
     }
 }
 
@@ -1485,6 +1728,88 @@ mod tests {
         assert!(form("", "", "", "").parse().is_err());
         assert!(form("2", "0", "", "").parse().is_err());
         assert!(form("2", "", "lots", "").parse().is_err());
+    }
+
+    #[test]
+    fn hover_finds_the_column_under_the_mouse() {
+        // 400 wide: the plot runs from 72 to 392, 4 rows and an empty slot,
+        // so each slot is 64 pixels.
+        let size = (400.0, 300.0);
+        assert_eq!(column_at((72.0, 100.0), size, 4), Some(0));
+        assert_eq!(column_at((72.0 + 64.0 * 3.5, 100.0), size, 4), Some(3));
+        // The empty slot on the right, the y labels, the x labels.
+        assert_eq!(column_at((72.0 + 64.0 * 4.5, 100.0), size, 4), None);
+        assert_eq!(column_at((40.0, 100.0), size, 4), None);
+        assert_eq!(column_at((100.0, 290.0), size, 4), None);
+        assert_eq!(column_at((100.0, 100.0), size, 0), None);
+        assert_eq!(column_at((100.0, 100.0), (50.0, 300.0), 4), None);
+    }
+
+    #[test]
+    fn exact_values_are_grouped() {
+        assert_eq!(grouped(1_234_567.0), "1,234,567");
+        assert_eq!(grouped(-1_234.5), "-1,234.5");
+        assert_eq!(grouped(999.0), "999");
+        assert_eq!(grouped(0.125), "0.125");
+    }
+
+    fn days(n: i64, offsets: bool) -> Columns {
+        Columns {
+            starts: (0..n).map(|d| d * 86_400).collect(),
+            values: (0..n).map(|d| Some(d as f64)).collect(),
+            step: 86_400,
+            offsets: offsets.then(|| (0..n).map(|d| (d > 0).then_some((d * 10, d * 10 + 9))).collect()),
+        }
+    }
+
+    #[test]
+    fn a_span_shows_the_newest_rows() {
+        let c = days(400, false);
+        assert_eq!(c.first_shown(Span::All), 0);
+        assert_eq!(c.first_shown(Span::Month), 370);
+        assert_eq!(c.first_shown(Span::Quarter), 309);
+        assert_eq!(c.first_shown(Span::Year), 35);
+        // Fewer rows than the span: all of them.
+        assert_eq!(days(10, false).first_shown(Span::Month), 0);
+        assert_eq!(days(0, false).first_shown(Span::Month), 0);
+    }
+
+    #[test]
+    fn a_click_needs_the_rows_offsets() {
+        assert_eq!(days(3, false).offsets(1), None);
+        let c = days(3, true);
+        assert_eq!(c.offsets(1), Some((10, 19)));
+        // A quiet day has none, and there is no row 3.
+        assert_eq!(c.offsets(0), None);
+        assert_eq!(c.offsets(3), None);
+        let chart = ColumnsChart { columns: &c, panel: 0, first: 1, hovered: None };
+        assert_eq!(chart.shown(), 2);
+    }
+
+    #[test]
+    fn offset_columns_are_not_drawn() {
+        let col = |name: &str, values| Column { name: name.into(), format: Format::Auto, values };
+        let frame = Frame {
+            columns: vec![
+                col("period_start", Values::Time(vec![Some(0), Some(86_400_000_000)])),
+                col("first_offset", Values::Number(vec![Some(3.0), None])),
+                col("agreements", Values::Number(vec![Some(5.0), Some(0.0)])),
+                col("last_offset", Values::Number(vec![Some(9.0), None])),
+            ],
+        };
+        let panel = analytics_reader::manifest::Panel {
+            title: "t".into(),
+            kind: PanelKind::Bar,
+            sql: String::new(),
+            time_column: None,
+            formats: Vec::new(),
+        };
+        let p = PanelData { panel, frame: Ok(frame), millis: 0, truncated: false, bucket_seconds: Some(86_400) };
+        let c = Columns::new(&p).unwrap();
+        assert_eq!(c.values, [Some(5.0), Some(0.0)]);
+        assert_eq!(c.offsets(0), Some((3, 9)));
+        assert_eq!(c.offsets(1), None);
+        assert_eq!(c.long_label(0), "1970-01-01");
     }
 
     #[test]

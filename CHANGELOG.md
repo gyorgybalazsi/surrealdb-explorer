@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Dashboard columns charts: hover a column for its exact value, pick how far
+  back they go (All, Year, 90 days, 30 days), and, when the panel returns
+  `first_offset` and `last_offset`, click a column to see its transactions in
+  the Graph tab's Canton view. Number cards group thousands.
 - A memory watch: the app samples its own memory use every few seconds,
   logs it every five minutes, and warns in the log and the window when it
   grows by 1 GB within a minute or passes 2 GB. Above half the computer's

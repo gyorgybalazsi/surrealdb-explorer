@@ -400,6 +400,9 @@ pub struct App {
     pub(super) canton_offsets: Option<(i64, i64)>,
     /// Records of the loaded window left out because of `max_result_records`.
     pub(super) canton_left_out: usize,
+    /// What to say once the next page of transactions is shown, in place
+    /// of "Reloaded" (a dashboard column's day or week).
+    page_notice: Option<String>,
     /// The "latest n transactions" box as typed; also the step for Older / Newer.
     pub(super) canton_count: String,
     /// The "columns side by side" box as typed.
@@ -530,6 +533,7 @@ impl App {
             canton_window: graph::CantonWindow::Latest(config_canton_transactions),
             canton_offsets: None,
             canton_left_out: 0,
+            page_notice: None,
             canton_count: config_canton_transactions.to_string(),
             canton_columns: config_canton_columns.to_string(),
             canton_scroll: 0.0,
@@ -1010,7 +1014,10 @@ impl App {
             Message::CantonScroll(delta) => self.scroll_canton(self.canton_scroll + delta),
             Message::CantonScrollTo(to) => self.scroll_canton(to),
             // The window changes when its transactions arrive (see `show_loaded`).
-            Message::CantonPage(window) => return self.start_load(LoadPurpose::Page(window), LoadWhat::Records),
+            Message::CantonPage(window) => {
+                self.page_notice = None;
+                return self.start_load(LoadPurpose::Page(window), LoadWhat::Records);
+            }
             Message::FitView => self.fit_view(),
             Message::CanvasResized(size) => {
                 self.canvas_size = size;
@@ -1116,6 +1123,9 @@ impl App {
             #[cfg(feature = "dashboard")]
             Message::Dashboard(m) => {
                 use crate::gui::dashboard::Msg;
+                if let Msg::ShowTransactions { from, to, label } = m {
+                    return self.show_transactions(from, to, &label);
+                }
                 let save = matches!(m, Msg::LocationSubmitted | Msg::Select(_) | Msg::SaveSettings);
                 let task = self.dashboard.update(m).map(Message::Dashboard);
                 // Remember where the tables are, which one was shown, and
@@ -1344,6 +1354,40 @@ impl App {
         )
     }
 
+    /// A dashboard column was clicked: opens the Graph tab in the Canton
+    /// view on the transactions at ledger offsets `from` to `to` (`label`
+    /// names the day or week). A busy day holds more than a graph can show,
+    /// so then it shows the last of them, as many as "Latest" says; the
+    /// paging buttons go to the others.
+    #[cfg(feature = "dashboard")]
+    fn show_transactions(&mut self, from: i64, to: i64, label: &str) -> Task<Message> {
+        self.dashboard_open = false;
+        if !self.canton() {
+            self.config.graph.visualization = Visualization::Canton;
+            if let Err(e) = self.config.save_to(&self.files.config) {
+                warn!(error = %e, "could not save the setting");
+            }
+            self.canton_offsets = None;
+            self.apply_visualization();
+        }
+        let n = self.canton_n();
+        // Every transaction has its own offset, so a range no wider than
+        // `n` offsets holds at most `n` transactions.
+        let window = if to.saturating_sub(from) < n as i64 {
+            graph::CantonWindow::Range(from, to)
+        } else {
+            graph::CantonWindow::Before(to.saturating_add(1), n)
+        };
+        info!(from, to, label, "showing a dashboard column's transactions");
+        let task = self.start_load(LoadPurpose::Page(window), LoadWhat::Records);
+        self.notice = Some(format!("Loading the transactions of {label}…"));
+        self.page_notice = Some(match window {
+            graph::CantonWindow::Range(..) => format!("The transactions of {label}"),
+            _ => format!("The last {n} transactions of {label}; ◀ older shows the rest"),
+        });
+        task
+    }
+
     /// Reads `what` from the database (in the Canton view, transactions in
     /// `window`). It owns what it needs, so it can run on another thread.
     fn fetch(
@@ -1430,7 +1474,8 @@ impl App {
                 }
                 self.canton_window = window;
                 self.note_window(offsets, left_out);
-                self.show_records(data, marker, notice_of(purpose));
+                let said = self.page_notice.take();
+                self.show_records(data, marker, said.as_deref().or(notice_of(purpose)));
                 self.relayout_canton();
             }
             (LoadPurpose::Reload { notice, fit }, Loaded::Records { data, offsets, left_out, marker }) => {
