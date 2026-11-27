@@ -51,10 +51,6 @@ canton-analytics (from canton-event-graph-syncer 0.2.0) writes.
 ### Removed
 - The unused `csv` dependency.
 
-### Fixed
-- The Dashboard's x axis could make hundreds of thousands of ticks (one row
-  on a day- or week-wide axis, or zooming out) and run out of memory (#44).
-
 ## [0.1.0] - 2026-11-23
 
 The first release of SurrealDB Explorer: a desktop app (Rust, iced) for exploring
