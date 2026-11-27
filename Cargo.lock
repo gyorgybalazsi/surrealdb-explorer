@@ -1478,8 +1478,8 @@ dependencies = [
 
 [[package]]
 name = "canton-analytics-reader"
-version = "0.1.0"
-source = "git+https://github.com/gyorgybalazsi/canton-event-graph-syncer?branch=main#e7c5ba0edc8f278e43cd8af8c73782537594a0db"
+version = "0.2.0"
+source = "git+https://github.com/gyorgybalazsi/canton-event-graph-syncer?tag=v0.2.0#f9fc322bdeb247c65228095a848c0307756f0773"
 dependencies = [
  "anyhow",
  "deltalake",
@@ -7603,7 +7603,7 @@ dependencies = [
 
 [[package]]
 name = "surrealdb-explorer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arboard",
  "axum",
