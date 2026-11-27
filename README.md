@@ -7,6 +7,22 @@ It also has a dedicated view for **Canton ledger event graphs**, and a built-in
 **MCP server** that lets Claude Code (or any MCP client) query the database and
 draw in the app's window.
 
+**For Canton, the explorer is meant to run in tandem with
+[canton-event-graph-syncer](https://github.com/gyorgybalazsi/canton-event-graph-syncer).**
+The syncer streams a ledger's events from the Ledger API into a SurrealDB
+server; the explorer connects to the same server as another client and draws
+the event graph, redrawing as new transactions arrive. The explorer never
+talks to the ledger itself. See
+[Canton: with the syncer](#canton-with-the-syncer). To see the whole chain
+run with one command, try
+[canton-event-graph-demo](https://github.com/gyorgybalazsi/canton-event-graph-demo).
+
+```
+Canton ledger ──▶ syncer ──▶ SurrealDB server ──▶ explorer (graph, Canton view)
+                                   │
+                                   └──▶ canton-analytics ──▶ Delta tables ──▶ explorer (Dashboard)
+```
+
 ![Canton event graph view](docs/screenshots/canton-cols3-top.png)
 
 ## Features
@@ -14,8 +30,17 @@ draw in the app's window.
 - **Graph view.** Records are nodes and relations are edges, in a force-directed
   layout. You can hover, select, hide, focus on a record and see its
   neighbourhood. Large databases open on a table overview first.
+- **Record menu.** Right-click a record to focus or hide it, show it in the
+  table, or copy its id or JSON. In the Canton view it also shows an event's
+  transaction, a contract's archiving event or its whole lifecycle (create,
+  exercises, fetches and archive), and filters to the record's template or
+  one of its parties.
+- **Pictures of the graph.** Right-click the canvas background to copy the
+  whole graph as an image (⌘⇧C, or Ctrl+Shift+C) or save it as a PNG in
+  Downloads.
 - **Table view and query panel.** Run SurrealQL and see each query's result as
-  its own graph or as rows. The query panel only reads: see
+  its own graph or as rows, and copy the result as JSON or as a
+  tab-separated table. The query panel only reads: see
   [Read-only queries](#read-only-queries).
 - **Canton event graph view.** This view is for a SurrealDB copy of a Canton
   ledger: one column per transaction, with the event tree indented under it. It
@@ -23,17 +48,23 @@ draw in the app's window.
   parties in their own column. You can filter by node kind, party (each party's
   projection), template, active or archived, offset range and text search. The
   view can page through the latest *n* transactions and follow new ones as they
-  arrive.
+  arrive. It is built to read the tables that
+  [canton-event-graph-syncer](https://github.com/gyorgybalazsi/canton-event-graph-syncer)
+  writes.
 - **Connects to a SurrealDB server** (`ws://…`) as a root, namespace or
-  database user, as one client among others.
+  database user, as one client among others (for example next to the
+  syncer, which keeps writing).
 - **Auto refresh.** The graph redraws when another program changes the database.
 - **MCP server for Claude Code.** It lets Claude describe the schema, run
   queries, draw results in the window, and read, set or scroll to the current
   selection. Queries that would change data run only after you click Allow in
   the window; the others run as the read-only viewer user, if one is set.
 - **Analytics dashboard** (optional, see [Dashboard](#dashboard)). Charts
-  and tables over the Delta Lake tables that the canton-analytics daemon
-  writes, one dashboard per plugin.
+  and tables over the Delta Lake tables that the syncer repository's
+  canton-analytics daemon writes, queried with DataFusion, one dashboard per
+  plugin.
+- **Memory watch.** The app warns when its memory grows fast or gets large,
+  and stops before the computer runs out (see `[memory]` below).
 - **Sample data.** Settings → Data → *Load sample data* or *Load Canton sample*.
   There is a larger Canton demo in [`demo/canton_demo.surql`](demo/canton_demo.surql).
 
@@ -65,6 +96,36 @@ To build a macOS `.app` with the icon, use
 cargo bundle --release
 ```
 
+## Canton: with the syncer
+
+The Canton view has no ledger connection of its own. It reads a SurrealDB copy
+of the ledger, and
+[canton-event-graph-syncer](https://github.com/gyorgybalazsi/canton-event-graph-syncer)
+is the program that makes and keeps that copy. Run the two side by side:
+
+1. Start a SurrealDB 4 server and set up the syncer's namespace, database and
+   user, as in the
+   [syncer README](https://github.com/gyorgybalazsi/canton-event-graph-syncer/blob/main/syncer/README.md#surrealdb)
+   (by default namespace `canton`, database `event_graph`).
+2. Start the syncer (`syncer sync`). It loads the active contracts, then
+   follows the ledger's updates and writes each transaction as it comes.
+3. Point the explorer at the same server, namespace and database in
+   **Settings** (or `[database]` in `config.toml`), and choose the Canton
+   visualization (`visualization = "canton"` under `[graph]`). A
+   database-level user is enough; a `VIEWER` user for the
+   [read-only queries](#read-only-queries) is a good idea, since the syncer
+   is the only program that should write.
+4. Leave auto refresh on: new transactions appear as the syncer writes them,
+   and the view can follow the newest ones.
+
+The syncer repository also has the canton-analytics daemon, which turns the
+same SurrealDB data into Delta Lake tables for the [Dashboard](#dashboard).
+
+[canton-event-graph-demo](https://github.com/gyorgybalazsi/canton-event-graph-demo)
+does all of this with one command (`just demo`): it starts a Canton sandbox,
+SurrealDB, the syncer and the explorer, then buys tickets on the ledger so you
+can watch the transactions arrive. Its analytics demos use the Dashboard.
+
 ## Configuration
 
 `config.toml` has these sections:
@@ -86,7 +147,9 @@ file. `config.toml` and `logs/` are in `.gitignore`.
 
 The [canton-analytics daemon](https://github.com/gyorgybalazsi/canton-event-graph-syncer/tree/main/analytics)
 runs WebAssembly analytics plugins over the syncer's SurrealDB and writes
-Delta Lake tables. The Dashboard reads them; it never writes, and the
+Delta Lake tables. The Dashboard reads them with DataFusion (through the
+syncer repository's `canton-analytics-reader` crate). It never writes table
+data, only the daemon's lag settings, which it saves next to the tables. The
 daemon doesn't need the explorer to be open.
 
 It is an opt-in feature, because it pulls in DataFusion:
@@ -99,11 +162,16 @@ cargo run --release --features dashboard-s3         # …or in S3 (also -azure, 
 Click **Dashboard** next to Settings. Type where the tables are (the
 daemon's `--tables`: a folder, or `s3://`, `az://` or `gs://`) and press
 Enter, then pick a table. Each table shows its plugin's panels: number
-cards, time series, bar charts and sortable tables. A table without panels
+cards, time series, bar charts and sortable tables, with each panel's query
+time. A plugin whose panels group by period gets a **Day / Week** switch. A table without panels
 gets some made from its columns. A line under the header shows the daemon's
 heartbeat: up to date, catching up, stopped, not heard from, or failing.
 The dashboard checks for new commits every two seconds while it is open;
-**Refresh now** looks again at once, and also finds new tables.
+**Refresh now** looks again at once, and also finds new tables. With an empty
+`database.server` the app opens on the Dashboard without a database.
+
+The syncer's `just analytics-dashboard` recipe builds the explorer with the
+dashboard and opens it on a tables folder.
 
 Cloud credentials come from the usual environment variables
 (`AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AZURE_STORAGE_ACCOUNT_NAME`,
@@ -122,6 +190,8 @@ storage_options = ["aws_endpoint=http://localhost:9000", "aws_allow_http=true"]
 **Run** (⌘↩). The result shows under the query: rows of fields as a table (long
 Canton party ids shortened; hover a value to see it whole), paths as paths, and
 anything else as JSON. Records in the result are also drawn in the graph above.
+**Copy JSON** copies the whole result, and **Copy table** copies a table result
+as tab-separated text that pastes into a spreadsheet.
 The editor grows to fit the query, and dragging the line between the graph and
 the panel resizes the panel.
 
@@ -187,7 +257,11 @@ The Canton view reads the node tables `transaction`, `created`, `exercised` and
 `party`. It also reads `fetched`, `reassignment` and `topology_transaction` when
 they are present. The relation tables are `action`, `consequence`, `target`,
 `consumes` and `requested`. See the top of [`src/canton.rs`](src/canton.rs)
-for the fields it uses. Any indexer that writes this shape will work.
+for the fields it uses.
+[canton-event-graph-syncer](https://github.com/gyorgybalazsi/canton-event-graph-syncer)
+writes this shape (its
+[data model](https://github.com/gyorgybalazsi/canton-event-graph-syncer/blob/main/syncer/README.md#data-model)
+describes the tables); any other indexer that writes it will work too.
 
 ## Tests
 
@@ -195,8 +269,20 @@ for the fields it uses. Any indexer that writes this shape will work.
 cargo test
 ```
 
-The tests start temporary in-memory SurrealDB servers, so they need the
-`surreal` program, on your `PATH` or in `~/.surrealdb`.
+The integration tests start temporary in-memory SurrealDB servers, so they need
+the `surreal` program (4.x), on your `PATH` or in `~/.surrealdb`. They include
+UI tests written with [`iced_test`](https://docs.rs/iced_test): they boot the
+app against a test database and click through the window headless.
+
+The Dashboard is a feature, so its unit tests run separately:
+
+```sh
+cargo test --features dashboard --lib
+```
+
+GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) builds
+and tests every pull request, once without and once with the `dashboard`
+feature, and reports clippy findings.
 
 ## License
 
