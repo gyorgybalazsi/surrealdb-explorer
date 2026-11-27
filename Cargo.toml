@@ -1,6 +1,6 @@
 [package]
 name = "surrealdb-explorer"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Desktop graph explorer for SurrealDB, with a Canton event graph view and an MCP server for Claude Code"
 license = "MIT OR Apache-2.0"
@@ -9,7 +9,7 @@ repository = "https://github.com/gyorgybalazsi/surrealdb-explorer"
 [dependencies]
 # The analytics dashboard (the `dashboard` feature). The reader lives with
 # the canton-analytics daemon in the syncer repo.
-canton-analytics-reader = { git = "https://github.com/gyorgybalazsi/canton-event-graph-syncer", branch = "main", optional = true }
+canton-analytics-reader = { git = "https://github.com/gyorgybalazsi/canton-event-graph-syncer", tag = "v0.2.0", optional = true }
 iced_plot = { version = "0.5", optional = true }
 iced_table2 = { version = "0.14", optional = true }
 plotters = { version = "0.3", default-features = false, optional = true }
